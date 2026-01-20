@@ -6,6 +6,7 @@ import HomeHeroOffers from "./modules/routes/homeHeroOffers";
 import SpotLight from "./modules/routes/spotLight"
 import Restaurants from "./modules/routes/restaurants";
 import Stores from "./modules/routes/stores";
+import corporatesRouter from "./modules/routes/corporates";
 
 const app = express();
 
@@ -29,6 +30,7 @@ app.use("/api/restaurants", Restaurants);
 app.use("/api/stores", Stores);
 
 app.use("api/auth", authRoutes);
+app.use("/api/corporates", corporatesRouter);
 
 
 export default app;
