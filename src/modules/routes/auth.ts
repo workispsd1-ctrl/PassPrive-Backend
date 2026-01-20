@@ -10,6 +10,14 @@ type CreateUserBody = {
   full_name?: string;
   phone?: string;
   role: string;
+
+  membership?: string | null;
+  membership_tier?: string | null;
+  membership_started?: string | null;
+  membership_expiry?: string | null;
+
+  corporate_code?: string | null;
+  corporate_code_status?: string | null;
 };
 
 type BulkBody = {
@@ -27,7 +35,6 @@ async function createOneUser(input: CreateUserBody) {
     return { ok: false, error: "Email, password and role are required" };
   }
 
-  // 1) Create auth user via signUp (anon)
   const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
     email,
     password,
@@ -36,29 +43,22 @@ async function createOneUser(input: CreateUserBody) {
     },
   });
 
-  if (signUpError) {
-    return { ok: false, error: signUpError.message };
-  }
+  if (signUpError) return { ok: false, error: signUpError.message };
 
   const userId = signUpData.user?.id;
-  if (!userId) {
-    return { ok: false, error: "User not returned from signUp" };
-  }
+  if (!userId) return { ok: false, error: "User not returned from signUp" };
 
-  // Email confirmation OFF -> session should exist, but still guard
   const accessToken = signUpData.session?.access_token;
   if (!accessToken) {
     return {
       ok: false,
-      error:
-        "No session returned from signUp. If email confirmation is OFF, this is unexpected.",
+      error: "No session returned from signUp. If email confirmation is OFF, this is unexpected.",
     };
   }
 
-  // 2) Insert into public.users as that newly-created user (RLS-safe)
   const supabaseAuthed = createClient(
     process.env.SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_KEY!, // ⚠️ should be ANON KEY (rename env later)
+    process.env.SUPABASE_SERVICE_KEY!,
     {
       global: { headers: { Authorization: `Bearer ${accessToken}` } },
       auth: { persistSession: false, autoRefreshToken: false },
@@ -73,9 +73,20 @@ async function createOneUser(input: CreateUserBody) {
       full_name: full_name || null,
       phone: phone || null,
       role,
+
       profile_image: null,
       gender: null,
       dob: null,
+
+      // ✅ membership details
+      membership: input.membership ?? null,
+      membership_tier: input.membership_tier ?? "none",
+      membership_started: input.membership_started ?? null,
+      membership_expiry: input.membership_expiry ?? null,
+
+      // ✅ corporate details
+      corporate_code: input.corporate_code ?? null,
+      corporate_code_status: input.corporate_code_status ?? "pending",
     })
     .select("*")
     .single();
@@ -91,26 +102,16 @@ async function createOneUser(input: CreateUserBody) {
   return { ok: true, user };
 }
 
-/**
- * POST /api/auth/create-user
- * - Supports single {email,password,role,...}
- * - Supports bulk { users: [...] }
- */
 router.post("/create-user", async (req: Request, res: Response) => {
   try {
-    // ✅ BULK MODE
     if (isBulk(req.body)) {
       const users = req.body.users || [];
-      if (!users.length) {
-        return res.status(400).json({ error: "users[] is required" });
-      }
+      if (!users.length) return res.status(400).json({ error: "users[] is required" });
 
-      // Optional safety limit
       if (users.length > 200) {
         return res.status(400).json({ error: "Too many users in one request (max 200)" });
       }
 
-      // RunC: do sequential to avoid rate limits (safe + predictable)
       const created: any[] = [];
       const failed: any[] = [];
 
@@ -128,11 +129,9 @@ router.post("/create-user", async (req: Request, res: Response) => {
       });
     }
 
-    // ✅ SINGLE MODE
     const result = await createOneUser(req.body as CreateUserBody);
-    if (!result.ok) {
-      return res.status(400).json(result);
-    }
+    if (!result.ok) return res.status(400).json(result);
+
     return res.status(201).json({ user: result.user });
   } catch (err: any) {
     console.error(err);
