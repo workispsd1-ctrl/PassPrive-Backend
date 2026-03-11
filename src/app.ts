@@ -29,7 +29,6 @@ app.use("/api/restaurants", Restaurants);
 
 app.use("/api/stores", Stores);
 
-app.use("api/auth", authRoutes);
 app.use("/api/corporates", corporatesRouter);
 
 
