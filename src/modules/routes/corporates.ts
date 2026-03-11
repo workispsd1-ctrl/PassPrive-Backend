@@ -214,6 +214,21 @@ const AddEmployeesSchema = z.object({
   employees: z.array(EmployeeJsonSchema).min(1),
 });
 
+const UpdateCorporateSchema = z.object({
+  name: z.string().trim().min(1).optional(),
+  phone: z.string().trim().nullable().optional(),
+  email: z.string().trim().email().nullable().optional(),
+  city: z.string().trim().nullable().optional(),
+  area: z.string().trim().nullable().optional(),
+  full_address: z.string().trim().nullable().optional(),
+  is_active: z.boolean().optional(),
+  plan: z.string().trim().nullable().optional(),
+  seats: z.number().int().min(0).optional(),
+  subscription_start: z.string().nullable().optional(),
+  subscription_expiry: z.string().nullable().optional(),
+  subscription_status: z.enum(['active', 'inactive', 'expired']).optional(),
+});
+
 const CorporateIdParamSchema = z.object({
   id: z.string().uuid(),
 });
@@ -221,6 +236,90 @@ const CorporateIdParamSchema = z.object({
 const RemoveEmployeeParamSchema = z.object({
   id: z.string().uuid(),
   userId: z.string().uuid(),
+});
+
+/* ---------------------------------------------
+   UPDATE Corporate by ID
+--------------------------------------------- */
+router.put("/:id", async (req, res) => {
+  const p = CorporateIdParamSchema.safeParse(req.params);
+  if (!p.success) {
+    return res.status(400).json({ error: "Invalid corporate id" });
+  }
+
+  const parsed = UpdateCorporateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({
+      error: "Invalid body",
+      details: parsed.error.flatten(),
+    });
+  }
+
+  const admin = await requireAdmin(req, res);
+  if (!admin) return;
+
+  const { sb } = admin;
+  const corporateId = p.data.id;
+  const body = parsed.data;
+
+  try {
+    // Build update object with only provided fields
+    const updateData: any = {};
+    
+    if (body.name !== undefined) updateData.name = body.name;
+    if (body.phone !== undefined) updateData.phone = body.phone;
+    if (body.email !== undefined) updateData.email = body.email;
+    if (body.city !== undefined) updateData.city = body.city;
+    if (body.area !== undefined) updateData.area = body.area;
+    if (body.full_address !== undefined) updateData.full_address = body.full_address;
+    if (body.is_active !== undefined) updateData.is_active = body.is_active;
+    if (body.plan !== undefined) updateData.plan = body.plan;
+    if (body.seats !== undefined) updateData.seats = body.seats;
+    if (body.subscription_start !== undefined) {
+      updateData.subscription_start = toDateOrNull(body.subscription_start);
+    }
+    if (body.subscription_expiry !== undefined) {
+      updateData.subscription_expiry = toDateOrNull(body.subscription_expiry);
+    }
+    if (body.subscription_status !== undefined) {
+      updateData.subscription_status = body.subscription_status;
+    }
+
+    // Add updated timestamp
+    updateData.updated_at = new Date().toISOString();
+
+    // Perform update
+    const { data: updatedCorporate, error } = await sb
+      .from("corporate")
+      .update(updateData)
+      .eq("id", corporateId)
+      .select("*")
+      .single();
+
+    if (error) {
+      console.error("Database error:", error);
+      return res.status(500).json({
+        error: "Failed to update corporate",
+        details: error.message,
+      });
+    }
+
+    if (!updatedCorporate) {
+      return res.status(404).json({ error: "Corporate not found" });
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Corporate updated successfully",
+      corporate: updatedCorporate,
+    });
+  } catch (err: any) {
+    console.error("Error updating corporate:", err);
+    return res.status(500).json({
+      error: "Internal server error",
+      details: err?.message || "Server error",
+    });
+  }
 });
 
 // ✅ POST /api/corporates/:id/employees  -> append into corporate.employees
