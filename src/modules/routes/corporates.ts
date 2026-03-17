@@ -1,4 +1,3 @@
-// src/modules/routes/corporates.ts
 import { Router } from "express";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
@@ -12,206 +11,57 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_KEY in env");
 }
 
-function getBearerToken(req: any) {
+/* ---------------------------------------------
+   HELPERS & AUTH
+--------------------------------------------- */
+function supabaseAuthed(req: any) {
   const h = req.headers.authorization || "";
   const [type, token] = h.split(" ");
   if (type !== "Bearer" || !token) return null;
-  return token;
-}
 
-function supabaseAuthed(req: any) {
-  const token = getBearerToken(req);
-  if (!token) return null;
-
-  // Using service key + caller's Bearer token to evaluate RLS/Policies for reads/writes
   return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
     global: { headers: { Authorization: `Bearer ${token}` } },
   });
 }
 
-async function requireAuth(req: any, res: any) {
+async function requireAdmin(req: any, res: any) {
   const sb = supabaseAuthed(req);
-  if (!sb) {
-    res.status(401).json({ error: "Missing Authorization token" });
-    return null;
-  }
+  if (!sb) return res.status(401).json({ error: "Missing token" });
 
-  const { data: userData, error: userErr } = await sb.auth.getUser();
-  if (userErr || !userData?.user) {
-    res.status(401).json({ error: "Invalid session" });
-    return null;
-  }
+  const { data: { user }, error: userErr } = await sb.auth.getUser();
+  if (userErr || !user) return res.status(401).json({ error: "Invalid session" });
 
-  return { sb, user: userData.user };
-}
-
-async function getCallerRole(sb: any, callerId: string) {
-  const { data, error } = await sb
+  const { data: row, error: roleErr } = await sb
     .from("users")
-    .select("id,role")
-    .eq("id", callerId)
+    .select("role")
+    .eq("id", user.id)
     .maybeSingle();
 
-  if (error) return { error };
-  return { row: data as null | { id: string; role: string } };
-}
-
-function isAdminRole(role?: string | null) {
-  return role === "admin" || role === "superadmin";
-}
-
-async function requireAdmin(req: any, res: any) {
-  const auth = await requireAuth(req, res);
-  if (!auth) return null;
-
-  const callerId = auth.user.id;
-
-  const { row, error } = await getCallerRole(auth.sb, callerId);
-  if (error) {
-    res.status(500).json({ error: error.message });
-    return null;
+  if (roleErr || !row?.role || !["admin", "superadmin"].includes(row.role)) {
+    return res.status(403).json({ error: "Access denied" });
   }
 
-  if (!row?.role || !isAdminRole(row.role)) {
-    res.status(403).json({ error: "Access denied" });
-    return null;
-  }
-
-  return { sb: auth.sb, callerId, role: row.role };
+  return { sb, callerId: user.id };
 }
 
 /* ---------------------------------------------
-   CREATE Corporate (same as you had)
+   SCHEMAS
 --------------------------------------------- */
-
 const CreateCorporateSchema = z.object({
   name: z.string().trim().min(1),
-
   phone: z.string().trim().nullable().optional(),
   email: z.string().trim().email().nullable().optional(),
-
   city: z.string().trim().nullable().optional(),
   area: z.string().trim().nullable().optional(),
   full_address: z.string().trim().nullable().optional(),
-
   plan: z.string().trim().nullable().optional(),
   subscription_id: z.string().uuid().nullable().optional(),
-
   subscription_start: z.string().nullable().optional(),
   subscription_expiry: z.string().nullable().optional(),
-
   seats: z.number().int().min(0).optional(),
-
   owner_user_id: z.string().uuid(),
   owner_email: z.string().trim().email(),
-});
-
-function toDateOrNull(s?: string | null) {
-  if (!s) return null;
-  return s; // "YYYY-MM-DD"
-}
-
-router.post("/", async (req, res) => {
-  const parsed = CreateCorporateSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({
-      error: "Invalid body",
-      details: parsed.error.flatten(),
-    });
-  }
-
-  const admin = await requireAdmin(req, res);
-  if (!admin) return;
-
-  const { sb } = admin;
-  const body = parsed.data;
-
-  try {
-    // Resolve plan text
-    let planText: string | null = body.plan ?? null;
-
-    if (!planText && body.subscription_id) {
-      const { data: planRow, error: planErr } = await sb
-        .from("subscription")
-        .select("id,plan_name")
-        .eq("id", body.subscription_id)
-        .maybeSingle();
-
-      if (planErr) return res.status(500).json({ error: planErr.message });
-      if (!planRow) return res.status(400).json({ error: "Invalid subscription_id" });
-
-      planText = planRow.plan_name;
-    }
-
-    // Validate owner exists in public.users
-    const { data: ownerRow, error: ownerErr } = await sb
-      .from("users")
-      .select("id,email,role")
-      .eq("id", body.owner_user_id)
-      .maybeSingle();
-
-    if (ownerErr) return res.status(500).json({ error: ownerErr.message });
-    if (!ownerRow) return res.status(400).json({ error: "Owner user not found in users table" });
-
-    if (String(ownerRow.email || "").toLowerCase() !== body.owner_email.toLowerCase()) {
-      return res.status(400).json({ error: "owner_email does not match users.email" });
-    }
-
-    const { data: corporate, error: corpErr } = await sb
-      .from("corporate")
-      .insert({
-        name: body.name,
-        phone: body.phone ?? null,
-        email: body.email ?? body.owner_email,
-
-        city: body.city ?? null,
-        area: body.area ?? null,
-        full_address: body.full_address ?? null,
-
-        owner_user_id: body.owner_user_id,
-        owner_email: body.owner_email,
-
-        plan: planText,
-        seats: body.seats ?? 0,
-
-        subscription_start: toDateOrNull(body.subscription_start),
-        subscription_expiry: toDateOrNull(body.subscription_expiry),
-
-        subscription_status: "active",
-        is_active: true,
-
-        // ✅ IMPORTANT: employees jsonb array
-        employees: [],
-      })
-      .select("*")
-      .single();
-
-    if (corpErr) return res.status(500).json({ error: corpErr.message });
-
-    return res.status(201).json({ corporate });
-  } catch (err: any) {
-    console.error(err);
-    return res.status(500).json({ error: err?.message || "Server error" });
-  }
-});
-
-/* ---------------------------------------------
-   EMPLOYEES JSONB: APPEND + REMOVE
---------------------------------------------- */
-
-const EmployeeJsonSchema = z.object({
-  user_id: z.string().uuid(),
-  name: z.string().trim().min(1),
-  email: z.string().trim().email(),
-  phone: z.string().trim().min(1),
-  department: z.string().trim().optional().nullable(),
-  designation: z.string().trim().optional().nullable(),
-  created_at: z.string().optional().nullable(), // ISO allowed
-});
-
-const AddEmployeesSchema = z.object({
-  employees: z.array(EmployeeJsonSchema).min(1),
 });
 
 const UpdateCorporateSchema = z.object({
@@ -229,245 +79,188 @@ const UpdateCorporateSchema = z.object({
   subscription_status: z.enum(['active', 'inactive', 'expired']).optional(),
 });
 
-const CorporateIdParamSchema = z.object({
-  id: z.string().uuid(),
-});
-
-const RemoveEmployeeParamSchema = z.object({
-  id: z.string().uuid(),
-  userId: z.string().uuid(),
+const AddEmployeesSchema = z.object({
+  employees: z.array(z.object({
+    user_id: z.string().uuid(),
+    name: z.string().trim().min(1),
+    email: z.string().trim().email(),
+    phone: z.string().trim().min(1),
+    department: z.string().trim().nullable().optional(),
+    designation: z.string().trim().nullable().optional(),
+    created_at: z.string().nullable().optional(),
+  })).min(1),
 });
 
 /* ---------------------------------------------
-   UPDATE Corporate by ID
+   ROUTES
 --------------------------------------------- */
-router.put("/:id", async (req, res) => {
-  const p = CorporateIdParamSchema.safeParse(req.params);
-  if (!p.success) {
-    return res.status(400).json({ error: "Invalid corporate id" });
-  }
 
-  const parsed = UpdateCorporateSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({
-      error: "Invalid body",
-      details: parsed.error.flatten(),
-    });
-  }
-
+// ✅ GET ALL Corporates
+router.get("/", async (req, res) => {
   const admin = await requireAdmin(req, res);
   if (!admin) return;
 
+  const { data, error } = await admin.sb
+    .from("corporate")
+    .select("*")
+    .order("created_at", { ascending: false });
+
+  if (error) return res.status(500).json({ error: error.message });
+  return res.status(200).json({ corporates: data });
+});
+
+// ✅ GET Single Corporate
+router.get("/:id", async (req, res) => {
+  const admin = await requireAdmin(req, res);
+  if (!admin) return;
+
+  const { data, error } = await admin.sb
+    .from("corporate")
+    .select("*")
+    .eq("id", req.params.id)
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ error: error.message });
+  if (!data) return res.status(404).json({ error: "Corporate not found" });
+
+  return res.status(200).json({ corporate: data });
+});
+
+// ✅ CREATE Corporate
+router.post("/", async (req, res) => {
+  const admin = await requireAdmin(req, res);
+  if (!admin) return;
+
+  const parsed = CreateCorporateSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
+
   const { sb } = admin;
-  const corporateId = p.data.id;
   const body = parsed.data;
 
   try {
-    // Build update object with only provided fields
-    const updateData: any = {};
-    
-    if (body.name !== undefined) updateData.name = body.name;
-    if (body.phone !== undefined) updateData.phone = body.phone;
-    if (body.email !== undefined) updateData.email = body.email;
-    if (body.city !== undefined) updateData.city = body.city;
-    if (body.area !== undefined) updateData.area = body.area;
-    if (body.full_address !== undefined) updateData.full_address = body.full_address;
-    if (body.is_active !== undefined) updateData.is_active = body.is_active;
-    if (body.plan !== undefined) updateData.plan = body.plan;
-    if (body.seats !== undefined) updateData.seats = body.seats;
-    if (body.subscription_start !== undefined) {
-      updateData.subscription_start = toDateOrNull(body.subscription_start);
-    }
-    if (body.subscription_expiry !== undefined) {
-      updateData.subscription_expiry = toDateOrNull(body.subscription_expiry);
-    }
-    if (body.subscription_status !== undefined) {
-      updateData.subscription_status = body.subscription_status;
+    let planText = body.plan || null;
+    if (!planText && body.subscription_id) {
+      const { data: planRow } = await sb
+        .from("subscription")
+        .select("plan_name")
+        .eq("id", body.subscription_id)
+        .maybeSingle();
+      if (planRow) planText = planRow.plan_name;
     }
 
-    // Add updated timestamp
-    updateData.updated_at = new Date().toISOString();
-
-    // Perform update
-    const { data: updatedCorporate, error } = await sb
+    const { data: corporate, error: corpErr } = await sb
       .from("corporate")
-      .update(updateData)
-      .eq("id", corporateId)
+      .insert({
+        name: body.name,
+        phone: body.phone ?? null,
+        email: body.email ?? body.owner_email,
+        city: body.city ?? null,
+        area: body.area ?? null,
+        full_address: body.full_address ?? null,
+        owner_user_id: body.owner_user_id,
+        owner_email: body.owner_email,
+        plan: planText,
+        seats: body.seats ?? 0,
+        subscription_start: body.subscription_start || null,
+        subscription_expiry: body.subscription_expiry || null,
+        subscription_status: "active",
+        is_active: true,
+        employees: [],
+      })
       .select("*")
       .single();
 
-    if (error) {
-      console.error("Database error:", error);
-      return res.status(500).json({
-        error: "Failed to update corporate",
-        details: error.message,
-      });
-    }
-
-    if (!updatedCorporate) {
-      return res.status(404).json({ error: "Corporate not found" });
-    }
-
-    return res.status(200).json({
-      success: true,
-      message: "Corporate updated successfully",
-      corporate: updatedCorporate,
-    });
+    if (corpErr) return res.status(500).json({ error: corpErr.message });
+    return res.status(201).json({ corporate });
   } catch (err: any) {
-    console.error("Error updating corporate:", err);
-    return res.status(500).json({
-      error: "Internal server error",
-      details: err?.message || "Server error",
-    });
+    return res.status(500).json({ error: err.message });
   }
 });
 
-// ✅ POST /api/corporates/:id/employees  -> append into corporate.employees
+// ✅ UPDATE Corporate
+router.put("/:id", async (req, res) => {
+  const admin = await requireAdmin(req, res);
+  if (!admin) return;
+
+  const parsed = UpdateCorporateSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
+
+  const { data: updated, error } = await admin.sb
+    .from("corporate")
+    .update({ ...parsed.data, updated_at: new Date().toISOString() })
+    .eq("id", req.params.id)
+    .select("*")
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  return res.status(200).json({ success: true, corporate: updated });
+});
+
+// ✅ ADD/UPDATE Employees (Append to JSONB)
 router.post("/:id/employees", async (req, res) => {
-  const p = CorporateIdParamSchema.safeParse(req.params);
-  if (!p.success) return res.status(400).json({ error: "Invalid corporate id" });
+  const admin = await requireAdmin(req, res);
+  if (!admin) return;
 
   const parsed = AddEmployeesSchema.safeParse(req.body);
-  if (!parsed.success) {
-    return res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
-  }
+  if (!parsed.success) return res.status(400).json({ error: "Invalid body" });
 
-  const admin = await requireAdmin(req, res);
-  if (!admin) return;
+  const { data: corp, error: fetchErr } = await admin.sb
+    .from("corporate")
+    .select("employees, seats")
+    .eq("id", req.params.id)
+    .single();
 
-  const { sb } = admin;
-  const corporateId = p.data.id;
-  const incoming = parsed.data.employees;
+  if (fetchErr || !corp) return res.status(404).json({ error: "Not found" });
 
-  try {
-    // Load corporate row (employees + seats)
-    const { data: corp, error: corpErr } = await sb
-      .from("corporate")
-      .select("id,seats,employees")
-      .eq("id", corporateId)
-      .single();
+  const existing = Array.isArray(corp.employees) ? corp.employees : [];
+  const merged = [...existing];
 
-    if (corpErr) return res.status(500).json({ error: corpErr.message });
-    if (!corp) return res.status(404).json({ error: "Corporate not found" });
-
-    const existing: any[] = Array.isArray(corp.employees) ? corp.employees : [];
-    const seats = Number(corp.seats || 0);
-
-    // Optional: validate users exist
-    const ids = incoming.map((e) => e.user_id);
-    const { data: usersRows, error: usersErr } = await sb
-      .from("users")
-      .select("id,email")
-      .in("id", ids);
-
-    if (usersErr) return res.status(500).json({ error: usersErr.message });
-
-    const usersMap = new Map((usersRows || []).map((u: any) => [u.id, u.email]));
-
-    for (const emp of incoming) {
-      if (!usersMap.has(emp.user_id)) {
-        return res.status(400).json({ error: `User not found in users table: ${emp.user_id}` });
-      }
-      const email = String(usersMap.get(emp.user_id) || "").toLowerCase();
-      if (email !== emp.email.toLowerCase()) {
-        return res.status(400).json({
-          error: `Email mismatch for user_id ${emp.user_id}: users.email != provided email`,
-        });
-      }
-    }
-
-    // ✅ merge + dedupe by user_id (and also by email fallback)
-    const byUserId = new Map<string, any>();
-    for (const e of existing) {
-      const uid = String(e?.user_id || "");
-      if (uid) byUserId.set(uid, e);
-    }
-
-    for (const emp of incoming) {
-      const nowIso = new Date().toISOString();
-      byUserId.set(emp.user_id, {
-        user_id: emp.user_id,
-        name: emp.name,
-        email: emp.email,
-        phone: emp.phone,
-        department: emp.department ?? null,
-        designation: emp.designation ?? null,
-        created_at: emp.created_at ?? nowIso,
+  for (const emp of parsed.data.employees) {
+    const idx = merged.findIndex(e => e.user_id === emp.user_id);
+    if (idx >= 0) {
+      merged[idx] = { ...merged[idx], ...emp };
+    } else {
+      merged.push({ 
+        ...emp, 
+        created_at: emp.created_at || new Date().toISOString() 
       });
     }
-
-    const merged = Array.from(byUserId.values());
-
-    // Optional seats enforcement (if seats > 0)
-    if (seats > 0 && merged.length > seats) {
-      return res.status(400).json({
-        error: `Seats exceeded. Seats=${seats}, requested employees=${merged.length}`,
-      });
-    }
-
-    const { data: updated, error: updErr } = await sb
-      .from("corporate")
-      .update({ employees: merged })
-      .eq("id", corporateId)
-      .select("id,employees,seats")
-      .single();
-
-    if (updErr) return res.status(500).json({ error: updErr.message });
-
-    return res.status(200).json({
-      ok: true,
-      corporate_id: updated.id,
-      employees: updated.employees,
-      seats: updated.seats,
-    });
-  } catch (err: any) {
-    console.error(err);
-    return res.status(500).json({ error: err?.message || "Server error" });
   }
+
+  const { data: updated, error: updErr } = await admin.sb
+    .from("corporate")
+    .update({ employees: merged })
+    .eq("id", req.params.id)
+    .select("employees")
+    .single();
+
+  if (updErr) return res.status(500).json({ error: updErr.message });
+  return res.status(200).json({ ok: true, employees: updated.employees });
 });
 
-// ✅ DELETE /api/corporates/:id/employees/:userId  -> remove from corporate.employees
+// ✅ DELETE Employee from JSONB
 router.delete("/:id/employees/:userId", async (req, res) => {
-  const p = RemoveEmployeeParamSchema.safeParse(req.params);
-  if (!p.success) return res.status(400).json({ error: "Invalid params" });
-
   const admin = await requireAdmin(req, res);
   if (!admin) return;
 
-  const { sb } = admin;
-  const { id: corporateId, userId } = p.data;
+  const { data: corp } = await admin.sb
+    .from("corporate")
+    .select("employees")
+    .eq("id", req.params.id)
+    .single();
 
-  try {
-    const { data: corp, error: corpErr } = await sb
-      .from("corporate")
-      .select("id,employees")
-      .eq("id", corporateId)
-      .single();
+  if (!corp) return res.status(404).json({ error: "Corporate not found" });
 
-    if (corpErr) return res.status(500).json({ error: corpErr.message });
-    if (!corp) return res.status(404).json({ error: "Corporate not found" });
+  const next = (Array.isArray(corp.employees) ? corp.employees : [])
+    .filter((e: any) => String(e?.user_id || "") !== req.params.userId);
 
-    const existing: any[] = Array.isArray(corp.employees) ? corp.employees : [];
-    const next = existing.filter((e) => String(e?.user_id || "") !== userId);
+  const { error: updErr } = await admin.sb
+    .from("corporate")
+    .update({ employees: next })
+    .eq("id", req.params.id);
 
-    const { data: updated, error: updErr } = await sb
-      .from("corporate")
-      .update({ employees: next })
-      .eq("id", corporateId)
-      .select("id,employees")
-      .single();
-
-    if (updErr) return res.status(500).json({ error: updErr.message });
-
-    return res.status(200).json({
-      ok: true,
-      corporate_id: updated.id,
-      employees: updated.employees,
-    });
-  } catch (err: any) {
-    console.error(err);
-    return res.status(500).json({ error: err?.message || "Server error" });
-  }
+  if (updErr) return res.status(500).json({ error: updErr.message });
+  return res.status(200).json({ ok: true });
 });
 
 export default router;

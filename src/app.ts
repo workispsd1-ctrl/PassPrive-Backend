@@ -1,6 +1,7 @@
 import express from "express";
 import cors from "cors";
 import authRoutes from "./modules/routes/auth";
+import adminRoutes from "./modules/routes/admin";
 import userDetailsRoutes from "./modules/routes/userDetails.routes"; 
 import HomeHeroOffers from "./modules/routes/homeHeroOffers";
 import SpotLight from "./modules/routes/spotLight"
@@ -27,6 +28,7 @@ app.get("/", (req, res) => {
 app.use("/api/user", userDetailsRoutes);
 
 app.use("/api/auth", authRoutes);
+app.use("/api/auth", adminRoutes);
 
 app.use("/api/homeherooffers", HomeHeroOffers);
 

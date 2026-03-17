@@ -49,12 +49,19 @@ router.get("/:id", async (req: Request, res: Response) => {
 
     if (error) {
       console.error("GET /:id - Supabase error:", error);
-      return res.status(404).json({ error: "Offer not found", details: error.message });
+      return res.status(404).json({ 
+        error: `Offer with ID ${id} not found`,
+        message: "This offer does not exist in the database",
+        details: error.message 
+      });
     }
     
     if (!data) {
       console.error("GET /:id - No data returned for ID:", id);
-      return res.status(404).json({ error: "Offer not found" });
+      return res.status(404).json({ 
+        error: `Offer with ID ${id} not found`,
+        message: "This offer does not exist in the database"
+      });
     }
 
     console.log("GET /:id - Success, returning offer:", data.id);
