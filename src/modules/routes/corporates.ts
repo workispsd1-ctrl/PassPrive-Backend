@@ -1,7 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
-import supabaseAdmin from "../../database/supabase";
 
 const router = Router();
 
@@ -56,7 +55,7 @@ async function requireAdmin(req: any, res: any) {
     .maybeSingle();
 
   const role = row?.role?.toLowerCase();
-  
+
   if (roleErr || !role || !["admin", "superadmin"].includes(role)) {
     res.status(403).json({ error: "Access denied" });
     return null;
@@ -85,18 +84,13 @@ const CreateCorporateSchema = z.object({
 });
 
 const UpdateCorporateSchema = z.object({
-  name: z.string().trim().optional(), // Removed min(1) to allow empty string if frontend sends it
+  name: z.string().trim().optional(),
   phone: z.string().trim().nullable().optional(),
   email: z.string().trim().email().nullable().optional(),
   city: z.string().trim().nullable().optional(),
   area: z.string().trim().nullable().optional(),
   full_address: z.string().trim().nullable().optional(),
   is_active: z.boolean().optional(),
-  plan: z.string().trim().nullable().optional(),
-  seats: z.number().int().min(0).optional(),
-  subscription_start: z.string().nullable().optional(),
-  subscription_expiry: z.string().nullable().optional(),
-  subscription_status: z.enum(['active', 'inactive', 'expired']).optional(),
 });
 
 const AddEmployeesSchema = z.object({
@@ -154,13 +148,12 @@ router.post("/", async (req, res) => {
   const parsed = CreateCorporateSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
 
-  const { sb } = admin;
   const body = parsed.data;
 
   try {
     let planText = body.plan || null;
     if (!planText && body.subscription_id) {
-      const { data: planRow } = await sb
+      const { data: planRow } = await admin.sb
         .from("subscription")
         .select("plan_name")
         .eq("id", body.subscription_id)
@@ -168,7 +161,7 @@ router.post("/", async (req, res) => {
       if (planRow) planText = planRow.plan_name;
     }
 
-    const { data: corporate, error: corpErr } = await sb
+    const { data: corporate, error: corpErr } = await admin.sb
       .from("corporate")
       .insert({
         name: body.name,
