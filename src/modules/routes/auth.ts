@@ -35,37 +35,21 @@ async function createOneUser(input: CreateUserBody) {
     return { ok: false, error: "Email, password and role are required" };
   }
 
-  const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+  // Use auth.admin.createUser to bypass email confirmation and signup restrictions.
+  // This REQUIRES a valid SUPABASE_SERVICE_KEY.
+  const { data: adminData, error: adminError } = await supabase.auth.admin.createUser({
     email,
     password,
-    options: {
-      data: { role, full_name: full_name || null, phone: phone || null },
-    },
+    email_confirm: true,
+    user_metadata: { role, full_name: full_name || null, phone: phone || null },
   });
 
-  if (signUpError) return { ok: false, error: signUpError.message };
+  if (adminError) return { ok: false, error: adminError.message };
 
-  const userId = signUpData.user?.id;
-  if (!userId) return { ok: false, error: "User not returned from signUp" };
+  const userId = adminData.user?.id;
+  if (!userId) return { ok: false, error: "User not returned from admin.createUser" };
 
-  const accessToken = signUpData.session?.access_token;
-  if (!accessToken) {
-    return {
-      ok: false,
-      error: "No session returned from signUp. If email confirmation is OFF, this is unexpected.",
-    };
-  }
-
-  const supabaseAuthed = createClient(
-    process.env.SUPABASE_URL!,
-    process.env.SUPABASE_SERVICE_KEY!,
-    {
-      global: { headers: { Authorization: `Bearer ${accessToken}` } },
-      auth: { persistSession: false, autoRefreshToken: false },
-    }
-  );
-
-  const { data: user, error: insertError } = await supabaseAuthed
+  const { data: user, error: insertError } = await supabase
     .from("users")
     .insert({
       id: userId,

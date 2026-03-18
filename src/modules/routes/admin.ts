@@ -16,8 +16,8 @@ const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
 // Helper for Auth check (Ensures only admins can call these)
 async function isAdmin(req: any) {
   const h = req.headers.authorization || "";
-  const token = h.split(" ")[1];
-  if (!token) return false;
+  const [type, token] = h.split(" ");
+  if (type !== "Bearer" || !token) return false;
 
   const { data: { user }, error } = await supabaseAdmin.auth.getUser(token);
   if (error || !user) return false;
@@ -28,7 +28,8 @@ async function isAdmin(req: any) {
     .eq("id", user.id)
     .single();
 
-  return profile?.role === "admin" || profile?.role === "superadmin";
+  const role = profile?.role?.toLowerCase();
+  return role === "admin" || role === "superadmin";
 }
 
 /* ---------------------------------------------
