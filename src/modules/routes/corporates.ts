@@ -48,20 +48,16 @@ async function requireAdmin(req: any, res: any) {
     return null;
   }
 
-  const { data: row, error: roleErr } = await supabaseAdmin
+  // Check the 'users' table for the role using the authed client
+  const { data: row, error: roleErr } = await sb
     .from("users")
     .select("role")
     .eq("id", user.id)
     .maybeSingle();
 
-  let role = row?.role?.toLowerCase() || "";
-
-  // Fallback: Check Auth Metadata if role not found in DB
-  if (!role && user.user_metadata?.role) {
-    role = String(user.user_metadata.role).toLowerCase();
-  }
-
-  if (roleErr || !["admin", "superadmin"].includes(role)) {
+  const role = row?.role?.toLowerCase();
+  
+  if (roleErr || !role || !["admin", "superadmin"].includes(role)) {
     res.status(403).json({ error: "Access denied" });
     return null;
   }
@@ -124,7 +120,7 @@ router.get("/", async (req, res) => {
   const admin = await requireAdmin(req, res);
   if (!admin) return;
 
-  const { data, error } = await supabaseAdmin
+  const { data, error } = await admin.sb
     .from("corporate")
     .select("*")
     .order("created_at", { ascending: false });
@@ -138,7 +134,7 @@ router.get("/:id", async (req, res) => {
   const admin = await requireAdmin(req, res);
   if (!admin) return;
 
-  const { data, error } = await supabaseAdmin
+  const { data, error } = await admin.sb
     .from("corporate")
     .select("*")
     .eq("id", req.params.id)
@@ -158,12 +154,13 @@ router.post("/", async (req, res) => {
   const parsed = CreateCorporateSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
 
+  const { sb } = admin;
   const body = parsed.data;
 
   try {
     let planText = body.plan || null;
     if (!planText && body.subscription_id) {
-      const { data: planRow } = await supabaseAdmin
+      const { data: planRow } = await sb
         .from("subscription")
         .select("plan_name")
         .eq("id", body.subscription_id)
@@ -171,7 +168,7 @@ router.post("/", async (req, res) => {
       if (planRow) planText = planRow.plan_name;
     }
 
-    const { data: corporate, error: corpErr } = await supabaseAdmin
+    const { data: corporate, error: corpErr } = await sb
       .from("corporate")
       .insert({
         name: body.name,
@@ -209,7 +206,7 @@ router.put("/:id", async (req, res) => {
   const parsed = UpdateCorporateSchema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
 
-  const { data: updated, error } = await supabaseAdmin
+  const { data: updated, error } = await admin.sb
     .from("corporate")
     .update({ ...parsed.data, updated_at: new Date().toISOString() })
     .eq("id", req.params.id)
@@ -233,7 +230,7 @@ router.post("/:id/employees", async (req, res) => {
     });
   }
 
-  const { data: corp, error: fetchErr } = await supabaseAdmin
+  const { data: corp, error: fetchErr } = await admin.sb
     .from("corporate")
     .select("employees, seats")
     .eq("id", req.params.id)
@@ -256,7 +253,7 @@ router.post("/:id/employees", async (req, res) => {
     }
   }
 
-  const { data: updated, error: updErr } = await supabaseAdmin
+  const { data: updated, error: updErr } = await admin.sb
     .from("corporate")
     .update({ employees: merged })
     .eq("id", req.params.id)
@@ -272,7 +269,7 @@ router.delete("/:id/employees/:userId", async (req, res) => {
   const admin = await requireAdmin(req, res);
   if (!admin) return;
 
-  const { data: corp } = await supabaseAdmin
+  const { data: corp } = await admin.sb
     .from("corporate")
     .select("employees")
     .eq("id", req.params.id)
@@ -283,13 +280,27 @@ router.delete("/:id/employees/:userId", async (req, res) => {
   const next = (Array.isArray(corp.employees) ? corp.employees : [])
     .filter((e: any) => String(e?.user_id || "") !== req.params.userId);
 
-  const { error: updErr } = await supabaseAdmin
+  const { error: updErr } = await admin.sb
     .from("corporate")
     .update({ employees: next })
     .eq("id", req.params.id);
 
   if (updErr) return res.status(500).json({ error: updErr.message });
   return res.status(200).json({ ok: true });
+});
+
+// ✅ DELETE Corporate
+router.delete("/:id", async (req, res) => {
+  const admin = await requireAdmin(req, res);
+  if (!admin) return;
+
+  const { error } = await admin.sb
+    .from("corporate")
+    .delete()
+    .eq("id", req.params.id);
+
+  if (error) return res.status(500).json({ error: error.message });
+  return res.status(200).json({ success: true, message: "Corporate deleted successfully" });
 });
 
 export default router;

@@ -1,9 +1,53 @@
-// src/routes/stores.ts
 import { Router } from "express";
 import { z } from "zod";
+import { createClient } from "@supabase/supabase-js";
 import supabase from "../../database/supabase";
 
 const router = Router();
+
+const SUPABASE_URL = process.env.SUPABASE_URL!;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
+
+function supabaseAuthed(req: any) {
+  const h = req.headers.authorization || "";
+  const [type, token] = h.split(" ");
+  if (type !== "Bearer" || !token) return null;
+
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+    global: { headers: { Authorization: `Bearer ${token}` } },
+  });
+}
+
+async function requireAdmin(req: any, res: any) {
+  const sb = supabaseAuthed(req);
+  if (!sb) {
+    res.status(401).json({ error: "Missing token" });
+    return null;
+  }
+
+  const { data: { user }, error: userErr } = await sb.auth.getUser();
+  if (userErr || !user) {
+    res.status(401).json({ error: "Invalid session" });
+    return null;
+  }
+
+  // Check the 'users' table for the role using the authed client
+  const { data: row, error: roleErr } = await sb
+    .from("users")
+    .select("role")
+    .eq("id", user.id)
+    .maybeSingle();
+
+  const role = row?.role?.toLowerCase();
+  
+  if (roleErr || !role || !["admin", "superadmin"].includes(role)) {
+    res.status(403).json({ error: "Access denied" });
+    return null;
+  }
+
+  return { sb, callerId: user.id };
+}
 
 const IdSchema = z.string().uuid();
 
@@ -211,9 +255,10 @@ router.get("/:id", async (req, res) => {
 });
 
 // DELETE /api/stores/:id?hard=true
-// default: soft delete => is_active = false
-// hard delete will cascade-delete payment_details and catalogue_items because of FK ON DELETE CASCADE
 router.delete("/:id", async (req, res) => {
+  const admin = await requireAdmin(req, res);
+  if (!admin) return;
+
   const idParsed = IdSchema.safeParse(req.params.id);
   if (!idParsed.success) return res.status(400).json({ error: "Invalid store id" });
 
@@ -228,7 +273,7 @@ router.delete("/:id", async (req, res) => {
   const { hard } = qParsed.data;
 
   // Confirm exists
-  const exists = await supabase
+  const exists = await admin.sb
     .from("stores")
     .select("id,is_active")
     .eq("id", id)
@@ -238,13 +283,13 @@ router.delete("/:id", async (req, res) => {
   if (!exists.data) return res.status(404).json({ error: "Store not found" });
 
   if (hard) {
-    const { error } = await supabase.from("stores").delete().eq("id", id);
+    const { error } = await admin.sb.from("stores").delete().eq("id", id);
     if (error) return res.status(500).json({ error: error.message });
     return res.json({ ok: true, deleted: "hard", id });
   }
 
   // Soft delete
-  const { error } = await supabase
+  const { error } = await admin.sb
     .from("stores")
     .update({ is_active: false })
     .eq("id", id);

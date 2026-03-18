@@ -3,34 +3,42 @@ import { createClient } from "@supabase/supabase-js";
 
 const router = Router();
 
-// Your environment variables
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
 
-// Initialize Supabase admin client (Service Key is required for deleting/updating users)
-const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+function supabaseAuthed(req: any) {
+  const h = req.headers.authorization || "";
+  const [type, token] = h.split(" ");
+  if (type !== "Bearer" || !token) return null;
+
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+    global: { headers: { Authorization: `Bearer ${token}` } },
+  });
+}
+
+// Dedicated service account client for auth.admin operations
+const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
 /**
  * Robust helper to get authenticated user info & role from Public Users Table.
- * Uses service role to bypass RLS for role checks.
  */
 async function getCallerInfo(req: any) {
   try {
-    const authHeader = req.headers.authorization || "";
-    const [type, token] = authHeader.split(" ");
-    if (type !== "Bearer" || !token) return null;
+    const sb = supabaseAuthed(req);
+    if (!sb) return null;
 
     // Verify token with Auth service
-    const { data: { user }, error: authError } = await supabaseAdmin.auth.getUser(token);
+    const { data: { user }, error: authError } = await sb.auth.getUser();
     if (authError || !user) {
       console.error("[getCallerInfo] Auth Verification Failed:", authError?.message);
       return null;
     }
 
     // Fetch user role from Public Profile table
-    const { data: profile, error: dbError } = await supabaseAdmin
+    const { data: profile, error: dbError } = await sb
       .from("users")
       .select("id, role")
       .eq("id", user.id)
@@ -49,7 +57,8 @@ async function getCallerInfo(req: any) {
 
     return { 
       id: user.id, 
-      role
+      role,
+      sb
     };
   } catch (err: any) {
     console.error("[getCallerInfo] Unexpected Error:", err.message);
@@ -94,7 +103,7 @@ router.put("/users/:userId", async (req, res) => {
     updateData.role = newRole;
   }
 
-  const { error: profileError } = await supabaseAdmin
+  const { error: profileError } = await caller.sb
     .from("users")
     .update(updateData)
     .eq("id", targetId);
@@ -108,7 +117,7 @@ router.put("/users/:userId", async (req, res) => {
   if (updateData.role) authUpdate.user_metadata.role = updateData.role;
   if (phone) authUpdate.phone = phone;
 
-  const { error: authError } = await supabaseAdmin.auth.admin.updateUserById(targetId, authUpdate);
+  const { error: authError } = await supabaseService.auth.admin.updateUserById(targetId, authUpdate);
   if (authError) {
     console.warn("[UpdateUser] Auth metadata sync failed:", authError.message);
     // Not returning error here as primary DB update succeeded
@@ -133,7 +142,7 @@ router.delete("/users/:userId", async (req, res) => {
 
   // Rule: Admin can only delete specific partner roles
   if (!canDelete && isAdminComp) {
-    const { data: targetProfile, error: fetchErr } = await supabaseAdmin
+    const { data: targetProfile, error: fetchErr } = await caller.sb
       .from("users")
       .select("role")
       .eq("id", targetId)
@@ -159,14 +168,14 @@ router.delete("/users/:userId", async (req, res) => {
 
   try {
     // 1. Delete from Auth (Triggers cascading delete if configured in DB)
-    const { error: authDeleteError } = await supabaseAdmin.auth.admin.deleteUser(targetId);
+    const { error: authDeleteError } = await supabaseService.auth.admin.deleteUser(targetId);
     if (authDeleteError) {
       console.error("[DeleteUser] Auth deletion failed:", authDeleteError.message);
       return res.status(500).json({ error: authDeleteError.message });
     }
 
     // 2. Explicitly Delete from Public Users Table (Backup for non-cascading DBs)
-    await supabaseAdmin.from("users").delete().eq("id", targetId);
+    await caller.sb.from("users").delete().eq("id", targetId);
 
     return res.status(200).json({ success: true, message: "User deleted successfully" });
   } catch (err: any) {

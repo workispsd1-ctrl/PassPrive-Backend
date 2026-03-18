@@ -1,6 +1,52 @@
 import express, { Request, Response } from "express";
 import { createClient } from "@supabase/supabase-js";
-import supabase from "../../database/supabase"; // anon client
+
+const SUPABASE_URL = process.env.SUPABASE_URL!;
+const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
+
+function supabaseAuthed(req: any) {
+  const h = req.headers.authorization || "";
+  const [type, token] = h.split(" ");
+  if (type !== "Bearer" || !token) return null;
+
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+    global: { headers: { Authorization: `Bearer ${token}` } },
+  });
+}
+
+// Dedicated service account client for auth.admin operations
+const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false },
+});
+
+async function requireAdmin(req: any, res: any) {
+  const sb = supabaseAuthed(req);
+  if (!sb) {
+    res.status(401).json({ error: "Missing token" });
+    return null;
+  }
+
+  const { data: { user }, error: userErr } = await sb.auth.getUser();
+  if (userErr || !user) {
+    res.status(401).json({ error: "Invalid session" });
+    return null;
+  }
+
+  const { data: row, error: roleErr } = await sb
+    .from("users")
+    .select("role")
+    .eq("id", user.id)
+    .maybeSingle();
+
+  const role = row?.role?.toLowerCase();
+  if (roleErr || !role || !["admin", "superadmin"].includes(role)) {
+    res.status(403).json({ error: "Access denied" });
+    return null;
+  }
+
+  return { sb, callerId: user.id };
+}
 
 const router = express.Router();
 
@@ -28,7 +74,7 @@ function isBulk(body: any): body is BulkBody {
   return body && Array.isArray(body.users);
 }
 
-async function createOneUser(input: CreateUserBody) {
+async function createOneUser(input: CreateUserBody, sb: any) {
   const { email, password, full_name, phone, role } = input;
 
   if (!email || !password || !role) {
@@ -36,8 +82,7 @@ async function createOneUser(input: CreateUserBody) {
   }
 
   // Use auth.admin.createUser to bypass email confirmation and signup restrictions.
-  // This REQUIRES a valid SUPABASE_SERVICE_KEY.
-  const { data: adminData, error: adminError } = await supabase.auth.admin.createUser({
+  const { data: adminData, error: adminError } = await supabaseService.auth.admin.createUser({
     email,
     password,
     email_confirm: true,
@@ -49,7 +94,7 @@ async function createOneUser(input: CreateUserBody) {
   const userId = adminData.user?.id;
   if (!userId) return { ok: false, error: "User not returned from admin.createUser" };
 
-  const { data: user, error: insertError } = await supabase
+  const { data: user, error: insertError } = await sb
     .from("users")
     .insert({
       id: userId,
@@ -88,6 +133,9 @@ async function createOneUser(input: CreateUserBody) {
 
 router.post("/create-user", async (req: Request, res: Response) => {
   try {
+    const admin = await requireAdmin(req, res);
+    if (!admin) return;
+
     if (isBulk(req.body)) {
       const users = req.body.users || [];
       if (!users.length) return res.status(400).json({ error: "users[] is required" });
@@ -100,7 +148,7 @@ router.post("/create-user", async (req: Request, res: Response) => {
       const failed: any[] = [];
 
       for (const u of users) {
-        const result = await createOneUser(u);
+        const result = await createOneUser(u, admin.sb);
         if (result.ok) created.push(result.user);
         else failed.push({ email: u.email, error: result.error, hint: (result as any).hint });
       }
@@ -113,7 +161,7 @@ router.post("/create-user", async (req: Request, res: Response) => {
       });
     }
 
-    const result = await createOneUser(req.body as CreateUserBody);
+    const result = await createOneUser(req.body as CreateUserBody, admin.sb);
     if (!result.ok) return res.status(400).json(result);
 
     return res.status(201).json({ user: result.user });

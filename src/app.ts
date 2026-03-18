@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import authRoutes from "./modules/routes/auth";
 import adminRoutes from "./modules/routes/admin";
-import userDetailsRoutes from "./modules/routes/userDetails.routes"; 
+import userDetailsRoutes from "./modules/routes/userDetails.routes";
 import HomeHeroOffers from "./modules/routes/homeHeroOffers";
 import SpotLight from "./modules/routes/spotLight"
 import Restaurants from "./modules/routes/restaurants";
@@ -35,10 +35,19 @@ app.use("/api/homeherooffers", HomeHeroOffers);
 app.use("/api/spotlight", SpotLight);
 
 app.use("/api/restaurants", Restaurants);
+app.use("/api/restaurant", Restaurants); // Alias
 
 app.use("/api/stores", Stores);
+app.use("/api/store", Stores);       // Alias
 
 app.use("/api/corporates", corporatesRouter);
+app.use("/api/corporate", corporatesRouter); // Alias
+
+// 404 Catch-all Logger
+app.use((req, res) => {
+  console.log(`[404] ${req.method} ${req.url}`);
+  res.status(404).json({ error: `Route ${req.method} ${req.url} Not Found` });
+});
 
 
 export default app;
