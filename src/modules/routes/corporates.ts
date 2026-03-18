@@ -48,15 +48,14 @@ async function requireAdmin(req: any, res: any) {
     return null;
   }
 
-  // Check the 'users' table for the role using the admin client
-  // to ensure we can read the role even if RLS is strict.
   const { data: row, error: roleErr } = await supabaseAdmin
     .from("users")
     .select("role")
     .eq("id", user.id)
     .maybeSingle();
 
-  if (roleErr || !row?.role || !["admin", "superadmin"].includes(row.role)) {
+  const role = row?.role?.toLowerCase();
+  if (roleErr || !role || !["admin", "superadmin"].includes(role)) {
     res.status(403).json({ error: "Access denied" });
     return null;
   }
@@ -84,7 +83,7 @@ const CreateCorporateSchema = z.object({
 });
 
 const UpdateCorporateSchema = z.object({
-  name: z.string().trim().min(1).optional(),
+  name: z.string().trim().optional(), // Removed min(1) to allow empty string if frontend sends it
   phone: z.string().trim().nullable().optional(),
   email: z.string().trim().email().nullable().optional(),
   city: z.string().trim().nullable().optional(),
@@ -196,6 +195,7 @@ router.post("/", async (req, res) => {
 });
 
 // ✅ UPDATE Corporate
+router.put("/", async (req, res) => res.status(400).json({ error: "ID is required for update" }));
 router.put("/:id", async (req, res) => {
   const admin = await requireAdmin(req, res);
   if (!admin) return;
@@ -221,9 +221,9 @@ router.post("/:id/employees", async (req, res) => {
 
   const parsed = AddEmployeesSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ 
-      error: "Invalid body", 
-      details: parsed.error.flatten() 
+    return res.status(400).json({
+      error: "Invalid body",
+      details: parsed.error.flatten()
     });
   }
 
@@ -243,9 +243,9 @@ router.post("/:id/employees", async (req, res) => {
     if (idx >= 0) {
       merged[idx] = { ...merged[idx], ...emp };
     } else {
-      merged.push({ 
-        ...emp, 
-        created_at: emp.created_at || new Date().toISOString() 
+      merged.push({
+        ...emp,
+        created_at: emp.created_at || new Date().toISOString()
       });
     }
   }
@@ -284,20 +284,6 @@ router.delete("/:id/employees/:userId", async (req, res) => {
 
   if (updErr) return res.status(500).json({ error: updErr.message });
   return res.status(200).json({ ok: true });
-});
-
-// ✅ DELETE Corporate
-router.delete("/:id", async (req, res) => {
-  const admin = await requireAdmin(req, res);
-  if (!admin) return;
-
-  const { error } = await supabaseAdmin
-    .from("corporate")
-    .delete()
-    .eq("id", req.params.id);
-
-  if (error) return res.status(500).json({ error: error.message });
-  return res.status(200).json({ success: true, message: "Corporate deleted successfully" });
 });
 
 export default router;
