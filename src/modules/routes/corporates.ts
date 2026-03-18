@@ -54,8 +54,14 @@ async function requireAdmin(req: any, res: any) {
     .eq("id", user.id)
     .maybeSingle();
 
-  const role = row?.role?.toLowerCase();
-  if (roleErr || !role || !["admin", "superadmin"].includes(role)) {
+  let role = row?.role?.toLowerCase() || "";
+
+  // Fallback: Check Auth Metadata if role not found in DB
+  if (!role && user.user_metadata?.role) {
+    role = String(user.user_metadata.role).toLowerCase();
+  }
+
+  if (roleErr || !["admin", "superadmin"].includes(role)) {
     res.status(403).json({ error: "Access denied" });
     return null;
   }
