@@ -4,9 +4,11 @@ import authRoutes from "./modules/routes/auth";
 import adminRoutes from "./modules/routes/admin";
 import userDetailsRoutes from "./modules/routes/userDetails.routes";
 import HomeHeroOffers from "./modules/routes/homeHeroOffers";
+import DineinHomeBanners from "./modules/routes/dineinHomeBanners";
 import SpotLight from "./modules/routes/spotLight"
 import Restaurants from "./modules/routes/restaurants";
 import Stores from "./modules/routes/stores";
+import StoresHomeBanners from "./modules/routes/storesHomeBanners";
 import corporatesRouter from "./modules/routes/corporates";
 
 const app = express();
@@ -31,6 +33,8 @@ app.use("/api/auth", authRoutes);
 app.use("/api/auth", adminRoutes);
 
 app.use("/api/homeherooffers", HomeHeroOffers);
+app.use("/api/dineinhomebanners", DineinHomeBanners);
+app.use("/api/storeshomebanners", StoresHomeBanners);
 
 app.use("/api/spotlight", SpotLight);
 
