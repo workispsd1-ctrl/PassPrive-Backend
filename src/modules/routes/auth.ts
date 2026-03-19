@@ -70,6 +70,8 @@ type BulkBody = {
   users: CreateUserBody[];
 };
 
+//Hello pushing the code
+
 function isBulk(body: any): body is BulkBody {
   return body && Array.isArray(body.users);
 }
