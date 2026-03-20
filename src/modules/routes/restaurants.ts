@@ -182,6 +182,10 @@ const DeleteQuerySchema = z.object({
   hard: z.string().optional().transform((v) => v === "true"),
 });
 
+const InTheLimelightQuerySchema = z.object({
+  city: z.string().trim().min(1),
+});
+
 // ✅ FIX: z.record(keySchema, valueSchema)
 const OpeningHoursSchema = z.record(
   z.string(),
@@ -314,6 +318,49 @@ router.get("/", async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
 
   return res.json({ items: data ?? [], page: { limit, offset, total: count ?? 0 } });
+});
+
+// ✅ Public: GET /api/restaurants/in-the-limelight?city=Hyderabad
+router.get("/in-the-limelight", async (req, res) => {
+  const parsed = InTheLimelightQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid query", details: parsed.error.flatten() });
+  }
+
+  const { city } = parsed.data;
+
+  let query = supabase
+    .from("restaurants")
+    .select("*")
+    .eq("is_active", true)
+    .ilike("city", city)
+    .gte("rating", 4.2)
+    .gte("total_ratings", 50)
+    .eq("booking_enabled", true)
+    .eq("subscribed", true)
+    .not("cover_image", "is", null)
+    .not("offer", "is", null)
+    .order("rating", { ascending: false })
+    .order("total_ratings", { ascending: false });
+
+  const { data, error } = await query;
+  if (error) return res.status(500).json({ error: error.message });
+
+  const items = (data ?? []).filter(
+    (restaurant: any) =>
+      typeof restaurant.cover_image === "string" &&
+      restaurant.cover_image.trim() !== "" &&
+      typeof restaurant.offer === "string" &&
+      restaurant.offer.trim() !== ""
+  );
+
+  return res.json({
+    items,
+    city,
+    derived_collection: "in_the_limelight",
+  });
 });
 
 // ✅ Public: GET /api/restaurants/:id
