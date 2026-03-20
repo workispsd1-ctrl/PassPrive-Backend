@@ -93,6 +93,20 @@ async function requireAdmin(req: any, res: any) {
 }
 
 /**
+ * ✅ Get caller info if token exists, but don't fail if guest
+ */
+async function getCallerInfoOptional(req: any) {
+  const sb = supabaseAuthed(req);
+  if (!sb) return null;
+
+  const { data: userData } = await sb.auth.getUser();
+  if (!userData?.user) return null;
+
+  const { row } = await getCallerRole(sb, userData.user.id);
+  return { sb, user: userData.user, role: row?.role || null };
+}
+
+/**
  * ✅ Write guard for restaurant updates/deletes:
  * admin/superadmin => allow
  * restaurantpartner/storepartner => allow only if owner_user_id == caller
@@ -156,6 +170,7 @@ const ListQuerySchema = z.object({
   search: z.string().trim().min(1).optional(),
   city: z.string().trim().min(1).optional(),
   area: z.string().trim().min(1).optional(),
+  owner_user_id: z.string().uuid().optional(),
 
   status: z.enum(["active", "inactive"]).optional(),
   includeInactive: z.string().optional().transform((v) => v === "true"),
@@ -283,7 +298,7 @@ const UpdateRestaurantSchema = z.object({
    ROUTES
 --------------------------------------------- */
 
-// ✅ Public: GET /api/restaurants
+// ✅ Public/Role-aware: GET /api/restaurants
 router.get("/", async (req, res) => {
   const parsed = ListQuerySchema.safeParse(req.query);
   if (!parsed.success) {
@@ -292,13 +307,30 @@ router.get("/", async (req, res) => {
       .json({ error: "Invalid query", details: parsed.error.flatten() });
   }
 
-  const { search, city, area, status, includeInactive, limit, offset, sort, order } =
+  const { search, city, area, owner_user_id, status, includeInactive, limit, offset, sort, order } =
     parsed.data;
+
+  // 🛡️ SECURITY: get caller info if available
+  const caller = await getCallerInfoOptional(req);
+  const isAdmin = isAdminRole(caller?.role);
+  const isPartner = isPartnerRole(caller?.role);
 
   let query = supabase.from("restaurants").select("*", { count: "exact" });
 
+  // 1. Filter by owner
+  if (isPartner) {
+    // Partners only see their own restaurants
+    query = query.eq("owner_user_id", caller!.user.id);
+  } else if (isAdmin && owner_user_id) {
+    // Admins can filter by a specific owner
+    query = query.eq("owner_user_id", owner_user_id);
+  }
+
+  // 2. Filter by status
   if (!includeInactive && !status) query = query.eq("is_active", true);
   if (status) query = query.eq("is_active", status === "active");
+
+  // 3. Search and locations
   if (city) query = query.ilike("city", `%${city}%`);
   if (area) query = query.ilike("area", `%${area}%`);
 
@@ -470,9 +502,16 @@ router.put("/:id", async (req, res) => {
   const access = await requireRestaurantWriteAccess(req, res, id);
   if (!access) return;
 
+  const payload: any = { ...bodyParsed.data };
+
+  // 🛡️ SECURITY: Only allow admins to change owner_user_id
+  if (payload.owner_user_id !== undefined && !isAdminRole(access.role)) {
+    delete payload.owner_user_id;
+  }
+
   const { data, error } = await access.sb
     .from("restaurants")
-    .update(bodyParsed.data)
+    .update(payload)
     .eq("id", id)
     .select()
     .single();
