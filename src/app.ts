@@ -5,6 +5,7 @@ import adminRoutes from "./modules/routes/admin";
 import userDetailsRoutes from "./modules/routes/userDetails.routes";
 import HomeHeroOffers from "./modules/routes/homeHeroOffers";
 import DineinHomeBanners from "./modules/routes/dineinHomeBanners";
+import MoodCategories from "./modules/routes/moodCategories";
 import SpotLight from "./modules/routes/spotLight"
 import Restaurants from "./modules/routes/restaurants";
 import Stores from "./modules/routes/stores";
@@ -35,6 +36,7 @@ app.use("/api/auth", adminRoutes);
 app.use("/api/homeherooffers", HomeHeroOffers);
 app.use("/api/dineinhomebanners", DineinHomeBanners);
 app.use("/api/storeshomebanners", StoresHomeBanners);
+app.use("/api/moodcategories", MoodCategories);
 
 app.use("/api/spotlight", SpotLight);
 
