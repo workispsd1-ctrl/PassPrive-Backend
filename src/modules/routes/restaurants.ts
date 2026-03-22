@@ -212,6 +212,62 @@ const InTheLimelightQuerySchema = z.object({
   city: z.string().trim().min(1),
 });
 
+const GRAB_YOUR_DEAL_LIMIT = 12;
+
+function hasUsableOffer(offer: any) {
+  if (offer === null || offer === undefined) return false;
+  if (typeof offer === "string") return offer.trim().length > 0;
+  if (Array.isArray(offer)) return offer.length > 0;
+  if (typeof offer === "object") return Object.keys(offer).length > 0;
+  return true;
+}
+
+function isAdvertisementActive(restaurant: any, now = new Date()) {
+  if (!restaurant?.is_advertised) return false;
+
+  const startsAt = restaurant.ad_starts_at ? new Date(restaurant.ad_starts_at) : null;
+  const endsAt = restaurant.ad_ends_at ? new Date(restaurant.ad_ends_at) : null;
+
+  if (startsAt && startsAt > now) return false;
+  if (endsAt && endsAt < now) return false;
+
+  return true;
+}
+
+function compareGrabYourDealRestaurants(a: any, b: any) {
+  const aAdvertised = isAdvertisementActive(a);
+  const bAdvertised = isAdvertisementActive(b);
+
+  if (aAdvertised !== bAdvertised) {
+    return aAdvertised ? -1 : 1;
+  }
+
+  if (aAdvertised && bAdvertised) {
+    const aPriority = typeof a.ad_priority === "number" ? a.ad_priority : 100;
+    const bPriority = typeof b.ad_priority === "number" ? b.ad_priority : 100;
+
+    if (aPriority !== bPriority) {
+      return aPriority - bPriority;
+    }
+  }
+
+  const aRating = Number(a.rating ?? 0);
+  const bRating = Number(b.rating ?? 0);
+  if (aRating !== bRating) {
+    return bRating - aRating;
+  }
+
+  const aTotalRatings = Number(a.total_ratings ?? 0);
+  const bTotalRatings = Number(b.total_ratings ?? 0);
+  if (aTotalRatings !== bTotalRatings) {
+    return bTotalRatings - aTotalRatings;
+  }
+
+  const aCreatedAt = a.created_at ? new Date(a.created_at).getTime() : 0;
+  const bCreatedAt = b.created_at ? new Date(b.created_at).getTime() : 0;
+  return bCreatedAt - aCreatedAt;
+}
+
 // ✅ FIX: z.record(keySchema, valueSchema)
 const OpeningHoursSchema = z.record(
   z.string(),
@@ -429,6 +485,30 @@ router.get("/in-the-limelight", async (req, res) => {
     city,
     derived_collection: "in_the_limelight",
   });
+});
+
+// ✅ Public: GET /api/restaurants/grab-your-deal
+router.get("/grab-your-deal", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("restaurants")
+      .select("*")
+      .eq("is_active", true)
+      .not("offer", "is", null);
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    const items = (data ?? [])
+      .filter((restaurant: any) => hasUsableOffer(restaurant.offer))
+      .sort(compareGrabYourDealRestaurants)
+      .slice(0, GRAB_YOUR_DEAL_LIMIT);
+
+    return res.json({ items });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
 });
 
 // ✅ Public: GET /api/restaurants/:id
