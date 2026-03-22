@@ -657,14 +657,45 @@ router.get("/featured-in-your-location", async (req, res) => {
 
     const { data, error } = await supabase
       .from("restaurants")
-      .select("*")
+      .select(
+        [
+          "id",
+          "name",
+          "area",
+          "city",
+          "full_address",
+          "cuisines",
+          "distance",
+          "offer",
+          "rating",
+          "total_ratings",
+          "food_images",
+          "ambience_images",
+          "cover_image",
+          "latitude",
+          "longitude",
+          "is_active",
+          "is_advertised",
+          "ad_badge_text",
+          "ad_priority",
+          "ad_starts_at",
+          "ad_ends_at",
+          "subscribed",
+          "premium_unlock_all",
+          "premium_time_slot_enabled",
+          "premium_repeat_rewards_enabled",
+          "premium_dish_discounts_enabled",
+          "premium_expires_at",
+          "created_at",
+        ].join(",")
+      )
       .eq("is_active", true);
 
     if (error) {
       return res.status(500).json({ error: error.message });
     }
 
-    const allActiveRestaurants = data ?? [];
+    const allActiveRestaurants = dedupeRestaurantsById(data ?? []);
 
     const normalizedArea = area?.trim().toLowerCase();
     const normalizedCity = normalizeCanonicalCity(city);
@@ -686,25 +717,27 @@ router.get("/featured-in-your-location", async (req, res) => {
           )
         : [];
 
-    let sourceItems = allActiveRestaurants;
-    let location_scope: "area" | "city" | "overall" = "overall";
+    const areaRanked = dedupeRestaurantsById(areaMatchedRestaurants)
+      .sort(compareGrabYourDealRestaurants);
 
-    if (areaMatchedRestaurants.length > 0) {
-      sourceItems = areaMatchedRestaurants;
-      location_scope = "area";
-    } else if (cityMatchedRestaurants.length > 0) {
-      sourceItems = cityMatchedRestaurants;
-      location_scope = "city";
-    }
+    const cityOnlyRanked = dedupeRestaurantsById(
+      cityMatchedRestaurants.filter(
+        (restaurant: any) =>
+          !areaRanked.some((areaRestaurant: any) => areaRestaurant.id === restaurant.id)
+      )
+    ).sort(compareGrabYourDealRestaurants);
 
-    const items = sourceItems
-      .sort(compareGrabYourDealRestaurants)
-      .slice(0, limit);
+    const overallFallbackRanked = dedupeRestaurantsById(
+      allActiveRestaurants.filter(
+        (restaurant: any) =>
+          !areaRanked.some((areaRestaurant: any) => areaRestaurant.id === restaurant.id) &&
+          !cityOnlyRanked.some((cityRestaurant: any) => cityRestaurant.id === restaurant.id)
+      )
+    ).sort(compareGrabYourDealRestaurants);
 
-    return res.json({
-      items,
-      location_scope,
-    });
+    const items = [...areaRanked, ...cityOnlyRanked, ...overallFallbackRanked].slice(0, limit);
+
+    return res.json({ items });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
