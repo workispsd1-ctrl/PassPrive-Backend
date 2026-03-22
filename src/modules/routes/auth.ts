@@ -2,7 +2,8 @@ import express, { Request, Response } from "express";
 import { createClient } from "@supabase/supabase-js";
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
+const SUPABASE_SERVICE_KEY =
+  process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
 function supabaseAuthed(req: any) {
   const h = req.headers.authorization || "";
@@ -83,7 +84,7 @@ async function createOneUser(input: CreateUserBody, sb: any) {
     return { ok: false, error: "Email, password and role are required" };
   }
 
-  // Use auth.admin.createUser to bypass email confirmation and signup restrictions.
+  // Prefer admin API when available.
   const { data: adminData, error: adminError } = await supabaseService.auth.admin.createUser({
     email,
     password,
@@ -91,9 +92,35 @@ async function createOneUser(input: CreateUserBody, sb: any) {
     user_metadata: { role, full_name: full_name || null, phone: phone || null },
   });
 
-  if (adminError) return { ok: false, error: adminError.message };
+  let userId = adminData.user?.id;
 
-  const userId = adminData.user?.id;
+  // Fallback for projects configured with anon-style key on backend.
+  if (adminError && String(adminError.message || "").toLowerCase() === "user not allowed") {
+    const { data: signUpData, error: signUpErr } = await supabaseService.auth.signUp({
+      email,
+      password,
+      options: {
+        data: {
+          role,
+          full_name: full_name || null,
+          phone: phone || null,
+        },
+      },
+    });
+
+    if (signUpErr) {
+      return {
+        ok: false,
+        error: signUpErr.message,
+        hint: "Supabase admin key is not privileged. Use service_role key in SUPABASE_SERVICE_KEY for admin create-user behavior.",
+      };
+    }
+
+    userId = signUpData.user?.id;
+  } else if (adminError) {
+    return { ok: false, error: adminError.message };
+  }
+
   if (!userId) return { ok: false, error: "User not returned from admin.createUser" };
 
   const { data: user, error: insertError } = await sb
