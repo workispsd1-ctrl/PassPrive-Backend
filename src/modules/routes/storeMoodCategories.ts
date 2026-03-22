@@ -9,7 +9,7 @@ const upload = multer({
 });
 
 const BUCKET_NAME = "mood-category-images";
-const TABLE_NAME = "restaurant_mood_categories";
+const TABLE_NAME = "store_mood_categories";
 
 const parseBoolean = (value: any) => {
   if (value === undefined) return undefined;
@@ -34,7 +34,7 @@ const parseMetadata = (value: any) => {
 
 const uploadImage = async (file: Express.Multer.File) => {
   const fileExt = file.originalname.split(".").pop();
-  const fileName = `mood_category_${Date.now()}.${fileExt}`;
+  const fileName = `store_mood_category_${Date.now()}.${fileExt}`;
 
   const { error: uploadErr } = await supabase.storage
     .from(BUCKET_NAME)
