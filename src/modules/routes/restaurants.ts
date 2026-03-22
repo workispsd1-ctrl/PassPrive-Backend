@@ -212,6 +212,10 @@ const InTheLimelightQuerySchema = z.object({
   city: z.string().trim().min(1),
 });
 
+const GrabYourDealQuerySchema = z.object({
+  city: z.string().trim().min(1),
+});
+
 const GRAB_YOUR_DEAL_LIMIT = 12;
 
 function hasUsableOffer(offer: any) {
@@ -489,11 +493,21 @@ router.get("/in-the-limelight", async (req, res) => {
 
 // ✅ Public: GET /api/restaurants/grab-your-deal
 router.get("/grab-your-deal", async (req, res) => {
+  const parsed = GrabYourDealQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid query", details: parsed.error.flatten() });
+  }
+
   try {
+    const { city } = parsed.data;
+
     const { data, error } = await supabase
       .from("restaurants")
       .select("*")
       .eq("is_active", true)
+      .ilike("city", city)
       .not("offer", "is", null);
 
     if (error) {
@@ -505,7 +519,7 @@ router.get("/grab-your-deal", async (req, res) => {
       .sort(compareGrabYourDealRestaurants)
       .slice(0, GRAB_YOUR_DEAL_LIMIT);
 
-    return res.json({ items });
+    return res.json({ items, city });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
