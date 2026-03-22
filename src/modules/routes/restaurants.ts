@@ -213,10 +213,23 @@ const InTheLimelightQuerySchema = z.object({
 });
 
 const GrabYourDealQuerySchema = z.object({
-  city: z.string().trim().min(1),
+  city: z.string().trim().min(1).optional(),
+  limit: z
+    .string()
+    .optional()
+    .transform((v) => (v ? Number(v) : 12))
+    .refine((n) => Number.isFinite(n) && n > 0 && n <= 50, "limit 1-50"),
 });
 
-const GRAB_YOUR_DEAL_LIMIT = 12;
+const FeaturedInYourLocationQuerySchema = z.object({
+  city: z.string().trim().min(1).optional(),
+  area: z.string().trim().min(1).optional(),
+  limit: z
+    .string()
+    .optional()
+    .transform((v) => (v ? Number(v) : 12))
+    .refine((n) => Number.isFinite(n) && n > 0 && n <= 50, "limit 1-50"),
+});
 
 function hasUsableOffer(offer: any) {
   if (offer === null || offer === undefined) return false;
@@ -238,6 +251,25 @@ function isAdvertisementActive(restaurant: any, now = new Date()) {
   return true;
 }
 
+function isPremiumActive(restaurant: any, now = new Date()) {
+  const hasPremiumSignal =
+    restaurant?.subscribed === true ||
+    restaurant?.premium_unlock_all === true ||
+    restaurant?.premium_time_slot_enabled === true ||
+    restaurant?.premium_repeat_rewards_enabled === true ||
+    restaurant?.premium_dish_discounts_enabled === true;
+
+  if (!hasPremiumSignal) return false;
+
+  const premiumExpiresAt = restaurant?.premium_expires_at
+    ? new Date(restaurant.premium_expires_at)
+    : null;
+
+  if (premiumExpiresAt && premiumExpiresAt < now) return false;
+
+  return true;
+}
+
 function compareGrabYourDealRestaurants(a: any, b: any) {
   const aAdvertised = isAdvertisementActive(a);
   const bAdvertised = isAdvertisementActive(b);
@@ -253,6 +285,13 @@ function compareGrabYourDealRestaurants(a: any, b: any) {
     if (aPriority !== bPriority) {
       return aPriority - bPriority;
     }
+  }
+
+  const aPremium = isPremiumActive(a);
+  const bPremium = isPremiumActive(b);
+
+  if (aPremium !== bPremium) {
+    return aPremium ? -1 : 1;
   }
 
   const aRating = Number(a.rating ?? 0);
@@ -482,7 +521,8 @@ router.get("/in-the-limelight", async (req, res) => {
       typeof restaurant.cover_image === "string" &&
       restaurant.cover_image.trim() !== "" &&
       restaurant.offer !== null
-  );
+  )
+  .sort(compareGrabYourDealRestaurants);
 
   return res.json({
     items,
@@ -501,25 +541,109 @@ router.get("/grab-your-deal", async (req, res) => {
   }
 
   try {
-    const { city } = parsed.data;
+    const { city, limit } = parsed.data;
+
+    const baseQuery = supabase
+      .from("restaurants")
+      .select("*")
+      .eq("is_active", true)
+      .not("offer", "is", null);
+
+    const { data: allCandidateRows, error } = await baseQuery;
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    const allCandidates = (allCandidateRows ?? []).filter((restaurant: any) =>
+      hasUsableOffer(restaurant.offer)
+    );
+
+    const cityMatchedCandidates =
+      city && city.trim().length > 0
+        ? allCandidates.filter(
+            (restaurant: any) =>
+              typeof restaurant.city === "string" &&
+              restaurant.city.trim().toLowerCase() === city.trim().toLowerCase()
+          )
+        : [];
+
+    const sourceItems =
+      cityMatchedCandidates.length > 0 ? cityMatchedCandidates : allCandidates;
+
+    const items = sourceItems
+      .filter((restaurant: any) => hasUsableOffer(restaurant.offer))
+      .sort(compareGrabYourDealRestaurants)
+      .slice(0, limit);
+
+    return res.json({ items });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ✅ Public: GET /api/restaurants/featured-in-your-location
+router.get("/featured-in-your-location", async (req, res) => {
+  const parsed = FeaturedInYourLocationQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid query", details: parsed.error.flatten() });
+  }
+
+  try {
+    const { city, area, limit } = parsed.data;
 
     const { data, error } = await supabase
       .from("restaurants")
       .select("*")
-      .eq("is_active", true)
-      .ilike("city", city)
-      .not("offer", "is", null);
+      .eq("is_active", true);
 
     if (error) {
       return res.status(500).json({ error: error.message });
     }
 
-    const items = (data ?? [])
-      .filter((restaurant: any) => hasUsableOffer(restaurant.offer))
-      .sort(compareGrabYourDealRestaurants)
-      .slice(0, GRAB_YOUR_DEAL_LIMIT);
+    const allActiveRestaurants = data ?? [];
 
-    return res.json({ items, city });
+    const normalizedArea = area?.trim().toLowerCase();
+    const normalizedCity = city?.trim().toLowerCase();
+
+    const areaMatchedRestaurants =
+      normalizedArea && normalizedArea.length > 0
+        ? allActiveRestaurants.filter(
+            (restaurant: any) =>
+              typeof restaurant.area === "string" &&
+              restaurant.area.trim().toLowerCase() === normalizedArea
+          )
+        : [];
+
+    const cityMatchedRestaurants =
+      normalizedCity && normalizedCity.length > 0
+        ? allActiveRestaurants.filter(
+            (restaurant: any) =>
+              typeof restaurant.city === "string" &&
+              restaurant.city.trim().toLowerCase() === normalizedCity
+          )
+        : [];
+
+    let sourceItems = allActiveRestaurants;
+    let location_scope: "area" | "city" | "overall" = "overall";
+
+    if (areaMatchedRestaurants.length > 0) {
+      sourceItems = areaMatchedRestaurants;
+      location_scope = "area";
+    } else if (cityMatchedRestaurants.length > 0) {
+      sourceItems = cityMatchedRestaurants;
+      location_scope = "city";
+    }
+
+    const items = sourceItems
+      .sort(compareGrabYourDealRestaurants)
+      .slice(0, limit);
+
+    return res.json({
+      items,
+      location_scope,
+    });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }

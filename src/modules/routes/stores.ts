@@ -101,6 +101,82 @@ const DeleteQuerySchema = z.object({
     .transform((v) => v === "true"),
 });
 
+function isStoreAdvertisementActive(store: any, now = new Date()) {
+  if (!store?.is_advertised) return false;
+
+  const startsAt = store.ad_starts_at ? new Date(store.ad_starts_at) : null;
+  const endsAt = store.ad_ends_at ? new Date(store.ad_ends_at) : null;
+
+  if (startsAt && startsAt > now) return false;
+  if (endsAt && endsAt < now) return false;
+
+  return true;
+}
+
+function isStorePremiumActive(store: any, now = new Date()) {
+  if (!store?.pickup_premium_enabled) return false;
+
+  const startedAt = store.pickup_premium_started_at
+    ? new Date(store.pickup_premium_started_at)
+    : null;
+  const expiresAt = store.pickup_premium_expires_at
+    ? new Date(store.pickup_premium_expires_at)
+    : null;
+
+  if (startedAt && startedAt > now) return false;
+  if (expiresAt && expiresAt < now) return false;
+
+  return true;
+}
+
+function comparePrimitiveValues(aValue: any, bValue: any, ascending: boolean) {
+  if (aValue === bValue) return 0;
+
+  if (aValue === null || aValue === undefined) return 1;
+  if (bValue === null || bValue === undefined) return -1;
+
+  if (typeof aValue === "number" && typeof bValue === "number") {
+    return ascending ? aValue - bValue : bValue - aValue;
+  }
+
+  const aText = String(aValue).toLowerCase();
+  const bText = String(bValue).toLowerCase();
+
+  if (aText < bText) return ascending ? -1 : 1;
+  if (aText > bText) return ascending ? 1 : -1;
+  return 0;
+}
+
+function compareStoresForFeed(a: any, b: any, sort: string, order: "asc" | "desc") {
+  const aAdvertised = isStoreAdvertisementActive(a);
+  const bAdvertised = isStoreAdvertisementActive(b);
+
+  if (aAdvertised !== bAdvertised) {
+    return aAdvertised ? -1 : 1;
+  }
+
+  if (aAdvertised && bAdvertised) {
+    const aPriority = typeof a.ad_priority === "number" ? a.ad_priority : 100;
+    const bPriority = typeof b.ad_priority === "number" ? b.ad_priority : 100;
+
+    if (aPriority !== bPriority) {
+      return aPriority - bPriority;
+    }
+  }
+
+  const aPremium = isStorePremiumActive(a);
+  const bPremium = isStorePremiumActive(b);
+
+  if (aPremium !== bPremium) {
+    return aPremium ? -1 : 1;
+  }
+
+  const primarySort = comparePrimitiveValues(a?.[sort], b?.[sort], order === "asc");
+  if (primarySort !== 0) return primarySort;
+
+  return comparePrimitiveValues(a?.created_at, b?.created_at, false);
+}
+
 // GET /api/stores
 // /api/stores?search=&city=&category=&tag=&status=&includeInactive=&limit=&offset=&sort=&order=&is_featured=
 router.get("/", async (req, res) => {
@@ -175,23 +251,19 @@ router.get("/", async (req, res) => {
     );
   }
 
-  // ordering
-  query = query.order(sort, { ascending: order === "asc" });
-
-  // IMPORTANT: for consistent ordering when values tie
-  if (sort !== "created_at") {
-    query = query.order("created_at", { ascending: false });
-  }
-
-  const from = offset;
-  const to = offset + limit - 1;
-
-  const { data, error, count } = await query.range(from, to);
+  const { data, error, count } = await query;
 
   if (error) return res.status(500).json({ error: error.message });
 
+  const orderedItems = (data ?? []).sort((a: any, b: any) =>
+    compareStoresForFeed(a, b, sort, order)
+  );
+
+  const from = offset;
+  const to = offset + limit;
+
   return res.json({
-    items: data ?? [],
+    items: orderedItems.slice(from, to),
     page: { limit, offset, total: count ?? 0 },
   });
 });
