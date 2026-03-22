@@ -343,14 +343,6 @@ function hasUsableVisualMedia(restaurant: any) {
     typeof restaurant?.cover_image === "string" &&
     restaurant.cover_image.trim().length > 0;
 
-  const hasCoverMediaUrl =
-    typeof restaurant?.cover_media_url === "string" &&
-    restaurant.cover_media_url.trim().length > 0;
-
-  const hasCoverVideoUrl =
-    typeof restaurant?.cover_video_url === "string" &&
-    restaurant.cover_video_url.trim().length > 0;
-
   const hasAmbienceImages =
     Array.isArray(restaurant?.ambience_images) &&
     restaurant.ambience_images.some((item: any) => typeof item === "string" && item.trim().length > 0);
@@ -361,8 +353,6 @@ function hasUsableVisualMedia(restaurant: any) {
 
   return (
     hasCoverImage ||
-    hasCoverMediaUrl ||
-    hasCoverVideoUrl ||
     hasAmbienceImages ||
     hasFoodImages
   );
@@ -741,9 +731,6 @@ router.get("/foodie-frontrow", async (req, res) => {
           "area",
           "city",
           "cover_image",
-          "cover_media_url",
-          "cover_video_url",
-          "cover_media_type",
           "ambience_images",
           "food_images",
           "cuisines",
