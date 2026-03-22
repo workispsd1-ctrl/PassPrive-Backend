@@ -170,6 +170,17 @@ const ListQuerySchema = z.object({
   search: z.string().trim().min(1).optional(),
   city: z.string().trim().min(1).optional(),
   area: z.string().trim().min(1).optional(),
+  mood_tag: z.string().trim().min(1).optional(),
+  is_pure_veg: z
+    .string()
+    .optional()
+    .transform((v) => {
+      if (v === undefined) return undefined;
+      const normalized = v.trim().toLowerCase();
+      if (normalized === "true" || normalized === "veg") return true;
+      if (normalized === "false" || normalized === "nonveg") return false;
+      return undefined;
+    }),
   owner_user_id: z.string().uuid().optional(),
 
   status: z.enum(["active", "inactive"]).optional(),
@@ -224,11 +235,13 @@ const CreateRestaurantSchema = z.object({
   cuisines: z.array(z.string()).optional().default([]),
   cost_for_two: z.number().int().optional().nullable(),
   distance: z.number().optional().nullable(),
-  offer: z.string().trim().optional().nullable(),
+  offer: z.record(z.string(), z.any()).optional().nullable(),
 
   facilities: z.array(z.string()).optional().default([]),
   highlights: z.array(z.string()).optional().default([]),
   worth_visit: z.array(z.string()).optional().default([]),
+  mood_tags: z.array(z.string()).optional().default([]),
+  is_pure_veg: z.boolean().optional().default(false),
 
   opening_hours: OpeningHoursSchema.optional().default({}),
 
@@ -264,11 +277,13 @@ const UpdateRestaurantSchema = z.object({
   cuisines: z.array(z.string()).optional(),
   cost_for_two: z.number().int().nullable().optional(),
   distance: z.number().nullable().optional(),
-  offer: z.string().trim().nullable().optional(),
+  offer: z.record(z.string(), z.any()).nullable().optional(),
 
   facilities: z.array(z.string()).optional(),
   highlights: z.array(z.string()).optional(),
   worth_visit: z.array(z.string()).optional(),
+  mood_tags: z.array(z.string()).optional(),
+  is_pure_veg: z.boolean().optional(),
 
   opening_hours: OpeningHoursSchema.nullable().optional(),
 
@@ -307,7 +322,20 @@ router.get("/", async (req, res) => {
       .json({ error: "Invalid query", details: parsed.error.flatten() });
   }
 
-  const { search, city, area, owner_user_id, status, includeInactive, limit, offset, sort, order } =
+  const {
+    search,
+    city,
+    area,
+    mood_tag,
+    is_pure_veg,
+    owner_user_id,
+    status,
+    includeInactive,
+    limit,
+    offset,
+    sort,
+    order,
+  } =
     parsed.data;
 
   // 🛡️ SECURITY: get caller info if available
@@ -333,11 +361,20 @@ router.get("/", async (req, res) => {
   // 3. Search and locations
   if (city) query = query.ilike("city", `%${city}%`);
   if (area) query = query.ilike("area", `%${area}%`);
+  if (mood_tag) query = query.contains("mood_tags", [mood_tag]);
+  if (typeof is_pure_veg === "boolean") query = query.eq("is_pure_veg", is_pure_veg);
 
   if (search) {
     const s = search.replace(/"/g, '\\"');
     query = query.or(
-      `name.ilike.%${s}%,phone.ilike.%${s}%,area.ilike.%${s}%,city.ilike.%${s}%`
+      [
+        `name.ilike.%${s}%`,
+        `phone.ilike.%${s}%`,
+        `area.ilike.%${s}%`,
+        `city.ilike.%${s}%`,
+        `full_address.ilike.%${s}%`,
+        `slug.ilike.%${s}%`,
+      ].join(",")
     );
   }
 
@@ -384,8 +421,7 @@ router.get("/in-the-limelight", async (req, res) => {
     (restaurant: any) =>
       typeof restaurant.cover_image === "string" &&
       restaurant.cover_image.trim() !== "" &&
-      typeof restaurant.offer === "string" &&
-      restaurant.offer.trim() !== ""
+      restaurant.offer !== null
   );
 
   return res.json({
@@ -447,6 +483,8 @@ router.post("/", async (req, res) => {
       facilities: body.facilities ?? [],
       highlights: body.highlights ?? [],
       worth_visit: body.worth_visit ?? [],
+      mood_tags: body.mood_tags ?? [],
+      is_pure_veg: body.is_pure_veg ?? false,
 
       opening_hours: body.opening_hours ?? {},
       reviews: body.reviews ?? [],
