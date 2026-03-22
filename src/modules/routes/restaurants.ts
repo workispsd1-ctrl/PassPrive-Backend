@@ -231,6 +231,16 @@ const FeaturedInYourLocationQuerySchema = z.object({
     .refine((n) => Number.isFinite(n) && n > 0 && n <= 50, "limit 1-50"),
 });
 
+const FoodieFrontrowQuerySchema = z.object({
+  city: z.string().trim().min(1).optional(),
+  area: z.string().trim().min(1).optional(),
+  limit: z
+    .string()
+    .optional()
+    .transform((v) => (v ? Number(v) : 12))
+    .refine((n) => Number.isFinite(n) && n > 0 && n <= 50, "limit 1-50"),
+});
+
 function hasUsableOffer(offer: any) {
   if (offer === null || offer === undefined) return false;
   if (typeof offer === "string") return offer.trim().length > 0;
@@ -309,6 +319,33 @@ function compareGrabYourDealRestaurants(a: any, b: any) {
   const aCreatedAt = a.created_at ? new Date(a.created_at).getTime() : 0;
   const bCreatedAt = b.created_at ? new Date(b.created_at).getTime() : 0;
   return bCreatedAt - aCreatedAt;
+}
+
+function hasUsableVisualMedia(restaurant: any) {
+  const hasCoverImage =
+    typeof restaurant?.cover_image === "string" &&
+    restaurant.cover_image.trim().length > 0;
+  const hasCoverMediaUrl =
+    typeof restaurant?.cover_media_url === "string" &&
+    restaurant.cover_media_url.trim().length > 0;
+  const hasCoverVideoUrl =
+    typeof restaurant?.cover_video_url === "string" &&
+    restaurant.cover_video_url.trim().length > 0;
+
+  return hasCoverImage || hasCoverMediaUrl || hasCoverVideoUrl;
+}
+
+function dedupeRestaurantsById(restaurants: any[]) {
+  const seen = new Set<string>();
+  const deduped: any[] = [];
+
+  for (const restaurant of restaurants) {
+    if (!restaurant?.id || seen.has(restaurant.id)) continue;
+    seen.add(restaurant.id);
+    deduped.push(restaurant);
+  }
+
+  return deduped;
 }
 
 // ✅ FIX: z.record(keySchema, valueSchema)
@@ -644,6 +681,105 @@ router.get("/featured-in-your-location", async (req, res) => {
       items,
       location_scope,
     });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ✅ Public: GET /api/restaurants/foodie-frontrow
+router.get("/foodie-frontrow", async (req, res) => {
+  const parsed = FoodieFrontrowQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid query", details: parsed.error.flatten() });
+  }
+
+  try {
+    const { city, area, limit } = parsed.data;
+
+    const { data, error } = await supabase
+      .from("restaurants")
+      .select(
+        [
+          "id",
+          "name",
+          "area",
+          "city",
+          "cover_image",
+          "cover_media_url",
+          "cover_video_url",
+          "cover_media_type",
+          "ambience_images",
+          "food_images",
+          "cuisines",
+          "rating",
+          "total_ratings",
+          "distance",
+          "offer",
+          "slug",
+          "latitude",
+          "longitude",
+          "is_advertised",
+          "ad_badge_text",
+          "ad_priority",
+          "ad_starts_at",
+          "ad_ends_at",
+          "subscribed",
+          "premium_unlock_all",
+          "premium_time_slot_enabled",
+          "premium_repeat_rewards_enabled",
+          "premium_dish_discounts_enabled",
+          "premium_expires_at",
+          "created_at",
+        ].join(",")
+      )
+      .eq("is_active", true);
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    const eligibleRestaurants = dedupeRestaurantsById(
+      (data ?? []).filter((restaurant: any) => hasUsableVisualMedia(restaurant))
+    );
+
+    const normalizedArea = area?.trim().toLowerCase();
+    const normalizedCity = city?.trim().toLowerCase();
+
+    const areaMatchedRestaurants =
+      normalizedArea && normalizedArea.length > 0
+        ? eligibleRestaurants.filter(
+            (restaurant: any) =>
+              typeof restaurant.area === "string" &&
+              restaurant.area.trim().toLowerCase() === normalizedArea
+          )
+        : [];
+
+    const cityMatchedRestaurants =
+      normalizedCity && normalizedCity.length > 0
+        ? eligibleRestaurants.filter(
+            (restaurant: any) =>
+              typeof restaurant.city === "string" &&
+              restaurant.city.trim().toLowerCase() === normalizedCity
+          )
+        : [];
+
+    let sourceItems = eligibleRestaurants;
+
+    if (areaMatchedRestaurants.length >= limit) {
+      sourceItems = areaMatchedRestaurants;
+    } else if (cityMatchedRestaurants.length > 0) {
+      sourceItems = cityMatchedRestaurants;
+    } else if (areaMatchedRestaurants.length > 0) {
+      sourceItems = areaMatchedRestaurants;
+    }
+
+    const items = dedupeRestaurantsById(sourceItems)
+      .sort(compareGrabYourDealRestaurants)
+      .slice(0, limit);
+
+    return res.json({ items });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
