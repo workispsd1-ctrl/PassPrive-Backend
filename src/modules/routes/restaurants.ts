@@ -321,19 +321,53 @@ function compareGrabYourDealRestaurants(a: any, b: any) {
   return bCreatedAt - aCreatedAt;
 }
 
+function normalizeCanonicalCity(value?: string | null) {
+  const normalized = String(value || "").trim().toLowerCase();
+
+  const aliases: Record<string, string> = {
+    hyderabad: "hyderabad",
+    secunderabad: "hyderabad",
+    "secunderabad, hyderabad": "hyderabad",
+    "hyderabad, secunderabad": "hyderabad",
+    mumbai: "mumbai",
+    bombay: "mumbai",
+    bengaluru: "bengaluru",
+    bangalore: "bengaluru",
+  };
+
+  return aliases[normalized] || normalized;
+}
+
 function hasUsableVisualMedia(restaurant: any) {
   const hasCoverImage =
     typeof restaurant?.cover_image === "string" &&
     restaurant.cover_image.trim().length > 0;
+
   const hasCoverMediaUrl =
     typeof restaurant?.cover_media_url === "string" &&
     restaurant.cover_media_url.trim().length > 0;
+
   const hasCoverVideoUrl =
     typeof restaurant?.cover_video_url === "string" &&
     restaurant.cover_video_url.trim().length > 0;
 
-  return hasCoverImage || hasCoverMediaUrl || hasCoverVideoUrl;
+  const hasAmbienceImages =
+    Array.isArray(restaurant?.ambience_images) &&
+    restaurant.ambience_images.some((item: any) => typeof item === "string" && item.trim().length > 0);
+
+  const hasFoodImages =
+    Array.isArray(restaurant?.food_images) &&
+    restaurant.food_images.some((item: any) => typeof item === "string" && item.trim().length > 0);
+
+  return (
+    hasCoverImage ||
+    hasCoverMediaUrl ||
+    hasCoverVideoUrl ||
+    hasAmbienceImages ||
+    hasFoodImages
+  );
 }
+
 
 function dedupeRestaurantsById(restaurants: any[]) {
   const seen = new Set<string>();
@@ -535,12 +569,12 @@ router.get("/in-the-limelight", async (req, res) => {
   }
 
   const { city } = parsed.data;
+  const normalizedCity = normalizeCanonicalCity(city);
 
   let query = supabase
     .from("restaurants")
     .select("*")
     .eq("is_active", true)
-    .ilike("city", city)
     .gte("rating", 4.2)
     .gte("total_ratings", 50)
     .eq("booking_enabled", true)
@@ -555,6 +589,7 @@ router.get("/in-the-limelight", async (req, res) => {
 
   const items = (data ?? []).filter(
     (restaurant: any) =>
+      normalizeCanonicalCity(restaurant.city) === normalizedCity &&
       typeof restaurant.cover_image === "string" &&
       restaurant.cover_image.trim() !== "" &&
       restaurant.offer !== null
@@ -579,6 +614,7 @@ router.get("/grab-your-deal", async (req, res) => {
 
   try {
     const { city, limit } = parsed.data;
+    const normalizedCity = normalizeCanonicalCity(city);
 
     const baseQuery = supabase
       .from("restaurants")
@@ -596,11 +632,10 @@ router.get("/grab-your-deal", async (req, res) => {
     );
 
     const cityMatchedCandidates =
-      city && city.trim().length > 0
+      normalizedCity && normalizedCity.length > 0
         ? allCandidates.filter(
             (restaurant: any) =>
-              typeof restaurant.city === "string" &&
-              restaurant.city.trim().toLowerCase() === city.trim().toLowerCase()
+              normalizeCanonicalCity(restaurant.city) === normalizedCity
           )
         : [];
 
@@ -642,7 +677,7 @@ router.get("/featured-in-your-location", async (req, res) => {
     const allActiveRestaurants = data ?? [];
 
     const normalizedArea = area?.trim().toLowerCase();
-    const normalizedCity = city?.trim().toLowerCase();
+    const normalizedCity = normalizeCanonicalCity(city);
 
     const areaMatchedRestaurants =
       normalizedArea && normalizedArea.length > 0
@@ -657,8 +692,7 @@ router.get("/featured-in-your-location", async (req, res) => {
       normalizedCity && normalizedCity.length > 0
         ? allActiveRestaurants.filter(
             (restaurant: any) =>
-              typeof restaurant.city === "string" &&
-              restaurant.city.trim().toLowerCase() === normalizedCity
+              normalizeCanonicalCity(restaurant.city) === normalizedCity
           )
         : [];
 
@@ -745,7 +779,7 @@ router.get("/foodie-frontrow", async (req, res) => {
     );
 
     const normalizedArea = area?.trim().toLowerCase();
-    const normalizedCity = city?.trim().toLowerCase();
+    const normalizedCity = normalizeCanonicalCity(city);
 
     const areaMatchedRestaurants =
       normalizedArea && normalizedArea.length > 0
@@ -760,8 +794,7 @@ router.get("/foodie-frontrow", async (req, res) => {
       normalizedCity && normalizedCity.length > 0
         ? eligibleRestaurants.filter(
             (restaurant: any) =>
-              typeof restaurant.city === "string" &&
-              restaurant.city.trim().toLowerCase() === normalizedCity
+              normalizeCanonicalCity(restaurant.city) === normalizedCity
           )
         : [];
 
