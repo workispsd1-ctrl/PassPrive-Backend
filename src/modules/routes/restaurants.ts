@@ -786,6 +786,7 @@ router.get("/foodie-frontrow", async (req, res) => {
           "premium_dish_discounts_enabled",
           "premium_expires_at",
           "created_at",
+          "description",
         ].join(",")
       )
       .eq("is_active", true);
