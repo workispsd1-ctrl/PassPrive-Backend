@@ -1,31 +1,59 @@
 import { Router } from "express";
+import multer from "multer";
 import { z } from "zod";
 import supabase from "../../database/supabase";
 
 const router = Router();
+const upload = multer({ storage: multer.memoryStorage() });
+
+function parseMetadataInput(value: any) {
+  if (value === undefined) return undefined;
+  if (typeof value === "object" && value !== null) return value;
+  if (typeof value === "string" && value.trim() !== "") {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return undefined;
+    }
+  }
+  return {};
+}
+
+function parseBooleanInput(value: any) {
+  if (value === undefined) return undefined;
+  if (typeof value === "boolean") return value;
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (normalized === "true") return true;
+    if (normalized === "false") return false;
+  }
+  return value;
+}
 
 const CreateSectionSchema = z.object({
   slug: z.string().trim().min(1),
   title: z.string().trim().min(1),
   subtitle: z.string().trim().nullable().optional(),
-  is_active: z.boolean().optional(),
+  is_active: z.preprocess(parseBooleanInput, z.boolean().optional()),
   starts_at: z.string().datetime().optional(),
   ends_at: z.string().datetime().nullable().optional(),
-  max_items: z.number().int().positive().optional(),
-  metadata: z.record(z.string(), z.any()).optional(),
-  sync_items: z.boolean().optional(),
+  max_items: z.coerce.number().int().positive().optional(),
+  metadata: z.preprocess(parseMetadataInput, z.record(z.string(), z.any()).optional()),
+  sync_items: z.preprocess(parseBooleanInput, z.boolean().optional()),
+  thumbnail_url: z.string().trim().nullable().optional(),
 });
 
 const UpdateSectionSchema = z.object({
   slug: z.string().trim().min(1).optional(),
   title: z.string().trim().min(1).optional(),
   subtitle: z.string().trim().nullable().optional(),
-  is_active: z.boolean().optional(),
+  is_active: z.preprocess(parseBooleanInput, z.boolean().optional()),
   starts_at: z.string().datetime().optional(),
   ends_at: z.string().datetime().nullable().optional(),
-  max_items: z.number().int().positive().optional(),
-  metadata: z.record(z.string(), z.any()).optional(),
-  sync_items: z.boolean().optional(),
+  max_items: z.coerce.number().int().positive().optional(),
+  metadata: z.preprocess(parseMetadataInput, z.record(z.string(), z.any()).optional()),
+  sync_items: z.preprocess(parseBooleanInput, z.boolean().optional()),
+  thumbnail_url: z.string().trim().nullable().optional(),
 });
 
 const SectionSlugSchema = z.object({
@@ -171,10 +199,32 @@ function compareQualifiedStores(a: any, b: any) {
   return bCreatedAt - aCreatedAt;
 }
 
+async function uploadCampaignThumbnail(file: Express.Multer.File) {
+  const fileExt = file.originalname.split(".").pop();
+  const fileName = `campaign_${Date.now()}.${fileExt}`;
+
+  const { error: uploadError } = await supabase.storage
+    .from("store-campaign")
+    .upload(fileName, file.buffer, {
+      contentType: file.mimetype,
+    });
+
+  if (uploadError) throw uploadError;
+
+  const publicUrl = supabase.storage
+    .from("store-campaign")
+    .getPublicUrl(fileName).data.publicUrl;
+
+  return {
+    thumbnail_url: publicUrl,
+    thumbnail_path: fileName,
+  };
+}
+
 export async function getStoresHomeSectionBySlug(slug: string) {
   const { data, error } = await supabase
     .from("stores_home_sections")
-    .select("id, slug, title, subtitle, max_items, starts_at, ends_at, is_active")
+    .select("id, slug, title, subtitle, max_items, starts_at, ends_at, is_active, thumbnail_url")
     .eq("slug", slug)
     .eq("is_active", true)
     .maybeSingle();
@@ -186,7 +236,7 @@ export async function getStoresHomeSectionBySlug(slug: string) {
 export async function getStoresHomeSectionById(id: string) {
   const { data, error } = await supabase
     .from("stores_home_sections")
-    .select("id, slug, title, subtitle, max_items, starts_at, ends_at, is_active, metadata")
+    .select("id, slug, title, subtitle, max_items, starts_at, ends_at, is_active, metadata, thumbnail_url")
     .eq("id", id)
     .maybeSingle();
 
@@ -338,7 +388,7 @@ export async function syncStoresHomeSectionItems(sectionId: string) {
   };
 }
 
-router.post("/sections", async (req, res) => {
+router.post("/sections", upload.single("thumbnail"), async (req, res) => {
   const parsed = CreateSectionSchema.safeParse(req.body);
   if (!parsed.success) {
     return res
@@ -348,6 +398,17 @@ router.post("/sections", async (req, res) => {
 
   try {
     const body = parsed.data;
+    let metadata = body.metadata ?? {};
+    let thumbnailUrl = body.thumbnail_url ?? null;
+
+    if (req.file) {
+      const uploadedThumbnail = await uploadCampaignThumbnail(req.file);
+      thumbnailUrl = uploadedThumbnail.thumbnail_url;
+      metadata = {
+        ...metadata,
+        thumbnail_path: uploadedThumbnail.thumbnail_path,
+      };
+    }
 
     const { data, error } = await supabase
       .from("stores_home_sections")
@@ -359,7 +420,8 @@ router.post("/sections", async (req, res) => {
         starts_at: body.starts_at ?? new Date().toISOString(),
         ends_at: body.ends_at ?? null,
         max_items: body.max_items ?? 12,
-        metadata: body.metadata ?? {},
+        metadata,
+        thumbnail_url: thumbnailUrl,
       })
       .select()
       .single();
@@ -399,7 +461,7 @@ router.get("/sections", async (req, res) => {
   }
 });
 
-router.put("/sections/:id", async (req, res) => {
+router.put("/sections/:id", upload.single("thumbnail"), async (req, res) => {
   const paramsParsed = SectionIdSchema.safeParse(req.params);
   if (!paramsParsed.success) {
     return res
@@ -421,9 +483,28 @@ router.put("/sections/:id", async (req, res) => {
   }
 
   try {
+    let updatePayload: any = { ...body };
+
+    if (body.metadata !== undefined) {
+      updatePayload.metadata = body.metadata;
+    }
+
+    if (req.file) {
+      const currentSection = await getStoresHomeSectionById(paramsParsed.data.id);
+      const existingMetadata = currentSection?.metadata ?? {};
+      const uploadedThumbnail = await uploadCampaignThumbnail(req.file);
+
+      updatePayload.thumbnail_url = uploadedThumbnail.thumbnail_url;
+      updatePayload.metadata = {
+        ...existingMetadata,
+        ...(updatePayload.metadata ?? {}),
+        thumbnail_path: uploadedThumbnail.thumbnail_path,
+      };
+    }
+
     const { data, error } = await supabase
       .from("stores_home_sections")
-      .update(body)
+      .update(updatePayload)
       .eq("id", paramsParsed.data.id)
       .select()
       .single();
@@ -531,6 +612,7 @@ router.get("/sections/:id/items", async (req, res) => {
         title: section.title,
         subtitle: section.subtitle,
         max_items: section.max_items,
+        thumbnail_url: section.thumbnail_url,
       },
       items,
     });
@@ -725,6 +807,7 @@ router.get("/sections/:slug", async (req, res) => {
           title: section.title,
           subtitle: section.subtitle,
           max_items: section.max_items,
+          thumbnail_url: section.thumbnail_url,
         },
         items: [],
       });
@@ -820,6 +903,7 @@ router.get("/sections/:slug", async (req, res) => {
         title: section.title,
         subtitle: section.subtitle,
         max_items: section.max_items,
+        thumbnail_url: section.thumbnail_url,
       },
       items: finalItems,
     });
