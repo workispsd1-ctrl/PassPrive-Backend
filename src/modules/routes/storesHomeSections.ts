@@ -4,8 +4,41 @@ import supabase from "../../database/supabase";
 
 const router = Router();
 
+const CreateSectionSchema = z.object({
+  slug: z.string().trim().min(1),
+  title: z.string().trim().min(1),
+  subtitle: z.string().trim().nullable().optional(),
+  is_active: z.boolean().optional(),
+  starts_at: z.string().datetime().optional(),
+  ends_at: z.string().datetime().nullable().optional(),
+  max_items: z.number().int().positive().optional(),
+  metadata: z.record(z.string(), z.any()).optional(),
+  sync_items: z.boolean().optional(),
+});
+
+const UpdateSectionSchema = z.object({
+  slug: z.string().trim().min(1).optional(),
+  title: z.string().trim().min(1).optional(),
+  subtitle: z.string().trim().nullable().optional(),
+  is_active: z.boolean().optional(),
+  starts_at: z.string().datetime().optional(),
+  ends_at: z.string().datetime().nullable().optional(),
+  max_items: z.number().int().positive().optional(),
+  metadata: z.record(z.string(), z.any()).optional(),
+  sync_items: z.boolean().optional(),
+});
+
 const SectionSlugSchema = z.object({
   slug: z.string().trim().min(1),
+});
+
+const SectionIdSchema = z.object({
+  id: z.string().uuid(),
+});
+
+const SectionItemIdSchema = z.object({
+  id: z.string().uuid(),
+  itemId: z.string().uuid(),
 });
 
 const SectionQuerySchema = z.object({
@@ -17,6 +50,18 @@ const SectionQuerySchema = z.object({
       (v) => v === undefined || (Number.isFinite(v) && v > 0 && v <= 500),
       "limit 1-500"
     ),
+});
+
+const AddManualItemSchema = z.object({
+  store_id: z.string().uuid(),
+  sort_order: z.number().int().optional(),
+  is_active: z.boolean().optional(),
+});
+
+const UpdateSectionItemSchema = z.object({
+  store_id: z.string().uuid().optional(),
+  sort_order: z.number().int().optional(),
+  is_active: z.boolean().optional(),
 });
 
 function hasUsableStoreOffers(offers: any) {
@@ -138,6 +183,17 @@ export async function getStoresHomeSectionBySlug(slug: string) {
   return data;
 }
 
+export async function getStoresHomeSectionById(id: string) {
+  const { data, error } = await supabase
+    .from("stores_home_sections")
+    .select("id, slug, title, subtitle, max_items, starts_at, ends_at, is_active, metadata")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (error) throw error;
+  return data;
+}
+
 export async function syncStoresHomeSectionItems(sectionId: string) {
   const { data: section, error: sectionError } = await supabase
     .from("stores_home_sections")
@@ -169,10 +225,6 @@ export async function syncStoresHomeSectionItems(sectionId: string) {
         "pickup_premium_enabled",
         "pickup_premium_started_at",
         "pickup_premium_expires_at",
-        "city",
-        "category",
-        "subcategory",
-        "tags",
         "sort_order",
         "metadata",
         "created_at",
@@ -183,7 +235,6 @@ export async function syncStoresHomeSectionItems(sectionId: string) {
   if (storesError) throw storesError;
 
   const storeRows = (stores ?? []) as any[];
-
   const qualifyingStores = storeRows
     .filter((store: any) => hasUsableStoreOffers(store.offers))
     .sort(compareQualifiedStores);
@@ -193,14 +244,14 @@ export async function syncStoresHomeSectionItems(sectionId: string) {
     (existingItems ?? []).map((item: any) => [item.store_id, item])
   );
 
-  const inserts = [];
-  const updates = [];
-  const deactivations = [];
-
   let inserted = 0;
   let reactivated = 0;
   let deactivated = 0;
   let skipped_manual = 0;
+
+  const inserts = [];
+  const updates = [];
+  const deactivateIds = [];
 
   for (const [index, store] of qualifyingStores.entries()) {
     const existing = existingByStoreId.get(store.id);
@@ -239,7 +290,7 @@ export async function syncStoresHomeSectionItems(sectionId: string) {
     if (!item.is_active) continue;
     if (rankedStoreIds.has(item.store_id)) continue;
 
-    deactivations.push(item.id);
+    deactivateIds.push(item.id);
     deactivated += 1;
   }
 
@@ -263,11 +314,11 @@ export async function syncStoresHomeSectionItems(sectionId: string) {
     if (error) throw error;
   }
 
-  if (deactivations.length > 0) {
+  if (deactivateIds.length > 0) {
     const { error } = await supabase
       .from("stores_home_section_items")
       .update({ is_active: false })
-      .in("id", deactivations);
+      .in("id", deactivateIds);
 
     if (error) throw error;
   }
@@ -287,11 +338,339 @@ export async function syncStoresHomeSectionItems(sectionId: string) {
   };
 }
 
-export async function syncStoresHomeSectionItemsBySlug(slug: string) {
-  const section = await getStoresHomeSectionBySlug(slug);
-  if (!section) throw new Error("Section not found");
-  return syncStoresHomeSectionItems(section.id);
-}
+router.post("/sections", async (req, res) => {
+  const parsed = CreateSectionSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid body", details: parsed.error.flatten() });
+  }
+
+  try {
+    const body = parsed.data;
+
+    const { data, error } = await supabase
+      .from("stores_home_sections")
+      .insert({
+        slug: body.slug,
+        title: body.title,
+        subtitle: body.subtitle ?? null,
+        is_active: body.is_active ?? true,
+        starts_at: body.starts_at ?? new Date().toISOString(),
+        ends_at: body.ends_at ?? null,
+        max_items: body.max_items ?? 12,
+        metadata: body.metadata ?? {},
+      })
+      .select()
+      .single();
+
+    if (error) {
+      if ((error as any)?.code === "23505") {
+        return res.status(400).json({ error: "Slug already exists" });
+      }
+      throw error;
+    }
+
+    const syncResult =
+      body.sync_items === false ? null : await syncStoresHomeSectionItems(data.id);
+
+    return res.status(201).json({
+      message: "Stores home section created successfully",
+      section: data,
+      ...(syncResult ? { sync_summary: syncResult.summary } : {}),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+router.get("/sections", async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("stores_home_sections")
+      .select("*")
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    return res.json({ sections: data ?? [] });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+router.put("/sections/:id", async (req, res) => {
+  const paramsParsed = SectionIdSchema.safeParse(req.params);
+  if (!paramsParsed.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid section id", details: paramsParsed.error.flatten() });
+  }
+
+  const bodyParsed = UpdateSectionSchema.safeParse(req.body);
+  if (!bodyParsed.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid body", details: bodyParsed.error.flatten() });
+  }
+
+  const { sync_items, ...body } = bodyParsed.data;
+
+  if (Object.keys(bodyParsed.data).length === 0) {
+    return res.status(400).json({ error: "No fields to update" });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from("stores_home_sections")
+      .update(body)
+      .eq("id", paramsParsed.data.id)
+      .select()
+      .single();
+
+    if (error) {
+      if ((error as any)?.code === "23505") {
+        return res.status(400).json({ error: "Slug already exists" });
+      }
+      throw error;
+    }
+
+    const syncResult = sync_items ? await syncStoresHomeSectionItems(data.id) : null;
+
+    return res.json({
+      message: "Stores home section updated successfully",
+      section: data,
+      ...(syncResult ? { sync_summary: syncResult.summary } : {}),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+router.get("/sections/:id/items", async (req, res) => {
+  const paramsParsed = SectionIdSchema.safeParse(req.params);
+  if (!paramsParsed.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid section id", details: paramsParsed.error.flatten() });
+  }
+
+  try {
+    const section = await getStoresHomeSectionById(paramsParsed.data.id);
+    if (!section) {
+      return res.status(404).json({ error: "Section not found" });
+    }
+
+    const { data, error } = await supabase
+      .from("stores_home_section_items")
+      .select("*")
+      .eq("section_id", paramsParsed.data.id)
+      .order("sort_order", { ascending: true })
+      .order("created_at", { ascending: true });
+
+    if (error) throw error;
+
+    const storeIds = Array.from(
+      new Set((data ?? []).map((item: any) => item.store_id))
+    );
+
+    let storesById = new Map<string, any>();
+
+    if (storeIds.length > 0) {
+      const { data: stores, error: storesError } = await supabase
+        .from("stores")
+        .select(
+          [
+            "id",
+            "name",
+            "description",
+            "city",
+            "location_name",
+            "address_line1",
+            "category",
+            "subcategory",
+            "tags",
+            "cover_image_url",
+            "cover_media_url",
+            "logo_url",
+            "offers",
+            "is_featured",
+            "is_active",
+            "pickup_premium_enabled",
+            "pickup_premium_started_at",
+            "pickup_premium_expires_at",
+            "is_advertised",
+            "ad_badge_text",
+            "ad_priority",
+            "ad_starts_at",
+            "ad_ends_at",
+            "lat",
+            "lng",
+            "sort_order",
+            "created_at",
+          ].join(",")
+        )
+        .in("id", storeIds);
+
+      if (storesError) throw storesError;
+
+      storesById = new Map<string, any>(
+        ((stores ?? []) as any[]).map((store: any) => [store.id, store])
+      );
+    }
+
+    const items = (data ?? []).map((item: any) => ({
+      ...item,
+      store: storesById.get(item.store_id) ?? null,
+    }));
+
+    return res.json({
+      section: {
+        id: section.id,
+        slug: section.slug,
+        title: section.title,
+        subtitle: section.subtitle,
+        max_items: section.max_items,
+      },
+      items,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+router.post("/sections/:id/items", async (req, res) => {
+  const paramsParsed = SectionIdSchema.safeParse(req.params);
+  if (!paramsParsed.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid section id", details: paramsParsed.error.flatten() });
+  }
+
+  const bodyParsed = AddManualItemSchema.safeParse(req.body);
+  if (!bodyParsed.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid body", details: bodyParsed.error.flatten() });
+  }
+
+  try {
+    const section = await getStoresHomeSectionById(paramsParsed.data.id);
+    if (!section) {
+      return res.status(404).json({ error: "Section not found" });
+    }
+
+    const { data: store, error: storeError } = await supabase
+      .from("stores")
+      .select("id")
+      .eq("id", bodyParsed.data.store_id)
+      .maybeSingle();
+
+    if (storeError) throw storeError;
+    if (!store) {
+      return res.status(404).json({ error: "Store not found" });
+    }
+
+    const { data, error } = await supabase
+      .from("stores_home_section_items")
+      .upsert({
+        section_id: paramsParsed.data.id,
+        store_id: bodyParsed.data.store_id,
+        source_type: "MANUAL",
+        sort_order: bodyParsed.data.sort_order ?? 100,
+        is_active: bodyParsed.data.is_active ?? true,
+      }, { onConflict: "section_id,store_id" })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    return res.status(201).json({
+      message: "Manual store added to section successfully",
+      item: data,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+router.put("/sections/:id/items/:itemId", async (req, res) => {
+  const paramsParsed = SectionItemIdSchema.safeParse(req.params);
+  if (!paramsParsed.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid params", details: paramsParsed.error.flatten() });
+  }
+
+  const bodyParsed = UpdateSectionItemSchema.safeParse(req.body);
+  if (!bodyParsed.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid body", details: bodyParsed.error.flatten() });
+  }
+
+  if (Object.keys(bodyParsed.data).length === 0) {
+    return res.status(400).json({ error: "No fields to update" });
+  }
+
+  try {
+    if (bodyParsed.data.store_id) {
+      const { data: store, error: storeError } = await supabase
+        .from("stores")
+        .select("id")
+        .eq("id", bodyParsed.data.store_id)
+        .maybeSingle();
+
+      if (storeError) throw storeError;
+      if (!store) {
+        return res.status(404).json({ error: "Store not found" });
+      }
+    }
+
+    const { data, error } = await supabase
+      .from("stores_home_section_items")
+      .update(bodyParsed.data)
+      .eq("section_id", paramsParsed.data.id)
+      .eq("id", paramsParsed.data.itemId)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    return res.json({
+      message: "Section item updated successfully",
+      item: data,
+    });
+  } catch (err: any) {
+    if ((err as any)?.code === "23505") {
+      return res.status(400).json({ error: "This store already exists in the section" });
+    }
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+router.delete("/sections/:id/items/:itemId", async (req, res) => {
+  const paramsParsed = SectionItemIdSchema.safeParse(req.params);
+  if (!paramsParsed.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid params", details: paramsParsed.error.flatten() });
+  }
+
+  try {
+    const { error } = await supabase
+      .from("stores_home_section_items")
+      .update({ is_active: false })
+      .eq("section_id", paramsParsed.data.id)
+      .eq("id", paramsParsed.data.itemId);
+
+    if (error) throw error;
+
+    return res.json({ message: "Section item removed successfully" });
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 router.get("/sections/:slug", async (req, res) => {
   const slugParsed = SectionSlugSchema.safeParse(req.params);
@@ -369,7 +748,6 @@ router.get("/sections/:slug", async (req, res) => {
           "logo_url",
           "offers",
           "is_featured",
-          "is_active",
           "pickup_premium_enabled",
           "pickup_premium_started_at",
           "pickup_premium_expires_at",
@@ -432,10 +810,8 @@ router.get("/sections/:slug", async (req, res) => {
       })
       .filter(Boolean) as any[];
 
-    const finalItems =
-      queryParsed.data.limit !== undefined
-        ? joinedItems.slice(0, queryParsed.data.limit)
-        : joinedItems;
+    const finalLimit = queryParsed.data.limit ?? section.max_items ?? 12;
+    const finalItems = joinedItems.slice(0, finalLimit);
 
     return res.json({
       section: {
