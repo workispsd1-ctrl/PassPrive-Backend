@@ -11,7 +11,6 @@ import StoreMoodCategories from "./modules/routes/storeMoodCategories";
 import SpotLight from "./modules/routes/spotLight"
 import Restaurants from "./modules/routes/restaurants";
 import StoresHomeSections from "./modules/routes/storesHomeSections";
-import StoresHomeSectionsAdmin from "./modules/routes/storesHomeSectionsAdmin";
 import Stores from "./modules/routes/stores";
 import StoresHomeBanners from "./modules/routes/storesHomeBanners";
 import corporatesRouter from "./modules/routes/corporates";
@@ -50,7 +49,6 @@ app.use("/api/restaurants", Restaurants);
 app.use("/api/restaurant", Restaurants); // Alias
 
 app.use("/api/stores-home", StoresHomeSections);
-app.use("/api/superadmin/stores-home", StoresHomeSectionsAdmin);
 app.use("/api/stores", Stores);
 app.use("/api/store", Stores);       // Alias
 
