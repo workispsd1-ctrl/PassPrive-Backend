@@ -4,8 +4,8 @@ import supabase from "../../database/supabase";
 
 const router = Router();
 
-const CARDS_TABLE = "in_your_passprive_cards";
-const ITEMS_TABLE = "in_your_passprive_card_items";
+const CARDS_TABLE = "dinein_in_your_passprive";
+const ITEMS_TABLE = "dinein_in_your_passprive_card_items";
 
 const UuidSchema = z.string().uuid();
 
