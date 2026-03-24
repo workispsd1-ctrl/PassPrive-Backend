@@ -190,13 +190,24 @@ function getOpeningWindowsForDate(openingHours: any, bookingDate: Date) {
   const normalizedWindows = Array.isArray(rawWindow) ? rawWindow : [rawWindow];
 
   return normalizedWindows
-    .filter((window) => window && typeof window === "object" && !window.closed)
-    .map((window) => ({
-      open: typeof window.open === "string" ? window.open : null,
-      close: typeof window.close === "string" ? window.close : null,
-    }))
-    .filter((window) => window.open && window.close);
+    .map((window) => {
+      if (typeof window === "string") {
+        const [open, close] = window.split(" - ").map((part) => part?.trim());
+        return open && close ? { open, close } : null;
+      }
+
+      if (window && typeof window === "object" && !window.closed) {
+        return {
+          open: typeof window.open === "string" ? window.open : null,
+          close: typeof window.close === "string" ? window.close : null,
+        };
+      }
+
+      return null;
+    })
+    .filter((window): window is { open: string; close: string } => !!window?.open && !!window?.close);
 }
+
 
 function extractOfferCandidates(offerValue: any): any[] {
   if (!offerValue) return [];
@@ -607,6 +618,8 @@ router.post("/confirm", async (req, res) => {
       }
     }
 
+
+    
     const requestedCoverChargeRequired =
       selectedOption?.coverChargeRequired === true ||
       parseNumericSignal(selectedOption?.coverChargeAmount) > 0;
@@ -639,12 +652,21 @@ router.post("/confirm", async (req, res) => {
       return res.status(500).json({ error: customerBookingNumberResp.error.message });
     }
 
+    const normalizedPaymentStatus = paymentRequired
+  ? paymentVerified
+    ? "paid"
+    : "pending"
+  : "paid";
+
+
+  
+
     const bookingCode = generateBookingCode();
     const insertPayload = {
       restaurant_id: restaurantId,
       customer_user_id: customer.userId,
-      customer_name: customer.fullName,
-      customer_phone: customer.phone,
+      customer_name: customer.fullName || "Guest",
+      customer_phone: customer.phone ||"NA",
       customer_email: customer.email,
       booking_date: bookingDate,
       booking_time: bookingTime,
@@ -661,9 +683,11 @@ router.post("/confirm", async (req, res) => {
       cover_charge_required: paymentRequired,
       cover_charge_amount: paymentRequired ? verifiedCoverChargeAmount : 0,
       payment_amount: paymentRequired ? verifiedCoverChargeAmount : 0,
-      payment_status: paymentRequired ? String(payment?.status ?? "verified").toLowerCase() : "not_required",
+      payment_status: normalizedPaymentStatus,
       payment_method: payment?.method ?? null,
       payment_reference: payment?.reference ?? null,
+      booked_slot_label: body.selectedTime ?? null,
+
     };
 
     const { data: booking, error: insertError } = await supabase
