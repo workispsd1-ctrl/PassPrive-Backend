@@ -10,6 +10,7 @@ import MoodCategories from "./modules/routes/moodCategories";
 import StoreMoodCategories from "./modules/routes/storeMoodCategories";
 import StoreInYourPassPrive from "./modules/routes/storeInYourPassPrive";
 import SpotLight from "./modules/routes/spotLight"
+import RestaurantBookings from "./modules/routes/restaurantBookings";
 import Restaurants from "./modules/routes/restaurants";
 import StoresHomeSections from "./modules/routes/storesHomeSections";
 import Stores from "./modules/routes/stores";
@@ -48,6 +49,7 @@ app.use("/api/storemoodcategories", StoreMoodCategories);
 
 app.use("/api/spotlight", SpotLight);
 
+app.use("/api/restaurant-bookings", RestaurantBookings);
 app.use("/api/restaurants", Restaurants);
 app.use("/api/restaurant", Restaurants); // Alias
 
