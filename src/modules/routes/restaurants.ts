@@ -436,8 +436,6 @@ const CreateRestaurantSchema = z.object({
   cancellation_cutoff_minutes: z.coerce.number().int().optional().nullable(),
   cover_charge_enabled: z.boolean().optional().default(false),
   cover_charge_amount: z.coerce.number().optional().nullable(),
-  cover_charge_discount_type: z.string().trim().optional().nullable(),
-  cover_charge_discount_value: z.coerce.number().optional().nullable(),
 
   // ✅ optional: allow admin to set owner_user_id at creation time
   owner_user_id: z.string().uuid().optional().nullable(),
@@ -484,8 +482,6 @@ const UpdateRestaurantSchema = z.object({
   cancellation_cutoff_minutes: z.coerce.number().int().nullable().optional(),
   cover_charge_enabled: z.boolean().optional(),
   cover_charge_amount: z.coerce.number().nullable().optional(),
-  cover_charge_discount_type: z.string().trim().nullable().optional(),
-  cover_charge_discount_value: z.coerce.number().nullable().optional(),
 
   // ✅ allow admin to relink owner if needed
   owner_user_id: z.string().uuid().nullable().optional(),
@@ -712,8 +708,6 @@ router.get("/featured-in-your-location", async (req, res) => {
           "cancellation_cutoff_minutes",
           "cover_charge_enabled",
           "cover_charge_amount",
-          "cover_charge_discount_type",
-          "cover_charge_discount_value",
           "created_at",
           ...RESTAURANT_REVIEW_AGGREGATE_FIELDS,
         ].join(",")
@@ -818,8 +812,6 @@ router.get("/foodie-frontrow", async (req, res) => {
           "cancellation_cutoff_minutes",
           "cover_charge_enabled",
           "cover_charge_amount",
-          "cover_charge_discount_type",
-          "cover_charge_discount_value",
           "created_at",
           "description",
           ...RESTAURANT_REVIEW_AGGREGATE_FIELDS,
@@ -953,8 +945,6 @@ router.post("/", async (req, res) => {
       cancellation_cutoff_minutes: body.cancellation_cutoff_minutes ?? null,
       cover_charge_enabled: body.cover_charge_enabled ?? false,
       cover_charge_amount: body.cover_charge_amount ?? null,
-      cover_charge_discount_type: body.cover_charge_discount_type ?? null,
-      cover_charge_discount_value: body.cover_charge_discount_value ?? null,
 
       owner_user_id: body.owner_user_id ?? null,
     })
