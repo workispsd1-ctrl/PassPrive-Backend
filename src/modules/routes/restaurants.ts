@@ -426,6 +426,7 @@ const CreateRestaurantSchema = z.object({
   longitude: z.coerce.number().optional().nullable(),
 
   booking_enabled: z.boolean().optional().default(true),
+  booking_terms: z.string().trim().optional().nullable(),
   avg_duration_minutes: z.coerce.number().int().optional().default(90),
   max_bookings_per_slot: z.coerce.number().int().optional().nullable(),
   advance_booking_days: z.coerce.number().int().optional().default(30),
@@ -472,6 +473,7 @@ const UpdateRestaurantSchema = z.object({
   longitude: z.coerce.number().nullable().optional(),
 
   booking_enabled: z.boolean().optional(),
+  booking_terms: z.string().trim().nullable().optional(),
   avg_duration_minutes: z.coerce.number().int().optional(),
   max_bookings_per_slot: z.coerce.number().int().nullable().optional(),
   advance_booking_days: z.coerce.number().int().optional(),
@@ -935,6 +937,7 @@ router.post("/", async (req, res) => {
       longitude: body.longitude ?? null,
 
       booking_enabled: body.booking_enabled ?? true,
+      booking_terms: body.booking_terms ?? null,
       avg_duration_minutes: body.avg_duration_minutes ?? 90,
       max_bookings_per_slot: body.max_bookings_per_slot ?? null,
       advance_booking_days: body.advance_booking_days ?? 30,
