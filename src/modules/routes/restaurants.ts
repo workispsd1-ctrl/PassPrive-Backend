@@ -13,6 +13,16 @@ if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
   throw new Error("Missing SUPABASE_URL or SUPABASE_ANON_KEY in env");
 }
 
+const RESTAURANT_REVIEW_AGGREGATE_FIELDS = [
+  "rating",
+  "total_ratings",
+  "food_rating",
+  "drinks_rating",
+  "service_rating",
+  "ambience_rating",
+  "crowd_rating",
+];
+
 /* ---------------------------------------------
    Helpers
 --------------------------------------------- */
@@ -667,8 +677,6 @@ router.get("/featured-in-your-location", async (req, res) => {
           "cuisines",
           "distance",
           "offer",
-          "rating",
-          "total_ratings",
           "food_images",
           "ambience_images",
           "cover_image",
@@ -687,6 +695,7 @@ router.get("/featured-in-your-location", async (req, res) => {
           "premium_dish_discounts_enabled",
           "premium_expires_at",
           "created_at",
+          ...RESTAURANT_REVIEW_AGGREGATE_FIELDS,
         ].join(",")
       )
       .eq("is_active", true);
@@ -767,8 +776,6 @@ router.get("/foodie-frontrow", async (req, res) => {
           "ambience_images",
           "food_images",
           "cuisines",
-          "rating",
-          "total_ratings",
           "distance",
           "offer",
           "slug",
@@ -787,6 +794,7 @@ router.get("/foodie-frontrow", async (req, res) => {
           "premium_expires_at",
           "created_at",
           "description",
+          ...RESTAURANT_REVIEW_AGGREGATE_FIELDS,
         ].join(",")
       )
       .eq("is_active", true);
