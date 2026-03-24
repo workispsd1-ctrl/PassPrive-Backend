@@ -391,6 +391,27 @@ const OpeningHoursSchema = z.record(
   })
 );
 
+function normalizeBookingTerms(value: unknown, preserveUndefined = false) {
+  if (value === undefined) return preserveUndefined ? undefined : [];
+  if (value === null) return null;
+
+  const terms = Array.isArray(value) ? value : [value];
+  return terms
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+const CreateBookingTermsSchema = z.preprocess(
+  (value) => normalizeBookingTerms(value, false),
+  z.array(z.string()).nullable()
+);
+
+const UpdateBookingTermsSchema = z.preprocess(
+  (value) => normalizeBookingTerms(value, true),
+  z.union([z.array(z.string()), z.null(), z.undefined()])
+);
+
 /**
  * ✅ POST create restaurant ONLY (NO partner creation here)
  * owner_user_id can be passed from frontend after /api/auth/create-user returns id
@@ -426,7 +447,7 @@ const CreateRestaurantSchema = z.object({
   longitude: z.coerce.number().optional().nullable(),
 
   booking_enabled: z.boolean().optional().default(true),
-  booking_terms: z.string().trim().optional().nullable(),
+  booking_terms: CreateBookingTermsSchema,
   avg_duration_minutes: z.coerce.number().int().optional().default(90),
   max_bookings_per_slot: z.coerce.number().int().optional().nullable(),
   advance_booking_days: z.coerce.number().int().optional().default(30),
@@ -473,7 +494,7 @@ const UpdateRestaurantSchema = z.object({
   longitude: z.coerce.number().nullable().optional(),
 
   booking_enabled: z.boolean().optional(),
-  booking_terms: z.string().trim().nullable().optional(),
+  booking_terms: UpdateBookingTermsSchema,
   avg_duration_minutes: z.coerce.number().int().optional(),
   max_bookings_per_slot: z.coerce.number().int().nullable().optional(),
   advance_booking_days: z.coerce.number().int().optional(),
