@@ -22,6 +22,20 @@ const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
+function normalizeRoleValue(role?: string | null) {
+  const raw = String(role || "").trim().toLowerCase();
+  if (!raw) return "";
+
+  if (["superadmin", "super_admin", "super admin"].includes(raw)) {
+    return "superadmin";
+  }
+  if (["admin", "admin_user", "admin user"].includes(raw)) {
+    return "admin";
+  }
+
+  return raw.replace(/[_\s]+/g, "");
+}
+
 /**
  * Robust helper to get authenticated user info & role from Public Users Table.
  */
@@ -48,11 +62,11 @@ async function getCallerInfo(req: any) {
       console.error("[getCallerInfo] DB Role Fetch Failed:", dbError.message);
     }
 
-    let role = profile?.role?.toLowerCase() || "";
+    let role = normalizeRoleValue(profile?.role);
 
     // Fallback: Check Auth Metadata if role not found in DB
     if (!role && user.user_metadata?.role) {
-      role = String(user.user_metadata.role).toLowerCase();
+      role = normalizeRoleValue(String(user.user_metadata.role));
     }
 
     return { 
@@ -82,8 +96,9 @@ router.put("/users/:userId", async (req, res) => {
   const { userId: targetId } = req.params;
   const { full_name, phone, role: newRole } = req.body;
 
-  const isSuperAdmin = caller.role === "superadmin";
-  const isAdminComp = caller.role === "admin";
+  const callerRole = normalizeRoleValue(caller.role);
+  const isSuperAdmin = callerRole === "superadmin";
+  const isAdminComp = callerRole === "admin";
   const isSelf = caller.id === targetId;
 
   // Authorization: Admins can update others, anyone can update self (profile settings)
@@ -134,8 +149,9 @@ router.delete("/users/:userId", async (req, res) => {
   if (!caller) return res.status(401).json({ error: "Unauthorized" });
 
   const { userId: targetId } = req.params;
-  const isSuperAdmin = caller.role === "superadmin";
-  const isAdminComp = caller.role === "admin";
+  const callerRole = normalizeRoleValue(caller.role);
+  const isSuperAdmin = callerRole === "superadmin";
+  const isAdminComp = callerRole === "admin";
   const isSelfDelete = caller.id === targetId;
 
   let canDelete = isSuperAdmin || isSelfDelete;
@@ -150,11 +166,12 @@ router.delete("/users/:userId", async (req, res) => {
       
     if (fetchErr) return res.status(500).json({ error: "Failed to verify target role" });
 
-    const targetRole = targetProfile?.role?.toLowerCase() || "";
+    const targetRole = normalizeRoleValue(targetProfile?.role);
     const PARTNER_ROLES = [
-      "restaurantpartner", "restaurant partner", 
-      "storepartner", "store partner", 
-      "corporate", "corporatepartner", "corporate partner"
+      "restaurantpartner",
+      "storepartner",
+      "corporate",
+      "corporatepartner"
     ];
 
     if (PARTNER_ROLES.includes(targetRole)) {
@@ -171,6 +188,12 @@ router.delete("/users/:userId", async (req, res) => {
     const { error: authDeleteError } = await supabaseService.auth.admin.deleteUser(targetId);
     if (authDeleteError) {
       console.error("[DeleteUser] Auth deletion failed:", authDeleteError.message);
+      if (String(authDeleteError.message || "").toLowerCase() === "user not allowed") {
+        return res.status(500).json({
+          error: "Delete user failed: backend Supabase key is not service-role",
+          hint: "Set SUPABASE_SERVICE_KEY (or SUPABASE_SERVICE_ROLE_KEY) to your service_role key and redeploy.",
+        });
+      }
       return res.status(500).json({ error: authDeleteError.message });
     }
 
