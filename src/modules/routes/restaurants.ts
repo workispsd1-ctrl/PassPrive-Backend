@@ -415,9 +415,6 @@ const CreateRestaurantSchema = z.object({
 
   opening_hours: OpeningHoursSchema.optional().default({}),
 
-  reviews: z.any().optional().default([]),
-  menu: z.any().optional().default([]),
-
   food_images: z.array(z.string()).optional().default([]),
   ambience_images: z.array(z.string()).optional().default([]),
   cover_image: z.string().optional().nullable(),
@@ -432,6 +429,15 @@ const CreateRestaurantSchema = z.object({
   avg_duration_minutes: z.coerce.number().int().optional().default(90),
   max_bookings_per_slot: z.coerce.number().int().optional().nullable(),
   advance_booking_days: z.coerce.number().int().optional().default(30),
+
+  modification_available: z.boolean().optional().default(false),
+  modification_cutoff_minutes: z.coerce.number().int().optional().nullable(),
+  cancellation_available: z.boolean().optional().default(false),
+  cancellation_cutoff_minutes: z.coerce.number().int().optional().nullable(),
+  cover_charge_enabled: z.boolean().optional().default(false),
+  cover_charge_amount: z.coerce.number().optional().nullable(),
+  cover_charge_discount_type: z.string().trim().optional().nullable(),
+  cover_charge_discount_value: z.coerce.number().optional().nullable(),
 
   // ✅ optional: allow admin to set owner_user_id at creation time
   owner_user_id: z.string().uuid().optional().nullable(),
@@ -457,9 +463,6 @@ const UpdateRestaurantSchema = z.object({
 
   opening_hours: OpeningHoursSchema.nullable().optional(),
 
-  reviews: z.any().optional(),
-  menu: z.any().optional(),
-
   food_images: z.array(z.string()).optional(),
   ambience_images: z.array(z.string()).optional(),
   cover_image: z.string().nullable().optional(),
@@ -474,6 +477,15 @@ const UpdateRestaurantSchema = z.object({
   avg_duration_minutes: z.coerce.number().int().optional(),
   max_bookings_per_slot: z.coerce.number().int().nullable().optional(),
   advance_booking_days: z.coerce.number().int().optional(),
+
+  modification_available: z.boolean().optional(),
+  modification_cutoff_minutes: z.coerce.number().int().nullable().optional(),
+  cancellation_available: z.boolean().optional(),
+  cancellation_cutoff_minutes: z.coerce.number().int().nullable().optional(),
+  cover_charge_enabled: z.boolean().optional(),
+  cover_charge_amount: z.coerce.number().nullable().optional(),
+  cover_charge_discount_type: z.string().trim().nullable().optional(),
+  cover_charge_discount_value: z.coerce.number().nullable().optional(),
 
   // ✅ allow admin to relink owner if needed
   owner_user_id: z.string().uuid().nullable().optional(),
@@ -694,6 +706,14 @@ router.get("/featured-in-your-location", async (req, res) => {
           "premium_repeat_rewards_enabled",
           "premium_dish_discounts_enabled",
           "premium_expires_at",
+          "modification_available",
+          "modification_cutoff_minutes",
+          "cancellation_available",
+          "cancellation_cutoff_minutes",
+          "cover_charge_enabled",
+          "cover_charge_amount",
+          "cover_charge_discount_type",
+          "cover_charge_discount_value",
           "created_at",
           ...RESTAURANT_REVIEW_AGGREGATE_FIELDS,
         ].join(",")
@@ -792,6 +812,14 @@ router.get("/foodie-frontrow", async (req, res) => {
           "premium_repeat_rewards_enabled",
           "premium_dish_discounts_enabled",
           "premium_expires_at",
+          "modification_available",
+          "modification_cutoff_minutes",
+          "cancellation_available",
+          "cancellation_cutoff_minutes",
+          "cover_charge_enabled",
+          "cover_charge_amount",
+          "cover_charge_discount_type",
+          "cover_charge_discount_value",
           "created_at",
           "description",
           ...RESTAURANT_REVIEW_AGGREGATE_FIELDS,
@@ -903,8 +931,6 @@ router.post("/", async (req, res) => {
       is_pure_veg: body.is_pure_veg ?? false,
 
       opening_hours: body.opening_hours ?? {},
-      reviews: body.reviews ?? [],
-      menu: body.menu ?? [],
 
       food_images: body.food_images ?? [],
       ambience_images: body.ambience_images ?? [],
@@ -920,6 +946,15 @@ router.post("/", async (req, res) => {
       avg_duration_minutes: body.avg_duration_minutes ?? 90,
       max_bookings_per_slot: body.max_bookings_per_slot ?? null,
       advance_booking_days: body.advance_booking_days ?? 30,
+
+      modification_available: body.modification_available ?? false,
+      modification_cutoff_minutes: body.modification_cutoff_minutes ?? null,
+      cancellation_available: body.cancellation_available ?? false,
+      cancellation_cutoff_minutes: body.cancellation_cutoff_minutes ?? null,
+      cover_charge_enabled: body.cover_charge_enabled ?? false,
+      cover_charge_amount: body.cover_charge_amount ?? null,
+      cover_charge_discount_type: body.cover_charge_discount_type ?? null,
+      cover_charge_discount_value: body.cover_charge_discount_value ?? null,
 
       owner_user_id: body.owner_user_id ?? null,
     })
