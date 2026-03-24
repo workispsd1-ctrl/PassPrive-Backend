@@ -397,14 +397,14 @@ const OpeningHoursSchema = z.record(
  */
 const CreateRestaurantSchema = z.object({
   name: z.string().trim().min(1),
-  phone: z.string().trim().optional().nullable(),
+  phone: z.union([z.string().trim(), z.null(), z.undefined()]).optional().nullable(),
   city: z.string().trim().optional().nullable(),
   area: z.string().trim().optional().nullable(),
   full_address: z.string().trim().optional().nullable(),
 
   cuisines: z.array(z.string()).optional().default([]),
-  cost_for_two: z.number().int().optional().nullable(),
-  distance: z.number().optional().nullable(),
+  cost_for_two: z.coerce.number().int().optional().nullable(),
+  distance: z.coerce.number().optional().nullable(),
   offer: z.record(z.string(), z.any()).optional().nullable(),
 
   facilities: z.array(z.string()).optional().default([]),
@@ -425,13 +425,13 @@ const CreateRestaurantSchema = z.object({
   is_active: z.boolean().optional().default(true),
 
   slug: z.string().trim().min(1),
-  latitude: z.number().optional().nullable(),
-  longitude: z.number().optional().nullable(),
+  latitude: z.coerce.number().optional().nullable(),
+  longitude: z.coerce.number().optional().nullable(),
 
   booking_enabled: z.boolean().optional().default(true),
-  avg_duration_minutes: z.number().int().optional().default(90),
-  max_bookings_per_slot: z.number().int().optional().nullable(),
-  advance_booking_days: z.number().int().optional().default(30),
+  avg_duration_minutes: z.coerce.number().int().optional().default(90),
+  max_bookings_per_slot: z.coerce.number().int().optional().nullable(),
+  advance_booking_days: z.coerce.number().int().optional().default(30),
 
   // ✅ optional: allow admin to set owner_user_id at creation time
   owner_user_id: z.string().uuid().optional().nullable(),
@@ -439,14 +439,14 @@ const CreateRestaurantSchema = z.object({
 
 const UpdateRestaurantSchema = z.object({
   name: z.string().trim().min(1).optional(),
-  phone: z.string().trim().nullable().optional(),
+  phone: z.union([z.string().trim(), z.null(), z.undefined()]).optional().nullable(),
   city: z.string().trim().nullable().optional(),
   area: z.string().trim().nullable().optional(),
   full_address: z.string().trim().nullable().optional(),
 
   cuisines: z.array(z.string()).optional(),
-  cost_for_two: z.number().int().nullable().optional(),
-  distance: z.number().nullable().optional(),
+  cost_for_two: z.coerce.number().int().nullable().optional(),
+  distance: z.coerce.number().nullable().optional(),
   offer: z.record(z.string(), z.any()).nullable().optional(),
 
   facilities: z.array(z.string()).optional(),
@@ -467,13 +467,13 @@ const UpdateRestaurantSchema = z.object({
   is_active: z.boolean().optional(),
 
   slug: z.string().trim().min(1).optional(),
-  latitude: z.number().nullable().optional(),
-  longitude: z.number().nullable().optional(),
+  latitude: z.coerce.number().nullable().optional(),
+  longitude: z.coerce.number().nullable().optional(),
 
   booking_enabled: z.boolean().optional(),
-  avg_duration_minutes: z.number().int().optional(),
-  max_bookings_per_slot: z.number().int().nullable().optional(),
-  advance_booking_days: z.number().int().optional(),
+  avg_duration_minutes: z.coerce.number().int().optional(),
+  max_bookings_per_slot: z.coerce.number().int().nullable().optional(),
+  advance_booking_days: z.coerce.number().int().optional(),
 
   // ✅ allow admin to relink owner if needed
   owner_user_id: z.string().uuid().nullable().optional(),
@@ -946,9 +946,20 @@ router.put("/:id", async (req, res) => {
 
   const bodyParsed = UpdateRestaurantSchema.safeParse(req.body);
   if (!bodyParsed.success) {
+    // 🛡️ DETAILED ERROR: Log which fields failed for easier debugging
+    const flatErrors = bodyParsed.error.flatten();
+    console.error("[PUT /restaurants/:id] Schema validation failed:", {
+      fieldErrors: flatErrors.fieldErrors,
+      formErrors: flatErrors.formErrors,
+      receivedBody: req.body,
+    });
     return res
       .status(400)
-      .json({ error: "Invalid body", details: bodyParsed.error.flatten() });
+      .json({ 
+        error: "Invalid body", 
+        details: flatErrors,
+        hint: "Check field types: numeric fields should be numbers (not strings)" 
+      });
   }
 
   const id = idParsed.data;
@@ -963,6 +974,8 @@ router.put("/:id", async (req, res) => {
     delete payload.owner_user_id;
   }
 
+  console.log("[PUT /restaurants/:id] Updating restaurant:", { id, role: access.role, payload });
+
   const { data, error } = await access.sb
     .from("restaurants")
     .update(payload)
@@ -971,10 +984,12 @@ router.put("/:id", async (req, res) => {
     .single();
 
   if (error) {
+    console.error("[PUT /restaurants/:id] Database error:", error);
     if ((error as any)?.code === "23505") return res.status(400).json({ error: "Slug already exists" });
     return res.status(500).json({ error: error.message });
   }
 
+  console.log("[PUT /restaurants/:id] Update successful:", { id });
   return res.json({ item: data });
 });
 
