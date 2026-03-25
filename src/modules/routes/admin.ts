@@ -184,23 +184,29 @@ router.delete("/users/:userId", async (req, res) => {
   }
 
   try {
-    // 1. Delete from Auth (Triggers cascading delete if configured in DB)
-    const { error: authDeleteError } = await supabaseService.auth.admin.deleteUser(targetId);
-    if (authDeleteError) {
-      console.error("[DeleteUser] Auth deletion failed:", authDeleteError.message);
-      if (String(authDeleteError.message || "").toLowerCase() === "user not allowed") {
-        return res.status(500).json({
-          error: "Delete user failed: backend Supabase key is not service-role",
-          hint: "Set SUPABASE_SERVICE_KEY (or SUPABASE_SERVICE_ROLE_KEY) to your service_role key and redeploy.",
+    // Anon-key mode: delete only from public users table using caller JWT/RLS.
+    // Auth user deletion (supabase.auth.admin.deleteUser) requires service_role key.
+    const { error: profileDeleteError } = await caller.sb
+      .from("users")
+      .delete()
+      .eq("id", targetId);
+
+    if (profileDeleteError) {
+      const msg = String(profileDeleteError.message || "").toLowerCase();
+      if (msg.includes("row-level security") || msg.includes("not allowed") || msg.includes("permission")) {
+        return res.status(403).json({
+          error: "Delete blocked by RLS policy",
+          hint: "With anon key, add a delete policy that allows this action for your role.",
         });
       }
-      return res.status(500).json({ error: authDeleteError.message });
+      return res.status(500).json({ error: profileDeleteError.message });
     }
 
-    // 2. Explicitly Delete from Public Users Table (Backup for non-cascading DBs)
-    await caller.sb.from("users").delete().eq("id", targetId);
-
-    return res.status(200).json({ success: true, message: "User deleted successfully" });
+    return res.status(200).json({
+      success: true,
+      message: "User profile deleted from users table",
+      note: "Auth account is not deleted in anon-key mode",
+    });
   } catch (err: any) {
     console.error("[DeleteUser] Server error:", err.message);
     return res.status(500).json({ error: err.message || "Internal server error" });
