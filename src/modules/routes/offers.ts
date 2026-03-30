@@ -87,35 +87,6 @@ const OfferBaseSchema = z
 
 function applyOfferValidation<T extends z.ZodTypeAny>(schema: T) {
   return schema.superRefine((value: any, ctx) => {
-    const offerType = String(value.offer_type ?? "").trim().toUpperCase();
-    const hasBenefitValue = value.benefit_value !== undefined && value.benefit_value !== null;
-    const hasBenefitPercent =
-      value.benefit_percent !== undefined && value.benefit_percent !== null;
-
-    if (offerType === "PERCENT_DISCOUNT" && !hasBenefitPercent) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["benefit_percent"],
-        message: "benefit_percent is required for PERCENT_DISCOUNT",
-      });
-    }
-
-    if (offerType === "FLAT_DISCOUNT" && !hasBenefitValue) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["benefit_value"],
-        message: "benefit_value is required for FLAT_DISCOUNT",
-      });
-    }
-
-    if (offerType === "CASHBACK" && !hasBenefitValue && !hasBenefitPercent) {
-      ctx.addIssue({
-        code: z.ZodIssueCode.custom,
-        path: ["benefit_value"],
-        message: "benefit_value or benefit_percent is required for CASHBACK",
-      });
-    }
-
     const hasOwnerType =
       value.owner_entity_type !== undefined &&
       value.owner_entity_type !== null &&
@@ -129,17 +100,6 @@ function applyOfferValidation<T extends z.ZodTypeAny>(schema: T) {
         path: hasOwnerType ? ["owner_entity_id"] : ["owner_entity_type"],
         message: "owner_entity_type and owner_entity_id must both be provided together",
       });
-    }
-
-    if (value.source_type === "BANK") {
-      const sponsorName = String(value.sponsor_name ?? "").trim();
-      if (!sponsorName) {
-        ctx.addIssue({
-          code: z.ZodIssueCode.custom,
-          path: ["sponsor_name"],
-          message: "sponsor_name is required for BANK offers",
-        });
-      }
     }
   });
 }
