@@ -2,6 +2,11 @@ import { Router } from "express";
 import { z } from "zod";
 import { createClient } from "@supabase/supabase-js";
 import supabase from "../../database/supabase";
+import {
+  buildStoreSlotConfig,
+  getProductCataloguePayload,
+  getServiceCataloguePayload,
+} from "./storeCatalogue";
 
 const router = Router();
 
@@ -269,7 +274,7 @@ router.get("/", async (req, res) => {
 });
 
 // GET /api/stores/:id
-// Optional: ?include=payment,catalogue to fetch related tables in one response
+// Optional: ?include=payment,catalogue,services,slots to fetch related tables in one response
 router.get("/:id", async (req, res) => {
   const idParsed = IdSchema.safeParse(req.params.id);
   if (!idParsed.success) return res.status(400).json({ error: "Invalid store id" });
@@ -281,6 +286,8 @@ router.get("/:id", async (req, res) => {
 
   const includePayment = include.includes("payment");
   const includeCatalogue = include.includes("catalogue");
+  const includeServices = include.includes("services");
+  const includeSlots = include.includes("slots");
 
   // main store
   const { data: store, error } = await supabase
@@ -294,7 +301,9 @@ router.get("/:id", async (req, res) => {
 
   // related (optional)
   let payment: any = null;
-  let catalogue: any[] = [];
+  let catalogue: any = null;
+  let services: any = null;
+  let slots: any = null;
 
   if (includePayment) {
     const resp = await supabase
@@ -308,21 +317,31 @@ router.get("/:id", async (req, res) => {
   }
 
   if (includeCatalogue) {
-    const resp = await supabase
-      .from("store_catalogue_items")
-      .select("*")
-      .eq("store_id", store.id)
-      .order("sort_order", { ascending: true })
-      .order("created_at", { ascending: true });
+    try {
+      catalogue = await getProductCataloguePayload(store.id);
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
 
-    if (resp.error) return res.status(500).json({ error: resp.error.message });
-    catalogue = resp.data ?? [];
+  if (includeServices) {
+    try {
+      services = await getServiceCataloguePayload(store.id);
+    } catch (err: any) {
+      return res.status(500).json({ error: err.message });
+    }
+  }
+
+  if (includeSlots) {
+    slots = buildStoreSlotConfig(store);
   }
 
   return res.json({
     item: store,
     ...(includePayment ? { payment } : {}),
     ...(includeCatalogue ? { catalogue } : {}),
+    ...(includeServices ? { services } : {}),
+    ...(includeSlots ? { slots } : {}),
   });
 });
 
