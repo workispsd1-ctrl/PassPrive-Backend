@@ -46,10 +46,11 @@ const ApplicableOfferQuerySchema = z.object({
   coupon_code: z.string().trim().optional(),
 });
 
-const OfferBodySchema = z
+const OfferBaseSchema = z
   .object({
     source_type: z.enum(["PLATFORM", "MERCHANT", "BANK"]),
     title: z.string().trim().min(1),
+    offer_type: z.string().trim().min(1),
     subtitle: z.string().trim().nullable().optional(),
     description: z.string().trim().nullable().optional(),
     badge_text: z.string().trim().nullable().optional(),
@@ -57,12 +58,12 @@ const OfferBodySchema = z
     ribbon_text: z.string().trim().nullable().optional(),
     banner_image_url: z.string().trim().nullable().optional(),
     sponsor_name: z.string().trim().nullable().optional(),
-    offer_type: z.string().trim().min(1),
     benefit_value: z.coerce.number().nullable().optional(),
     benefit_percent: z.coerce.number().nullable().optional(),
     max_discount_amount: z.coerce.number().nullable().optional(),
     currency_code: z.string().trim().optional(),
     min_bill_amount: z.coerce.number().nullable().optional(),
+    max_bill_amount: z.coerce.number().nullable().optional(),
     is_active: z.boolean().optional(),
     is_auto_apply: z.boolean().optional(),
     is_stackable: z.boolean().optional(),
@@ -72,10 +73,79 @@ const OfferBodySchema = z
     status: z.string().trim().nullable().optional(),
     terms_and_conditions: z.any().optional(),
     metadata: z.any().optional(),
+    owner_entity_type: z.string().trim().nullable().optional(),
+    owner_entity_id: z.string().uuid().nullable().optional(),
+    module: z.string().trim().nullable().optional(),
+    payment_flow: z.string().trim().nullable().optional(),
+    short_title: z.string().trim().nullable().optional(),
+    badge_bg_color: z.string().trim().nullable().optional(),
+    badge_text_color: z.string().trim().nullable().optional(),
+    stack_group: z.string().trim().nullable().optional(),
+    sponsor_type: z.string().trim().nullable().optional(),
   })
   .strict();
 
-const UpdateOfferBodySchema = OfferBodySchema.partial();
+function applyOfferValidation<T extends z.ZodTypeAny>(schema: T) {
+  return schema.superRefine((value: any, ctx) => {
+    const offerType = String(value.offer_type ?? "").trim().toUpperCase();
+    const hasBenefitValue = value.benefit_value !== undefined && value.benefit_value !== null;
+    const hasBenefitPercent =
+      value.benefit_percent !== undefined && value.benefit_percent !== null;
+
+    if (offerType === "PERCENT_DISCOUNT" && !hasBenefitPercent) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["benefit_percent"],
+        message: "benefit_percent is required for PERCENT_DISCOUNT",
+      });
+    }
+
+    if (offerType === "FLAT_DISCOUNT" && !hasBenefitValue) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["benefit_value"],
+        message: "benefit_value is required for FLAT_DISCOUNT",
+      });
+    }
+
+    if (offerType === "CASHBACK" && !hasBenefitValue && !hasBenefitPercent) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["benefit_value"],
+        message: "benefit_value or benefit_percent is required for CASHBACK",
+      });
+    }
+
+    const hasOwnerType =
+      value.owner_entity_type !== undefined &&
+      value.owner_entity_type !== null &&
+      String(value.owner_entity_type).trim().length > 0;
+    const hasOwnerId =
+      value.owner_entity_id !== undefined && value.owner_entity_id !== null;
+
+    if (hasOwnerType !== hasOwnerId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: hasOwnerType ? ["owner_entity_id"] : ["owner_entity_type"],
+        message: "owner_entity_type and owner_entity_id must both be provided together",
+      });
+    }
+
+    if (value.source_type === "BANK") {
+      const sponsorName = String(value.sponsor_name ?? "").trim();
+      if (!sponsorName) {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ["sponsor_name"],
+          message: "sponsor_name is required for BANK offers",
+        });
+      }
+    }
+  });
+}
+
+const OfferBodySchema = applyOfferValidation(OfferBaseSchema);
+const UpdateOfferBodySchema = applyOfferValidation(OfferBaseSchema.partial());
 
 const TargetBodySchema = z
   .object({
