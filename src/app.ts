@@ -57,6 +57,7 @@ app.use("/api/restaurants", Restaurants);
 app.use("/api/restaurant", Restaurants); // Alias
 
 app.use("/api/store-catalogue", StoreCatalogue);
+app.use("/api/store-catalog", StoreCatalogue); // Alias for clients using US spelling
 app.use("/api/stores-home", StoresHomeSections);
 app.use("/api/stores", Stores);
 app.use("/api/store", Stores);       // Alias

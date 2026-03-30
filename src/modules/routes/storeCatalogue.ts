@@ -654,11 +654,11 @@ router.post("/categories", async (req, res) => {
   return res.status(201).json({ item: data });
 });
 
-router.put("/categories/:id", async (req, res) => {
+router.put("/categories/:categoryId", async (req, res) => {
   const admin = await requireAdmin(req, res);
   if (!admin) return;
 
-  const idParsed = StoreIdSchema.safeParse(req.params.id);
+  const idParsed = StoreIdSchema.safeParse(req.params.categoryId);
   if (!idParsed.success) return res.status(400).json({ error: "Invalid category id" });
 
   const parsed = UpdateCategorySchema.safeParse(req.body);
@@ -682,11 +682,11 @@ router.put("/categories/:id", async (req, res) => {
   return res.json({ item: data });
 });
 
-router.delete("/categories/:id", async (req, res) => {
+router.delete("/categories/:categoryId", async (req, res) => {
   const admin = await requireAdmin(req, res);
   if (!admin) return;
 
-  const idParsed = StoreIdSchema.safeParse(req.params.id);
+  const idParsed = StoreIdSchema.safeParse(req.params.categoryId);
   if (!idParsed.success) return res.status(400).json({ error: "Invalid category id" });
 
   const { error } = await supabase
@@ -749,11 +749,11 @@ router.post("/items", async (req, res) => {
   return res.status(201).json({ item: data });
 });
 
-router.put("/items/:id", async (req, res) => {
+router.put("/items/:itemId", async (req, res) => {
   const admin = await requireAdmin(req, res);
   if (!admin) return;
 
-  const idParsed = StoreIdSchema.safeParse(req.params.id);
+  const idParsed = StoreIdSchema.safeParse(req.params.itemId);
   if (!idParsed.success) return res.status(400).json({ error: "Invalid item id" });
 
   const parsed = UpdateItemSchema.safeParse(req.body);
@@ -777,11 +777,11 @@ router.put("/items/:id", async (req, res) => {
   return res.json({ item: data });
 });
 
-router.delete("/items/:id", async (req, res) => {
+router.delete("/items/:itemId", async (req, res) => {
   const admin = await requireAdmin(req, res);
   if (!admin) return;
 
-  const idParsed = StoreIdSchema.safeParse(req.params.id);
+  const idParsed = StoreIdSchema.safeParse(req.params.itemId);
   if (!idParsed.success) return res.status(400).json({ error: "Invalid item id" });
 
   const { error } = await supabase
