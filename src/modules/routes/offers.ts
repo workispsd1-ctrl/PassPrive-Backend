@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { createClient } from "@supabase/supabase-js";
+import multer from "multer";
 import { z } from "zod";
 import supabase from "../../database/supabase";
 
@@ -19,6 +20,12 @@ const PAYMENT_RULES_TABLE = "offer_payment_rules";
 const BINS_TABLE = "offer_bins";
 const USAGE_LIMITS_TABLE = "offer_usage_limits";
 const REDEMPTIONS_TABLE = "offer_redemptions";
+const OFFER_LOGO_BUCKET = "bank-offers";
+const OFFER_LOGO_FOLDER = "logos";
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+});
 
 const IdSchema = z.string().uuid();
 
@@ -56,7 +63,7 @@ const OfferBaseSchema = z
     badge_text: z.string().trim().nullable().optional(),
     badge_kind: z.string().trim().nullable().optional(),
     ribbon_text: z.string().trim().nullable().optional(),
-    banner_image_url: z.string().trim().nullable().optional(),
+    logo_url: z.string().trim().nullable().optional(),
     sponsor_name: z.string().trim().nullable().optional(),
     benefit_value: z.coerce.number().nullable().optional(),
     benefit_percent: z.coerce.number().nullable().optional(),
@@ -216,6 +223,58 @@ function buildNullAwarePayload(payload: Record<string, any>) {
       .filter(([, value]) => value !== undefined)
       .map(([key, value]) => [key, value ?? null])
   );
+}
+
+function normalizeRequestValue(value: any) {
+  if (value === "null") return null;
+  if (value === "undefined") return undefined;
+  if (value === "true") return true;
+  if (value === "false") return false;
+
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (
+      (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+      (trimmed.startsWith("[") && trimmed.endsWith("]"))
+    ) {
+      try {
+        return JSON.parse(trimmed);
+      } catch {
+        return value;
+      }
+    }
+  }
+
+  return value;
+}
+
+function normalizeOfferRequestBody(body: Record<string, any>) {
+  return Object.fromEntries(
+    Object.entries(body ?? {}).map(([key, value]) => [key, normalizeRequestValue(value)])
+  );
+}
+
+async function uploadOfferLogo(file?: Express.Multer.File | null) {
+  if (!file) return null;
+
+  const extension = file.originalname.includes(".")
+    ? file.originalname.split(".").pop()
+    : "jpg";
+  const fileName = `${OFFER_LOGO_FOLDER}/${Date.now()}-${Math.random()
+    .toString(36)
+    .slice(2, 8)}.${extension}`;
+
+  const { error: uploadError } = await supabase.storage
+    .from(OFFER_LOGO_BUCKET)
+    .upload(fileName, file.buffer, {
+      contentType: file.mimetype,
+      upsert: false,
+    });
+
+  if (uploadError) throw uploadError;
+
+  const { data } = supabase.storage.from(OFFER_LOGO_BUCKET).getPublicUrl(fileName);
+  return data.publicUrl;
 }
 
 function normalizeText(value: any) {
@@ -545,7 +604,7 @@ function normalizeApplicableOffer(offer: any, applicability: { is_eligible: bool
     badge_text: mapBadgeText(offer),
     badge_kind: mapBadgeKind(offer),
     ribbon_text: offer.ribbon_text ?? null,
-    banner_image_url: offer.banner_image_url ?? null,
+    logo_url: offer.logo_url ?? null,
     offer_type: offer.offer_type,
     benefit_value: offer.benefit_value ?? null,
     benefit_percent: offer.benefit_percent ?? null,
@@ -776,14 +835,21 @@ router.get("/:id", async (req, res) => {
   }
 });
 
-router.post("/", async (req, res) => {
-  const parsed = OfferBodySchema.safeParse(req.body);
+router.post("/", upload.single("logo"), async (req, res) => {
+  const parsed = OfferBodySchema.safeParse(normalizeOfferRequestBody(req.body));
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
   }
 
   const admin = await requireAdmin(req, res);
   if (!admin) return;
+
+  let logoUrl: string | null = null;
+  try {
+    logoUrl = await uploadOfferLogo(req.file);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
 
   const payload = buildNullAwarePayload({
     ...parsed.data,
@@ -794,6 +860,7 @@ router.post("/", async (req, res) => {
     priority: parsed.data.priority ?? 100,
     terms_and_conditions: parsed.data.terms_and_conditions ?? [],
     metadata: parsed.data.metadata ?? {},
+    logo_url: logoUrl ?? parsed.data.logo_url,
     created_by: admin.callerId,
   });
 
@@ -807,11 +874,11 @@ router.post("/", async (req, res) => {
   return res.status(201).json({ offer: data });
 });
 
-router.put("/:id", async (req, res) => {
+router.put("/:id", upload.single("logo"), async (req, res) => {
   const idParsed = IdSchema.safeParse(req.params.id);
   if (!idParsed.success) return res.status(400).json({ error: "Invalid offer id" });
 
-  const parsed = UpdateOfferBodySchema.safeParse(req.body);
+  const parsed = UpdateOfferBodySchema.safeParse(normalizeOfferRequestBody(req.body));
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid body", details: parsed.error.flatten() });
   }
@@ -819,7 +886,17 @@ router.put("/:id", async (req, res) => {
   const admin = await requireAdmin(req, res);
   if (!admin) return;
 
-  const payload = buildNullAwarePayload(parsed.data);
+  let logoUrl: string | null = null;
+  try {
+    logoUrl = await uploadOfferLogo(req.file);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+
+  const payload = buildNullAwarePayload({
+    ...parsed.data,
+    ...(logoUrl ? { logo_url: logoUrl } : {}),
+  });
   if (Object.keys(payload).length === 0) {
     return res.status(400).json({ error: "No fields to update" });
   }
