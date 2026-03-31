@@ -23,6 +23,7 @@ const app = express();
 
 const allowedOrigins = [
   "http://localhost:3000",
+  "https://pass-prive-admin.vercel.app",
 ];
 
 const corsOptions: cors.CorsOptions = {
