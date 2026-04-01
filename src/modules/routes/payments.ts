@@ -181,6 +181,26 @@ function buildSafeGatewayFieldSummary(fields: Record<string, string>) {
   return summary;
 }
 
+function buildGatewayDiagnostics(session: any, gatewayRequest: { fields: Record<string, string> }) {
+  const tokenValue = gatewayRequest.fields.Lite_Transaction_Token;
+  return {
+    session_id: session.id,
+    payment_context: session.payment_context,
+    merchant_trace: session.merchant_trace,
+    amount_major: session.amount_major,
+    amount_minor: session.amount_minor,
+    currency_code: session.currency_code,
+    token_present: typeof tokenValue === "string" && tokenValue.trim().length > 0,
+    return_urls_public:
+      Object.values({
+        success: gatewayRequest.fields.Lite_Success_Url,
+        fail: gatewayRequest.fields.Lite_Fail_Url,
+        try_later: gatewayRequest.fields.Lite_TryLater_Url,
+        error: gatewayRequest.fields.Lite_Error_Url,
+      }).every((value) => String(value ?? "").startsWith("https://")),
+  };
+}
+
 router.post("/iveri/initiate", async (req, res) => {
   const parsed = InitiateSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -362,6 +382,12 @@ router.get("/iveri/launch/:session_id", async (req, res) => {
       field_count: Object.keys(gatewayRequest.fields).length,
       field_summary: buildSafeGatewayFieldSummary(gatewayRequest.fields as Record<string, string>),
     });
+    console.log(
+      "[iVeri diagnostics]",
+      buildGatewayDiagnostics(session, {
+        fields: gatewayRequest.fields as Record<string, string>,
+      })
+    );
 
     const hiddenInputs = Object.entries(gatewayRequest.fields as Record<string, string>)
       .map(
