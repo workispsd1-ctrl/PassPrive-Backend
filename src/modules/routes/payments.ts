@@ -89,6 +89,10 @@ const FinalizeSchema = z.object({
   session_id: z.string().uuid(),
 });
 
+const LaunchParamsSchema = z.object({
+  session_id: z.string().uuid(),
+});
+
 function splitName(fullName: string | null) {
   const trimmed = String(fullName ?? "").trim();
   if (!trimmed) return { firstName: "Guest", lastName: "Customer" };
@@ -113,6 +117,30 @@ function buildAppDeepLink(outcome: string, sessionId: string) {
       ? "fail"
       : "pending";
   return `passprive://payment/${path}?session_id=${encodeURIComponent(sessionId)}`;
+}
+
+function getBackendBaseUrl(req: any) {
+  const configured =
+    process.env.PUBLIC_BACKEND_BASE_URL?.trim() ||
+    process.env.BACKEND_BASE_URL?.trim() ||
+    "";
+
+  if (configured) {
+    return configured.replace(/\/+$/, "");
+  }
+
+  const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
+  const host = req.headers["x-forwarded-host"] || req.get("host");
+  return `${protocol}://${host}`;
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 router.post("/iveri/initiate", async (req, res) => {
@@ -237,10 +265,13 @@ router.post("/iveri/initiate", async (req, res) => {
         gateway_request: gatewayRequest,
       },
     });
+    const launchUrl = `${getBackendBaseUrl(req)}/api/payments/iveri/launch/${updatedSession.id}`;
 
     return res.status(201).json({
       session_id: updatedSession.id,
       merchant_trace: updatedSession.merchant_trace,
+      launch_url: launchUrl,
+      mobile_redirect_url: launchUrl,
       expected_amount: {
         major: updatedSession.amount_major,
         minor: updatedSession.amount_minor,
@@ -265,6 +296,53 @@ router.post("/iveri/initiate", async (req, res) => {
     });
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || "Failed to initiate iVeri payment" });
+  }
+});
+
+router.get("/iveri/launch/:session_id", async (req, res) => {
+  const parsed = LaunchParamsSchema.safeParse(req.params);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid session id" });
+  }
+
+  try {
+    const session = await getPaymentSessionById(parsed.data.session_id);
+    if (!session) {
+      return res.status(404).json({ error: "Payment session not found" });
+    }
+
+    const gatewayRequest = session.gateway_payload?.gateway_request;
+    if (!gatewayRequest?.gatewayUrl || !gatewayRequest?.fields) {
+      return res.status(409).json({ error: "Payment launch data is not available for this session" });
+    }
+
+    const hiddenInputs = Object.entries(gatewayRequest.fields as Record<string, string>)
+      .map(
+        ([key, value]) =>
+          `<input type="hidden" name="${escapeHtml(String(key))}" value="${escapeHtml(String(value))}" />`
+      )
+      .join("\n");
+
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(`<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Redirecting to iVeri</title>
+  </head>
+  <body>
+    <p>Redirecting to secure payment page...</p>
+    <form id="iveri-launch-form" method="POST" action="${escapeHtml(String(gatewayRequest.gatewayUrl))}">
+      ${hiddenInputs}
+    </form>
+    <script>
+      document.getElementById("iveri-launch-form").submit();
+    </script>
+  </body>
+</html>`);
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Failed to build payment launch page" });
   }
 });
 
