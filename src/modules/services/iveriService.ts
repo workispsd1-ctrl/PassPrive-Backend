@@ -28,7 +28,7 @@ export function getIveriConfig(): IveriConfig {
 
   const sharedSecret = process.env.IVERI_SHARED_SECRET?.trim() || null;
   const requireToken =
-    String(process.env.IVERI_REQUIRE_SHARED_SECRET ?? "true")
+    String(process.env.IVERI_REQUIRE_SHARED_SECRET ?? (mode === "LIVE" ? "true" : "false"))
       .trim()
       .toLowerCase() === "true";
 
