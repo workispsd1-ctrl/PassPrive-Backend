@@ -75,6 +75,13 @@ function buildConsumerOrderPrefix(consumerOrderId: string) {
   return candidate.slice(0, 8);
 }
 
+function buildUniqueConsumerOrderId(params: { sessionId: string; context: "BOOKING" | "BILL_PAYMENT" }) {
+  const contextPrefix = params.context === "BILL_PAYMENT" ? "PPBILL" : "PPBOOK";
+  const sessionCompact = params.sessionId.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+  // iVeri max is 20 chars for consumer order id; keep this deterministic and unique per session.
+  return `${contextPrefix}${sessionCompact}`.slice(0, 20);
+}
+
 function withQuery(urlString: string, params: Record<string, string>) {
   const url = new URL(urlString);
   for (const [key, value] of Object.entries(params)) {
@@ -111,7 +118,10 @@ export function buildIveriAuthoriseRequest(params: {
   additionalFields?: Record<string, string>;
 }) {
   const amountMinor = majorToMinor(params.amountMajor);
-  const consumerOrderId = params.merchantTrace.replace(/[^A-Za-z0-9]/g, "").slice(0, 20) || params.sessionId.replace(/-/g, "").slice(0, 20);
+  const consumerOrderId = buildUniqueConsumerOrderId({
+    sessionId: params.sessionId,
+    context: params.context,
+  });
   const consumerOrderPrefix = buildConsumerOrderPrefix(consumerOrderId);
   const fields: Record<string, string> = {
     Lite_Merchant_ApplicationId: params.config.applicationId,
