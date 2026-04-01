@@ -25,11 +25,43 @@ const app = express();
 const allowedOrigins = [
   "http://localhost:3000",
   "https://pass-prive-admin.vercel.app",
+  process.env.PUBLIC_BACKEND_BASE_URL,
+  process.env.BACKEND_BASE_URL,
+  process.env.BACKEND_URL,
+  process.env.FRONTEND_URL,
+  process.env.MOBILE_WEB_URL,
 ];
+
+function isAllowedOrigin(origin: string) {
+  const normalizedAllowedOrigins = allowedOrigins
+    .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+    .map((value) => value.trim().replace(/\/+$/, ""));
+
+  const normalizedOrigin = origin.trim().replace(/\/+$/, "");
+  if (normalizedAllowedOrigins.includes(normalizedOrigin)) {
+    return true;
+  }
+
+  if (
+    normalizedOrigin.startsWith("http://localhost:") ||
+    normalizedOrigin.startsWith("https://localhost:") ||
+    normalizedOrigin.startsWith("http://127.0.0.1:") ||
+    normalizedOrigin.startsWith("https://127.0.0.1:") ||
+    normalizedOrigin.startsWith("capacitor://") ||
+    normalizedOrigin.startsWith("ionic://") ||
+    normalizedOrigin.startsWith("exp://") ||
+    normalizedOrigin.startsWith("http://192.168.") ||
+    normalizedOrigin.startsWith("https://192.168.")
+  ) {
+    return true;
+  }
+
+  return false;
+}
 
 const corsOptions: cors.CorsOptions = {
   origin(origin, callback) {
-    if (!origin || allowedOrigins.includes(origin)) {
+    if (!origin || isAllowedOrigin(origin)) {
       return callback(null, true);
     }
 
