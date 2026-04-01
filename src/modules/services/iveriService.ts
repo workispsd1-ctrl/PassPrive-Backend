@@ -131,19 +131,19 @@ export function buildIveriAuthoriseRequest(params: {
     Ecom_BillTo_Online_Email: params.customer.email,
     Ecom_BillTo_Postal_Name_First: (params.customer.firstName ?? "Guest").slice(0, 15),
     Ecom_BillTo_Postal_Name_Last: (params.customer.lastName ?? "Customer").slice(0, 15),
-    Lite_Success_Url: withQuery(params.config.returnSuccessUrl, {
+    Lite_Website_Success_Url: withQuery(params.config.returnSuccessUrl, {
       session_id: params.sessionId,
       outcome: "success",
     }),
-    Lite_Fail_Url: withQuery(params.config.returnFailUrl, {
+    Lite_Website_Fail_Url: withQuery(params.config.returnFailUrl, {
       session_id: params.sessionId,
       outcome: "fail",
     }),
-    Lite_TryLater_Url: withQuery(params.config.returnTryLaterUrl, {
+    Lite_Website_TryLater_Url: withQuery(params.config.returnTryLaterUrl, {
       session_id: params.sessionId,
       outcome: "pending",
     }),
-    Lite_Error_Url: withQuery(params.config.returnErrorUrl, {
+    Lite_Website_Error_Url: withQuery(params.config.returnErrorUrl, {
       session_id: params.sessionId,
       outcome: "error",
     }),

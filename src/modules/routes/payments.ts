@@ -155,10 +155,10 @@ function buildSafeGatewayFieldSummary(fields: Record<string, string>) {
     "Lite_Merchant_Trace",
     "MerchantReference",
     "Lite_Version",
-    "Lite_Success_Url",
-    "Lite_Fail_Url",
-    "Lite_TryLater_Url",
-    "Lite_Error_Url",
+    "Lite_Website_Success_Url",
+    "Lite_Website_Fail_Url",
+    "Lite_Website_TryLater_Url",
+    "Lite_Website_Error_Url",
     "Lite_Transaction_Token",
     "Ecom_BillTo_Online_Email",
   ];
@@ -197,10 +197,10 @@ function buildGatewayDiagnostics(session: any, gatewayRequest: { fields: Record<
     token_present: typeof tokenValue === "string" && tokenValue.trim().length > 0,
     return_urls_public:
       Object.values({
-        success: gatewayRequest.fields.Lite_Success_Url,
-        fail: gatewayRequest.fields.Lite_Fail_Url,
-        try_later: gatewayRequest.fields.Lite_TryLater_Url,
-        error: gatewayRequest.fields.Lite_Error_Url,
+        success: gatewayRequest.fields.Lite_Website_Success_Url,
+        fail: gatewayRequest.fields.Lite_Website_Fail_Url,
+        try_later: gatewayRequest.fields.Lite_Website_TryLater_Url,
+        error: gatewayRequest.fields.Lite_Website_Error_Url,
       }).every((value) => String(value ?? "").startsWith("https://")),
   };
 }
@@ -366,10 +366,10 @@ router.post("/iveri/initiate", async (req, res) => {
         fields: gatewayRequest.fields,
       },
       redirect: {
-        success_url: gatewayRequest.fields.Lite_Success_Url,
-        fail_url: gatewayRequest.fields.Lite_Fail_Url,
-        try_later_url: gatewayRequest.fields.Lite_TryLater_Url,
-        error_url: gatewayRequest.fields.Lite_Error_Url,
+        success_url: gatewayRequest.fields.Lite_Website_Success_Url,
+        fail_url: gatewayRequest.fields.Lite_Website_Fail_Url,
+        try_later_url: gatewayRequest.fields.Lite_Website_TryLater_Url,
+        error_url: gatewayRequest.fields.Lite_Website_Error_Url,
         app_deep_links: {
           success: buildAppDeepLink("success", updatedSession.id),
           fail: buildAppDeepLink("fail", updatedSession.id),
