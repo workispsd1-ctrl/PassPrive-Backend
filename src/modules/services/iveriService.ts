@@ -113,6 +113,8 @@ export function buildIveriAuthoriseRequest(params: {
     Lite_Merchant_Trace: params.merchantTrace,
     MerchantReference: params.merchantReference.slice(0, 20),
     Ecom_ConsumerOrderID: consumerOrderId,
+    Lite_ConsumerOrderID_Prefix: consumerOrderId.slice(0, 8) || "PASSPRIV",
+    Lite_ConsumerOrderIDPrefix: consumerOrderId.slice(0, 8) || "PASSPRIV",
     Lite_Version: "4.0",
     Ecom_BillTo_Online_Email: params.customer.email,
     Lite_Website_Successful_Url: withQuery(params.config.returnSuccessUrl, {
