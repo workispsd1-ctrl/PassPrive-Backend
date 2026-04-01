@@ -304,6 +304,7 @@ function buildSafeGatewayFieldSummary(fields: Record<string, string>) {
     "Lite_Merchant_Trace",
     "MerchantReference",
     "Lite_Version",
+    "Lite_Website_Successful_Url",
     "Lite_Website_Success_Url",
     "Lite_Website_Fail_Url",
     "Lite_Website_TryLater_Url",
@@ -346,6 +347,7 @@ function buildGatewayDiagnostics(session: any, gatewayRequest: { fields: Record<
     token_present: typeof tokenValue === "string" && tokenValue.trim().length > 0,
     return_urls_public:
       Object.values({
+        successful: gatewayRequest.fields.Lite_Website_Successful_Url,
         success: gatewayRequest.fields.Lite_Website_Success_Url,
         fail: gatewayRequest.fields.Lite_Website_Fail_Url,
         try_later: gatewayRequest.fields.Lite_Website_TryLater_Url,
@@ -515,7 +517,9 @@ router.post("/iveri/initiate", async (req, res) => {
         fields: gatewayRequest.fields,
       },
       redirect: {
-        success_url: gatewayRequest.fields.Lite_Website_Success_Url,
+        success_url:
+          gatewayRequest.fields.Lite_Website_Successful_Url ??
+          gatewayRequest.fields.Lite_Website_Success_Url,
         fail_url: gatewayRequest.fields.Lite_Website_Fail_Url,
         try_later_url: gatewayRequest.fields.Lite_Website_TryLater_Url,
         error_url: gatewayRequest.fields.Lite_Website_Error_Url,
