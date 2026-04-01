@@ -177,6 +177,78 @@ function buildPendingDeepLink(sessionId: string) {
   return buildAppDeepLink("pending", sessionId);
 }
 
+function renderAppRedirectPage(params: {
+  title: string;
+  message: string;
+  appUrl: string;
+  sessionId: string;
+  outcome: string;
+}) {
+  return `<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>${escapeHtml(params.title)}</title>
+    <meta http-equiv="refresh" content="2;url=${escapeHtml(params.appUrl)}" />
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background: #f6f4ef;
+        color: #1f2937;
+        margin: 0;
+        min-height: 100vh;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        padding: 24px;
+      }
+      .card {
+        width: 100%;
+        max-width: 420px;
+        background: white;
+        border-radius: 16px;
+        box-shadow: 0 10px 30px rgba(0,0,0,0.08);
+        padding: 24px;
+        text-align: center;
+      }
+      h1 { margin: 0 0 12px; font-size: 22px; }
+      p { margin: 0 0 18px; line-height: 1.5; }
+      a {
+        display: inline-block;
+        padding: 12px 18px;
+        border-radius: 10px;
+        background: #111827;
+        color: white;
+        text-decoration: none;
+      }
+      .meta {
+        margin-top: 14px;
+        font-size: 12px;
+        color: #6b7280;
+      }
+    </style>
+  </head>
+  <body>
+    <div class="card">
+      <h1>${escapeHtml(params.title)}</h1>
+      <p>${escapeHtml(params.message)}</p>
+      <a href="${escapeHtml(params.appUrl)}">Return to PassPrive</a>
+      <div class="meta">
+        Session: ${escapeHtml(params.sessionId)}<br />
+        Outcome: ${escapeHtml(params.outcome)}
+      </div>
+    </div>
+    <script>
+      window.location.href = ${JSON.stringify(params.appUrl)};
+      setTimeout(function () {
+        window.location.href = ${JSON.stringify(params.appUrl)};
+      }, 1200);
+    </script>
+  </body>
+</html>`;
+}
+
 function buildSafeGatewayFieldSummary(fields: Record<string, string>) {
   const interestingKeys = [
     "Lite_Merchant_ApplicationId",
@@ -502,6 +574,15 @@ async function handleIveriReturn(req: any, res: any) {
     }
 
     const outcome = inferOutcomeFromGatewayPayload(sourcePayload);
+    const appUrl = buildAppDeepLink(outcome, sessionId);
+    console.log("[iVeri return]", {
+      session_id: sessionId,
+      method: req.method,
+      inferred_outcome: outcome,
+      lite_status: sourcePayload.Lite_Payment_Card_Status ?? null,
+      lite_result_description: sourcePayload.Lite_Result_Description ?? null,
+      lite_transaction_index: sourcePayload.Lite_TransactionIndex ?? null,
+    });
     await updatePaymentSession(sessionId, {
       status: "RETURNED",
       gateway_payload: {
@@ -515,7 +596,26 @@ async function handleIveriReturn(req: any, res: any) {
       },
     });
 
-    return res.redirect(302, buildAppDeepLink(outcome, sessionId));
+    res.setHeader("Content-Type", "text/html; charset=utf-8");
+    return res.status(200).send(
+      renderAppRedirectPage({
+        title:
+          outcome === "success"
+            ? "Payment Completed"
+            : outcome === "fail"
+            ? "Payment Failed"
+            : "Payment Pending",
+        message:
+          outcome === "success"
+            ? "We are taking you back to PassPrive."
+            : outcome === "fail"
+            ? "The payment did not complete successfully. Returning to PassPrive."
+            : "The payment is still being processed. Returning to PassPrive.",
+        appUrl,
+        sessionId,
+        outcome,
+      })
+    );
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || "Failed to handle iVeri return" });
   }
