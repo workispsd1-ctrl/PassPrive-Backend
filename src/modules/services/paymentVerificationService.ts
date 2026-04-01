@@ -50,7 +50,6 @@ export async function verifyPaymentSessionWithIveri(params: {
   }
 
   const response = await postForm(params.authoriseInfoUrl, {
-    Lite_Merchant_ApplicationID: params.applicationId,
     Lite_Merchant_ApplicationId: params.applicationId,
     Lite_Merchant_Trace: session.merchant_trace,
   });
@@ -86,7 +85,7 @@ export async function verifyPaymentSessionWithIveri(params: {
     gateway_payload: {
       ...(session.gateway_payload ?? {}),
       authorise_info_request: {
-        Lite_Merchant_ApplicationID: params.applicationId,
+        Lite_Merchant_ApplicationId: params.applicationId,
         Lite_Merchant_Trace: session.merchant_trace,
       },
       authorise_info_response: {
