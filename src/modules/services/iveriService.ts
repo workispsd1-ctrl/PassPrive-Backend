@@ -130,6 +130,7 @@ export function buildIveriAuthoriseRequest(params: {
     MerchantReference: params.merchantReference.slice(0, 20),
     Ecom_ConsumerOrderID: consumerOrderId,
     Lite_ConsumerOrderIDPrefix: consumerOrderId.slice(0, 8) || "PASSPRIV",
+    Lite_ConsumerOrderID_Prefix: consumerOrderId.slice(0, 8) || "PASSPRIV",
     Lite_Version: "4.0",
     Ecom_BillTo_Online_Email: params.customer.email,
     Ecom_BillTo_Postal_Name_First: (params.customer.firstName ?? "Guest").slice(0, 15),

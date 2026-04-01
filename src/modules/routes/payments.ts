@@ -143,7 +143,7 @@ function buildAppDeepLink(outcome: string, sessionId: string) {
   const path =
     outcome === "success"
       ? "success"
-      : outcome === "fail"
+      : outcome === "fail" || outcome === "error"
       ? "fail"
       : "pending";
   return `passprive://payment/${path}?session_id=${encodeURIComponent(sessionId)}`;
@@ -646,13 +646,13 @@ async function handleIveriReturn(req: any, res: any) {
         title:
           outcome === "success"
             ? "Payment Completed"
-            : outcome === "fail"
+            : outcome === "fail" || outcome === "error"
             ? "Payment Failed"
             : "Payment Pending",
         message:
           outcome === "success"
             ? "We are taking you back to PassPrive."
-            : outcome === "fail"
+            : outcome === "fail" || outcome === "error"
             ? "The payment did not complete successfully. Returning to PassPrive."
             : "The payment is still being processed. Returning to PassPrive.",
         appUrl,
