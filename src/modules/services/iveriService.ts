@@ -69,6 +69,12 @@ function majorToMinor(amountMajor: number) {
   return Math.round(amountMajor * 100);
 }
 
+function buildConsumerOrderPrefix(consumerOrderId: string) {
+  const cleaned = consumerOrderId.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
+  const candidate = (cleaned.slice(0, 8) || "PASSPRIV").padEnd(8, "X");
+  return candidate.slice(0, 8);
+}
+
 function withQuery(urlString: string, params: Record<string, string>) {
   const url = new URL(urlString);
   for (const [key, value] of Object.entries(params)) {
@@ -106,6 +112,7 @@ export function buildIveriAuthoriseRequest(params: {
 }) {
   const amountMinor = majorToMinor(params.amountMajor);
   const consumerOrderId = params.merchantTrace.replace(/[^A-Za-z0-9]/g, "").slice(0, 20) || params.sessionId.replace(/-/g, "").slice(0, 20);
+  const consumerOrderPrefix = buildConsumerOrderPrefix(consumerOrderId);
   const fields: Record<string, string> = {
     Lite_Merchant_ApplicationId: params.config.applicationId,
     Lite_Order_Amount: String(amountMinor),
@@ -113,7 +120,8 @@ export function buildIveriAuthoriseRequest(params: {
     Lite_Merchant_Trace: params.merchantTrace,
     MerchantReference: params.merchantReference.slice(0, 20),
     Ecom_ConsumerOrderID: consumerOrderId,
-    Lite_ConsumerOrderID_Prefix: consumerOrderId.slice(0, 8) || "PASSPRIV",
+    Lite_ConsumerOrderID_Prefix: consumerOrderPrefix,
+    Lite_ConsumerOrderIDPrefix: consumerOrderPrefix,
     Lite_Version: "4.0",
     Ecom_SchemaVersion: "1.0",
     Ecom_BillTo_Online_Email: params.customer.email,
