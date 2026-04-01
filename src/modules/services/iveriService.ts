@@ -102,6 +102,7 @@ export function buildIveriAuthoriseRequest(params: {
   sessionId: string;
   merchantTrace: string;
   amountMajor: number;
+  discountMajor?: number;
   currencyCode: string;
   merchantReference: string;
   customer: {
@@ -111,6 +112,11 @@ export function buildIveriAuthoriseRequest(params: {
     phone?: string | null;
   };
   context: "BOOKING" | "BILL_PAYMENT";
+  lineItems?: Array<{
+    description: string;
+    quantity: number;
+    unitAmountMajor: number;
+  }>;
   additionalFields?: Record<string, string>;
 }) {
   const amountMinor = majorToMinor(params.amountMajor);
@@ -144,6 +150,29 @@ export function buildIveriAuthoriseRequest(params: {
     passprive_session_id: params.sessionId,
     passprive_payment_context: params.context,
   };
+
+  const lineItems = (params.lineItems ?? []).filter(
+    (item) =>
+      item &&
+      typeof item.description === "string" &&
+      item.description.trim().length > 0 &&
+      Number.isFinite(item.quantity) &&
+      item.quantity > 0 &&
+      Number.isFinite(item.unitAmountMajor) &&
+      item.unitAmountMajor >= 0
+  );
+
+  for (let index = 0; index < lineItems.length; index += 1) {
+    const item = lineItems[index];
+    const position = String(index + 1);
+    fields[`Lite_Order_LineItems_Product_${position}`] = item.description.slice(0, 255);
+    fields[`Lite_Order_LineItems_Quantity_${position}`] = String(item.quantity);
+    fields[`Lite_Order_LineItems_Amount_${position}`] = String(majorToMinor(item.unitAmountMajor));
+  }
+
+  if (params.discountMajor && params.discountMajor > 0) {
+    fields.Lite_Order_DiscountAmount = String(majorToMinor(params.discountMajor));
+  }
 
   if (params.customer.phone) {
     fields.Ecom_BillTo_Telecom_Phone_Number = params.customer.phone.replace(/\D+/g, "").slice(0, 15);

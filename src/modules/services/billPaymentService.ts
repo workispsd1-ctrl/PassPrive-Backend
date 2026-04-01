@@ -204,6 +204,11 @@ export async function buildBillPaymentContext(input: BillContextInput) {
     payableAmount,
     selectedOffers,
     eligibleOffers,
+    lineItemDescription:
+      item?.title ??
+      (entityType === "RESTAURANT"
+        ? `Restaurant bill payment - ${entity.name ?? entity.title ?? entity.id}`
+        : `Store bill payment - ${entity.name ?? entity.title ?? entity.id}`),
   };
 }
 

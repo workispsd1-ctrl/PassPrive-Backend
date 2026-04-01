@@ -147,6 +147,10 @@ function buildSafeGatewayFieldSummary(fields: Record<string, string>) {
   const interestingKeys = [
     "Lite_Merchant_ApplicationId",
     "Lite_Order_Amount",
+    "Lite_Order_DiscountAmount",
+    "Lite_Order_LineItems_Product_1",
+    "Lite_Order_LineItems_Quantity_1",
+    "Lite_Order_LineItems_Amount_1",
     "Lite_Currency_AlphaCode",
     "Lite_Merchant_Trace",
     "MerchantReference",
@@ -224,6 +228,7 @@ router.post("/iveri/initiate", async (req, res) => {
     let originalAmount = 0;
     let contextPayload: Record<string, any> = {};
     let merchantReference = merchantTrace.slice(-20);
+    let lineItems: Array<{ description: string; quantity: number; unitAmountMajor: number }> = [];
 
     if (paymentContext === "BOOKING") {
       if (!parsed.data.booking_payload) {
@@ -253,6 +258,15 @@ router.post("/iveri/initiate", async (req, res) => {
         restaurant_id: parsed.data.restaurant_id,
         booking_payload: parsed.data.booking_payload,
       };
+      lineItems = [
+        {
+          description: evaluation.verifiedOffer?.title
+            ? `Booking cover charge - ${evaluation.verifiedOffer.title}`
+            : "Restaurant booking cover charge",
+          quantity: 1,
+          unitAmountMajor: amountMajor,
+        },
+      ];
     } else {
       if (!parsed.data.bill_payload) {
         return res.status(400).json({ error: "bill_payload is required for BILL_PAYMENT payment context" });
@@ -276,6 +290,15 @@ router.post("/iveri/initiate", async (req, res) => {
         store_id: parsed.data.store_id ?? null,
         bill_payload: parsed.data.bill_payload,
       };
+      lineItems = [
+        {
+          description: billContext.lineItemDescription,
+          quantity: billContext.item ? billContext.quantity : 1,
+          unitAmountMajor: billContext.item
+            ? Number((billContext.originalAmount / billContext.quantity).toFixed(2))
+            : billContext.originalAmount,
+        },
+      ];
     }
 
     const session = await createPaymentSession({
@@ -303,6 +326,7 @@ router.post("/iveri/initiate", async (req, res) => {
       sessionId: session.id,
       merchantTrace,
       amountMajor,
+      discountMajor: discountAmount,
       currencyCode: "MUR",
       merchantReference,
       customer: {
@@ -312,6 +336,7 @@ router.post("/iveri/initiate", async (req, res) => {
         phone: customer.phone,
       },
       context: paymentContext,
+      lineItems,
       additionalFields: {
         passprive_trace_guard: merchantTrace,
       },
