@@ -292,18 +292,12 @@ function buildSafeGatewayFieldSummary(fields: Record<string, string>) {
     "Lite_Website_Fail_Url",
     "Lite_Website_TryLater_Url",
     "Lite_Website_Error_Url",
-    "Lite_Transaction_Token",
     "Ecom_BillTo_Online_Email",
   ];
 
   const summary: Record<string, string | boolean | null> = {};
   for (const key of interestingKeys) {
     if (!(key in fields)) continue;
-
-    if (key === "Lite_Transaction_Token") {
-      summary[key] = Boolean(fields[key]);
-      continue;
-    }
 
     if (key === "Ecom_BillTo_Online_Email") {
       const email = String(fields[key] ?? "");
@@ -319,7 +313,6 @@ function buildSafeGatewayFieldSummary(fields: Record<string, string>) {
 }
 
 function buildGatewayDiagnostics(session: any, gatewayRequest: { fields: Record<string, string> }) {
-  const tokenValue = gatewayRequest.fields.Lite_Transaction_Token;
   return {
     session_id: session.id,
     payment_context: session.payment_context,
@@ -327,8 +320,8 @@ function buildGatewayDiagnostics(session: any, gatewayRequest: { fields: Record<
     amount_major: session.amount_major,
     amount_minor: session.amount_minor,
     currency_code: session.currency_code,
-    token_present: typeof tokenValue === "string" && tokenValue.trim().length > 0,
-    token_required: Boolean(session.gateway_payload?.require_token),
+    token_present: false,
+    token_required: false,
     return_urls_public:
       Object.values({
         successful: gatewayRequest.fields.Lite_Website_Successful_Url,
@@ -491,7 +484,6 @@ router.post("/iveri/initiate", async (req, res) => {
       gateway_payload: {
         context_payload: contextPayload,
         mode: config.mode,
-        require_token: config.requireToken,
       },
     });
 
@@ -511,9 +503,6 @@ router.post("/iveri/initiate", async (req, res) => {
       },
       context: paymentContext,
       lineItems,
-      additionalFields: {
-        passprive_trace_guard: merchantTrace,
-      },
     });
 
     const updatedSession = await updatePaymentSession(session.id, {

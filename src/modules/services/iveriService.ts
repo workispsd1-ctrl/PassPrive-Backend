@@ -1,12 +1,10 @@
-import { createHash, randomUUID } from "crypto";
+import { randomUUID } from "crypto";
 import https from "https";
 import { URL } from "url";
 
 export interface IveriConfig {
   mode: "TEST" | "LIVE";
   applicationId: string;
-  sharedSecret: string | null;
-  requireToken: boolean;
   authoriseUrl: string;
   authoriseInfoUrl: string;
   returnSuccessUrl: string;
@@ -24,31 +22,36 @@ export function getIveriConfig(): IveriConfig {
     throw new Error(`Missing iVeri application id for ${mode} mode`);
   }
 
-  const baseUrl = process.env.IVERI_GATEWAY_BASE_URL?.trim().replace(/\/+$/, "") ?? "";
+  const configuredBaseUrl = process.env.IVERI_GATEWAY_BASE_URL?.trim().replace(/\/+$/, "") ?? "";
+  const allowNonCimForMur =
+    String(process.env.IVERI_ALLOW_NON_CIM_FOR_MUR ?? "false").trim().toLowerCase() === "true";
 
-  const sharedSecret = process.env.IVERI_SHARED_SECRET?.trim() || null;
-  const requireToken =
-    String(process.env.IVERI_REQUIRE_SHARED_SECRET ?? (mode === "LIVE" ? "true" : "false"))
-      .trim()
-      .toLowerCase() === "true";
-
-  if (requireToken && !sharedSecret) {
-    throw new Error(
-      "Missing IVERI_SHARED_SECRET: token verification is required for the current environment"
-    );
-  }
+  const normalizedBaseUrl = (() => {
+    if (!configuredBaseUrl) return "";
+    try {
+      const host = new URL(configuredBaseUrl).host.toLowerCase();
+      if (!allowNonCimForMur && mode === "TEST" && host === "portal.host.iveri.com") {
+        return "https://portal.merchant.cim.mu";
+      }
+    } catch {
+      return configuredBaseUrl;
+    }
+    return configuredBaseUrl;
+  })();
 
   return {
     mode,
     applicationId,
-    sharedSecret,
-    requireToken,
     authoriseUrl:
       process.env.IVERI_AUTHORISE_URL?.trim() ||
-      (baseUrl ? `${baseUrl}/Lite/Authorise.aspx` : "https://portal.host.iveri.com/Lite/Authorise.aspx"),
+      (normalizedBaseUrl
+        ? `${normalizedBaseUrl}/Lite/Authorise.aspx`
+        : "https://portal.merchant.cim.mu/Lite/Authorise.aspx"),
     authoriseInfoUrl:
       process.env.IVERI_AUTHORISE_INFO_URL?.trim() ||
-      (baseUrl ? `${baseUrl}/Lite/AuthoriseInfo.aspx` : "https://backoffice.iveri.co.za/Lite/Transactions/New/AuthoriseInfo.aspx"),
+      (normalizedBaseUrl
+        ? `${normalizedBaseUrl}/Lite/AuthoriseInfo.aspx`
+        : "https://portal.merchant.cim.mu/Lite/AuthoriseInfo.aspx"),
     returnSuccessUrl: requireEnv("IVERI_RETURN_SUCCESS_URL"),
     returnFailUrl: requireEnv("IVERI_RETURN_FAIL_URL"),
     returnTryLaterUrl: requireEnv("IVERI_RETURN_TRY_LATER_URL"),
@@ -60,17 +63,6 @@ function requireEnv(name: string) {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`Missing ${name}`);
   return value;
-}
-
-function normalizeApplicationIdForToken(applicationId: string) {
-  const trimmed = applicationId.trim().toUpperCase();
-  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
-    return trimmed;
-  }
-  if (/^[0-9A-F-]{36}$/.test(trimmed)) {
-    return `{${trimmed}}`;
-  }
-  return trimmed;
 }
 
 function majorToMinor(amountMajor: number) {
@@ -88,27 +80,6 @@ function withQuery(urlString: string, params: Record<string, string>) {
 export function generateMerchantTrace(context: string) {
   const compactUuid = randomUUID().replace(/-/g, "").slice(0, 20).toUpperCase();
   return `PP-${context}-${Date.now()}-${compactUuid}`.slice(0, 64);
-}
-
-export function generateTransactionToken(params: {
-  secretKey: string;
-  resource: string;
-  applicationId: string;
-  amountMinor: number;
-  emailAddress: string;
-}) {
-  const time = Math.floor(Date.now() / 1000).toString();
-  const normalizedApplicationId = normalizeApplicationIdForToken(params.applicationId);
-  const tokenInput =
-    params.secretKey +
-    time +
-    params.resource +
-    normalizedApplicationId +
-    String(params.amountMinor) +
-    params.emailAddress.trim();
-
-  const hash = createHash("sha256").update(tokenInput, "utf8").digest("hex");
-  return `${time}:${hash}`;
 }
 
 export function buildIveriAuthoriseRequest(params: {
@@ -134,7 +105,6 @@ export function buildIveriAuthoriseRequest(params: {
   additionalFields?: Record<string, string>;
 }) {
   const amountMinor = majorToMinor(params.amountMajor);
-  const resourcePath = "/Lite/Authorise.aspx";
   const consumerOrderId = params.merchantTrace.replace(/[^A-Za-z0-9]/g, "").slice(0, 20) || params.sessionId.replace(/-/g, "").slice(0, 20);
   const fields: Record<string, string> = {
     Lite_Merchant_ApplicationId: params.config.applicationId,
@@ -143,13 +113,8 @@ export function buildIveriAuthoriseRequest(params: {
     Lite_Merchant_Trace: params.merchantTrace,
     MerchantReference: params.merchantReference.slice(0, 20),
     Ecom_ConsumerOrderID: consumerOrderId,
-    Lite_ConsumerOrderID_Prefix: consumerOrderId.slice(0, 8) || "PASSPRIV",
     Lite_Version: "4.0",
-    Ecom_SchemaVersion: "1.0",
-    Lite_Recurring_Payment: "False",
     Ecom_BillTo_Online_Email: params.customer.email,
-    Ecom_BillTo_Postal_Name_First: (params.customer.firstName ?? "Guest").slice(0, 15),
-    Ecom_BillTo_Postal_Name_Last: (params.customer.lastName ?? "Customer").slice(0, 15),
     Lite_Website_Successful_Url: withQuery(params.config.returnSuccessUrl, {
       session_id: params.sessionId,
       outcome: "success",
@@ -170,8 +135,6 @@ export function buildIveriAuthoriseRequest(params: {
       session_id: params.sessionId,
       outcome: "error",
     }),
-    passprive_session_id: params.sessionId,
-    passprive_payment_context: params.context,
   };
 
   const lineItems = (params.lineItems ?? []).filter(
@@ -195,20 +158,6 @@ export function buildIveriAuthoriseRequest(params: {
 
   if (params.discountMajor && params.discountMajor > 0) {
     fields.Lite_Order_DiscountAmount = String(majorToMinor(params.discountMajor));
-  }
-
-  if (params.customer.phone) {
-    fields.Ecom_BillTo_Telecom_Phone_Number = params.customer.phone.replace(/\D+/g, "").slice(0, 15);
-  }
-
-  if (params.config.sharedSecret) {
-    fields.Lite_Transaction_Token = generateTransactionToken({
-      secretKey: params.config.sharedSecret,
-      resource: resourcePath,
-      applicationId: params.config.applicationId,
-      amountMinor,
-      emailAddress: params.customer.email,
-    });
   }
 
   for (const [key, value] of Object.entries(params.additionalFields ?? {})) {
