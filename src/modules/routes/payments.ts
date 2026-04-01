@@ -22,8 +22,14 @@ import {
   createPaymentSession,
   getPaymentSessionById,
   updatePaymentSession,
+  updatePaymentSessionIfStatusIn,
 } from "../services/paymentSessionService";
 import { verifyPaymentSessionWithIveri } from "../services/paymentVerificationService";
+import {
+  buildIveriIntegrityChecks,
+  deriveIveriOutcome,
+  normalizeIveriPayload,
+} from "../services/iveriPayloadService";
 
 const router = Router();
 
@@ -103,39 +109,9 @@ function splitName(fullName: string | null) {
   };
 }
 
-function normalizeOutcome(value: string | undefined) {
-  const outcome = String(value ?? "").trim().toLowerCase();
-  if (["success", "fail", "pending", "error"].includes(outcome)) return outcome;
-  return "pending";
-}
-
-function inferOutcomeFromGatewayPayload(payload: Record<string, any>) {
-  const explicitOutcome = normalizeOutcome(
-    typeof payload.outcome === "string"
-      ? payload.outcome
-      : typeof payload.Lite_Result_Description === "string"
-      ? payload.Lite_Result_Description
-      : typeof payload.Lite_Payment_Card_Status === "string"
-      ? payload.Lite_Payment_Card_Status
-      : undefined
-  );
-
-  if (explicitOutcome !== "pending") return explicitOutcome;
-
-  const combined = `${String(payload.Lite_Payment_Card_Status ?? "").toLowerCase()} ${String(
-    payload.Lite_Result_Description ?? ""
-  ).toLowerCase()}`;
-
-  if (["success", "successful", "approved", "authorised", "authorized", "paid"].some((term) => combined.includes(term))) {
-    return "success";
-  }
-  if (["fail", "failed", "declined", "cancelled", "canceled", "error", "invalid"].some((term) => combined.includes(term))) {
-    return "fail";
-  }
-  if (["later", "pending", "timeout", "unable"].some((term) => combined.includes(term))) {
-    return "pending";
-  }
-
+function mapSessionStatusToAppOutcome(status: string) {
+  if (status === "VERIFIED_SUCCESS" || status === "FINALIZED") return "success";
+  if (status === "VERIFIED_FAILED" || status === "ERROR" || status === "CANCELLED") return "fail";
   return "pending";
 }
 
@@ -254,13 +230,20 @@ function buildSafeReturnSummary(payload: Record<string, any>) {
     "outcome",
     "session_id",
     "passprive_session_id",
-    "Lite_Merchant_ApplicationId",
+    "Lite_Merchant_ApplicationID",
+    "LITE_MERCHANT_APPLICATIONID",
     "Lite_Merchant_Trace",
+    "LITE_MERCHANT_TRACE",
     "Lite_Result_Description",
+    "LITE_RESULT_DESCRIPTION",
     "Lite_Payment_Card_Status",
+    "LITE_PAYMENT_CARD_STATUS",
     "Lite_TransactionIndex",
+    "LITE_TRANSACTIONINDEX",
     "MerchantReference",
+    "MERCHANTREFERENCE",
     "Lite_Order_Amount",
+    "LITE_ORDER_AMOUNT",
   ];
 
   const summary: Record<string, any> = {};
@@ -294,7 +277,7 @@ function buildSafeReturnSummary(payload: Record<string, any>) {
 
 function buildSafeGatewayFieldSummary(fields: Record<string, string>) {
   const interestingKeys = [
-    "Lite_Merchant_ApplicationId",
+    "Lite_Merchant_ApplicationID",
     "Lite_Order_Amount",
     "Lite_Order_DiscountAmount",
     "Lite_Order_LineItems_Product_1",
@@ -345,6 +328,7 @@ function buildGatewayDiagnostics(session: any, gatewayRequest: { fields: Record<
     amount_minor: session.amount_minor,
     currency_code: session.currency_code,
     token_present: typeof tokenValue === "string" && tokenValue.trim().length > 0,
+    token_required: Boolean(session.gateway_payload?.require_token),
     return_urls_public:
       Object.values({
         successful: gatewayRequest.fields.Lite_Website_Successful_Url,
@@ -469,6 +453,7 @@ router.post("/iveri/initiate", async (req, res) => {
       gateway_payload: {
         context_payload: contextPayload,
         mode: config.mode,
+        require_token: config.requireToken,
       },
     });
 
@@ -605,44 +590,119 @@ async function handleIveriReturn(req: any, res: any) {
     ...(req.method === "POST" ? req.body ?? {} : {}),
     ...(req.query ?? {}),
   };
+  const normalizedPayload = normalizeIveriPayload(sourcePayload);
   const sessionId = String(
-    sourcePayload.session_id ??
-      sourcePayload.passprive_session_id ??
-      ""
+    normalizedPayload.canonical.session_id ?? sourcePayload.session_id ?? sourcePayload.passprive_session_id ?? ""
   ).trim();
   if (!sessionId) {
     return res.status(400).json({ error: "Missing session_id" });
   }
 
   try {
-    const session = await getPaymentSessionById(sessionId);
+    let session = await getPaymentSessionById(sessionId);
     if (!session) {
       return res.status(404).json({ error: "Payment session not found" });
     }
 
-    const outcome = inferOutcomeFromGatewayPayload(sourcePayload);
-    const appUrl = buildAppDeepLink(outcome, sessionId);
+    const inferredOutcome = deriveIveriOutcome(normalizedPayload);
+    const integrity = buildIveriIntegrityChecks({
+      session,
+      payload: normalizedPayload,
+    });
+
+    const previousReturnEvents = Array.isArray(session.gateway_payload?.return_events)
+      ? session.gateway_payload.return_events
+      : [];
+    const returnEvent = {
+      received_at: new Date().toISOString(),
+      method: req.method,
+      inferred_outcome: inferredOutcome,
+      integrity,
+      canonical_payload: normalizedPayload.canonical,
+      payload_summary: buildSafeReturnSummary(sourcePayload),
+    };
+
     console.log("[iVeri return]", {
       session_id: sessionId,
       method: req.method,
-      inferred_outcome: outcome,
-      lite_status: sourcePayload.Lite_Payment_Card_Status ?? null,
-      lite_result_description: sourcePayload.Lite_Result_Description ?? null,
-      lite_transaction_index: sourcePayload.Lite_TransactionIndex ?? null,
+      inferred_outcome: inferredOutcome,
+      integrity,
+      lite_status: normalizedPayload.canonical.card_status,
+      lite_result_description: normalizedPayload.canonical.result_description,
+      lite_transaction_index: normalizedPayload.canonical.transaction_index,
       payload_summary: buildSafeReturnSummary(sourcePayload),
     });
-    await updatePaymentSession(sessionId, {
-      status: "RETURNED",
-      gateway_payload: {
-        ...(session.gateway_payload ?? {}),
-        return_request: {
-          method: req.method,
-          query: req.query ?? {},
-          body: req.body ?? {},
-          inferred_outcome: outcome,
+
+    const sessionAfterReturn = await updatePaymentSessionIfStatusIn({
+      sessionId,
+      allowedCurrentStatuses: ["CREATED", "PENDING", "RETURNED", "VERIFIED_FAILED", "ERROR"],
+      updates: {
+        status: "RETURNED",
+        gateway_status: normalizedPayload.canonical.card_status ?? session.gateway_status ?? null,
+        gateway_result_code: normalizedPayload.canonical.card_status ?? session.gateway_result_code ?? null,
+        gateway_result_description:
+          normalizedPayload.canonical.result_description ?? session.gateway_result_description ?? null,
+        transaction_index: normalizedPayload.canonical.transaction_index ?? session.transaction_index ?? null,
+        authorization_code: normalizedPayload.canonical.authorisation_code ?? session.authorization_code ?? null,
+        bank_reference: normalizedPayload.canonical.bank_reference ?? session.bank_reference ?? null,
+        gateway_payload: {
+          ...(session.gateway_payload ?? {}),
+          return_events: [...previousReturnEvents.slice(-9), returnEvent],
+          return_request: {
+            method: req.method,
+            query: req.query ?? {},
+            body: req.body ?? {},
+            inferred_outcome: inferredOutcome,
+            integrity,
+            canonical_payload: normalizedPayload.canonical,
+          },
         },
       },
     });
+
+    if (sessionAfterReturn) {
+      session = sessionAfterReturn;
+    } else {
+      session = (await getPaymentSessionById(sessionId)) ?? session;
+    }
+
+    if (session.status !== "FINALIZED" && session.status !== "VERIFIED_SUCCESS" && integrity.ok) {
+      try {
+        const config = getIveriConfig();
+        const verification = await verifyPaymentSessionWithIveri({
+          sessionId,
+          applicationId: config.applicationId,
+          authoriseInfoUrl: config.authoriseInfoUrl,
+        });
+        session = verification.session;
+      } catch (verifyErr: any) {
+        await updatePaymentSession(sessionId, {
+          gateway_payload: {
+            ...(session.gateway_payload ?? {}),
+            verification_error_on_return: {
+              message: verifyErr?.message || "Unknown verification error",
+              at: new Date().toISOString(),
+            },
+          },
+        });
+      }
+    } else if (!integrity.ok) {
+      await updatePaymentSessionIfStatusIn({
+        sessionId,
+        allowedCurrentStatuses: ["CREATED", "PENDING", "RETURNED"],
+        updates: {
+          status: "ERROR",
+          gateway_payload: {
+            ...(session.gateway_payload ?? {}),
+            integrity_error_on_return: integrity,
+          },
+        },
+      });
+      session = (await getPaymentSessionById(sessionId)) ?? session;
+    }
+
+    const outcome = mapSessionStatusToAppOutcome(session.status);
+    const appUrl = buildAppDeepLink(outcome, sessionId);
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");
     return res.status(200).send(
@@ -650,14 +710,14 @@ async function handleIveriReturn(req: any, res: any) {
         title:
           outcome === "success"
             ? "Payment Completed"
-            : outcome === "fail" || outcome === "error"
+            : outcome === "fail"
             ? "Payment Failed"
             : "Payment Pending",
         message:
           outcome === "success"
-            ? "We are taking you back to PassPrive."
-            : outcome === "fail" || outcome === "error"
-            ? "The payment did not complete successfully. Returning to PassPrive."
+            ? "Your payment has been verified. We are taking you back to PassPrive."
+            : outcome === "fail"
+            ? "The payment did not verify successfully. Returning to PassPrive."
             : "The payment is still being processed. Returning to PassPrive.",
         appUrl,
         sessionId,
@@ -702,6 +762,8 @@ router.post("/iveri/verify", async (req, res) => {
       merchant_trace: verification.session.merchant_trace,
       verified: verification.verification.verified,
       status: verification.verification.status,
+      inferred_outcome: verification.verification.inferredOutcome,
+      integrity: verification.verification.integrity,
       gateway_status: verification.session.gateway_status,
       result_description: verification.session.gateway_result_description,
       amount: {
@@ -778,20 +840,26 @@ router.post("/iveri/finalize-booking", async (req, res) => {
     }
 
     const bookingReferenceId = result.body.booking.id;
-    await updatePaymentSession(session.id, {
-      status: "FINALIZED",
-      context_reference_id: bookingReferenceId,
-      gateway_payload: {
-        ...(session.gateway_payload ?? {}),
-        finalized_booking: result.body.booking,
+    const updated = await updatePaymentSessionIfStatusIn({
+      sessionId: session.id,
+      allowedCurrentStatuses: ["VERIFIED_SUCCESS"],
+      updates: {
+        status: "FINALIZED",
+        context_reference_id: bookingReferenceId,
+        gateway_payload: {
+          ...(session.gateway_payload ?? {}),
+          finalized_booking: result.body.booking,
+        },
       },
     });
+    const effectiveSession = updated ?? (await getPaymentSessionById(session.id));
 
     return res.json({
       session_id: session.id,
       finalized: true,
       booking: result.body.booking,
       duplicate: result.body.duplicate ?? false,
+      booking_reference_id: effectiveSession?.context_reference_id ?? bookingReferenceId,
     });
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || "Failed to finalize booking payment" });

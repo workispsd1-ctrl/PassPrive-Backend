@@ -101,3 +101,25 @@ export async function updatePaymentSession(sessionId: string, updates: Record<st
   if (error) throw error;
   return data;
 }
+
+export async function updatePaymentSessionIfStatusIn(params: {
+  sessionId: string;
+  allowedCurrentStatuses: PaymentStatus[];
+  updates: Record<string, any>;
+}) {
+  const payload = sanitizePayload({
+    ...params.updates,
+    updated_at: new Date().toISOString(),
+  });
+
+  const { data, error } = await supabase
+    .from("payment_sessions")
+    .update(payload)
+    .eq("id", params.sessionId)
+    .in("status", params.allowedCurrentStatuses)
+    .select("*")
+    .maybeSingle();
+
+  if (error) throw error;
+  return data;
+}

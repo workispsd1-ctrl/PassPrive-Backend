@@ -6,6 +6,7 @@ export interface IveriConfig {
   mode: "TEST" | "LIVE";
   applicationId: string;
   sharedSecret: string | null;
+  requireToken: boolean;
   authoriseUrl: string;
   authoriseInfoUrl: string;
   returnSuccessUrl: string;
@@ -25,10 +26,23 @@ export function getIveriConfig(): IveriConfig {
 
   const baseUrl = process.env.IVERI_GATEWAY_BASE_URL?.trim().replace(/\/+$/, "") ?? "";
 
+  const sharedSecret = process.env.IVERI_SHARED_SECRET?.trim() || null;
+  const requireToken =
+    String(process.env.IVERI_REQUIRE_SHARED_SECRET ?? (mode === "LIVE" ? "true" : "false"))
+      .trim()
+      .toLowerCase() === "true";
+
+  if (requireToken && !sharedSecret) {
+    throw new Error(
+      "Missing IVERI_SHARED_SECRET: token verification is required for the current environment"
+    );
+  }
+
   return {
     mode,
     applicationId,
-    sharedSecret: process.env.IVERI_SHARED_SECRET?.trim() || null,
+    sharedSecret,
+    requireToken,
     authoriseUrl:
       process.env.IVERI_AUTHORISE_URL?.trim() ||
       (baseUrl ? `${baseUrl}/Lite/Authorise.aspx` : "https://portal.host.iveri.com/Lite/Authorise.aspx"),
@@ -123,13 +137,12 @@ export function buildIveriAuthoriseRequest(params: {
   const resourcePath = "/Lite/Authorise.aspx";
   const consumerOrderId = params.merchantTrace.replace(/[^A-Za-z0-9]/g, "").slice(0, 20) || params.sessionId.replace(/-/g, "").slice(0, 20);
   const fields: Record<string, string> = {
-    Lite_Merchant_ApplicationId: params.config.applicationId,
+    Lite_Merchant_ApplicationID: params.config.applicationId,
     Lite_Order_Amount: String(amountMinor),
     Lite_Currency_AlphaCode: params.currencyCode,
     Lite_Merchant_Trace: params.merchantTrace,
     MerchantReference: params.merchantReference.slice(0, 20),
     Ecom_ConsumerOrderID: consumerOrderId,
-    Lite_ConsumerOrderIDPrefix: consumerOrderId.slice(0, 8) || "PASSPRIV",
     Lite_ConsumerOrderID_Prefix: consumerOrderId.slice(0, 8) || "PASSPRIV",
     Lite_Version: "4.0",
     Ecom_BillTo_Online_Email: params.customer.email,

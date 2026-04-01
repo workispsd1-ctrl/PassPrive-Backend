@@ -1,5 +1,11 @@
 import { postForm } from "./iveriService";
 import { getPaymentSessionById, updatePaymentSession } from "./paymentSessionService";
+import {
+  buildIveriIntegrityChecks,
+  deriveIveriOutcome,
+  inferStatusFromOutcome,
+  normalizeIveriPayload,
+} from "./iveriPayloadService";
 
 function decodeHtml(value: string) {
   return value
@@ -33,30 +39,6 @@ function extractKeyValuePayload(body: string) {
   return fields;
 }
 
-function normalizeStatus(fields: Record<string, string>) {
-  const cardStatus = String(fields.Lite_Payment_Card_Status ?? "").trim().toLowerCase();
-  const resultDescription = String(fields.Lite_Result_Description ?? "").trim().toLowerCase();
-  const joined = `${cardStatus} ${resultDescription}`;
-
-  if (
-    ["successful", "success", "approved", "authorised", "authorized", "paid", "captured"].some((term) =>
-      joined.includes(term)
-    )
-  ) {
-    return "VERIFIED_SUCCESS";
-  }
-
-  if (
-    ["failed", "fail", "declined", "cancelled", "canceled", "error", "invalid"].some((term) =>
-      joined.includes(term)
-    )
-  ) {
-    return "VERIFIED_FAILED";
-  }
-
-  return "RETURNED";
-}
-
 export async function verifyPaymentSessionWithIveri(params: {
   sessionId: string;
   applicationId: string;
@@ -73,24 +55,44 @@ export async function verifyPaymentSessionWithIveri(params: {
   });
 
   const fields = extractKeyValuePayload(response.body);
-  const verificationStatus = normalizeStatus(fields);
+  const normalizedPayload = normalizeIveriPayload(fields);
+  const inferredOutcome = deriveIveriOutcome(normalizedPayload);
+  let verificationStatus = inferStatusFromOutcome(inferredOutcome);
+  const integrity = buildIveriIntegrityChecks({
+    session,
+    payload: normalizedPayload,
+  });
+
+  if (!integrity.ok && verificationStatus === "VERIFIED_SUCCESS") {
+    verificationStatus = "VERIFIED_FAILED";
+  }
+
+  const gatewayStatus = normalizedPayload.canonical.card_status;
+  const gatewayDescription = normalizedPayload.canonical.result_description;
+  const transactionIndex = normalizedPayload.canonical.transaction_index;
+  const authorizationCode = normalizedPayload.canonical.authorisation_code;
+  const bankReference = normalizedPayload.canonical.bank_reference;
+
   const updated = await updatePaymentSession(params.sessionId, {
     status: verificationStatus,
-    gateway_status: fields.Lite_Payment_Card_Status ?? null,
-    gateway_result_code: fields.Lite_Payment_Card_Status ?? null,
-    gateway_result_description: fields.Lite_Result_Description ?? null,
-    transaction_index: fields.Lite_TransactionIndex ?? null,
-    authorization_code: fields.Lite_Order_AuthorisationCode ?? null,
-    bank_reference: fields.Lite_BankReference ?? null,
+    gateway_status: gatewayStatus ?? null,
+    gateway_result_code: gatewayStatus ?? null,
+    gateway_result_description: gatewayDescription ?? null,
+    transaction_index: transactionIndex ?? null,
+    authorization_code: authorizationCode ?? null,
+    bank_reference: bankReference ?? null,
     verified_at: new Date().toISOString(),
     gateway_payload: {
       ...(session.gateway_payload ?? {}),
       authorise_info_request: {
-        Lite_Merchant_ApplicationId: params.applicationId,
+        Lite_Merchant_ApplicationID: params.applicationId,
         Lite_Merchant_Trace: session.merchant_trace,
       },
       authorise_info_response: {
         status_code: response.statusCode,
+        inferred_outcome: inferredOutcome,
+        integrity,
+        canonical_fields: normalizedPayload.canonical,
         fields,
       },
     },
@@ -99,8 +101,10 @@ export async function verifyPaymentSessionWithIveri(params: {
   return {
     session: updated,
     verification: {
-      verified: verificationStatus === "VERIFIED_SUCCESS",
+      verified: verificationStatus === "VERIFIED_SUCCESS" && integrity.ok,
       status: verificationStatus,
+      inferredOutcome,
+      integrity,
       fields,
       rawStatusCode: response.statusCode,
     },
