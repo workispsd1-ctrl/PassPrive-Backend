@@ -270,6 +270,25 @@ function buildSafeReturnSummary(payload: Record<string, any>) {
   }
 
   summary.body_key_count = Object.keys(payload).length;
+  summary.body_keys = Object.keys(payload).sort();
+
+  const safeEcho: Record<string, any> = {};
+  for (const [key, value] of Object.entries(payload)) {
+    const lowered = key.toLowerCase();
+    if (
+      lowered.includes("card_number") ||
+      lowered.includes("cvv") ||
+      lowered.includes("verification") ||
+      lowered.includes("expdate") ||
+      lowered.includes("token")
+    ) {
+      continue;
+    }
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+      safeEcho[key] = value;
+    }
+  }
+  summary.safe_echo = safeEcho;
   return summary;
 }
 
