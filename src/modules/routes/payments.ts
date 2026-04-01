@@ -109,6 +109,36 @@ function normalizeOutcome(value: string | undefined) {
   return "pending";
 }
 
+function inferOutcomeFromGatewayPayload(payload: Record<string, any>) {
+  const explicitOutcome = normalizeOutcome(
+    typeof payload.outcome === "string"
+      ? payload.outcome
+      : typeof payload.Lite_Result_Description === "string"
+      ? payload.Lite_Result_Description
+      : typeof payload.Lite_Payment_Card_Status === "string"
+      ? payload.Lite_Payment_Card_Status
+      : undefined
+  );
+
+  if (explicitOutcome !== "pending") return explicitOutcome;
+
+  const combined = `${String(payload.Lite_Payment_Card_Status ?? "").toLowerCase()} ${String(
+    payload.Lite_Result_Description ?? ""
+  ).toLowerCase()}`;
+
+  if (["success", "successful", "approved", "authorised", "authorized", "paid"].some((term) => combined.includes(term))) {
+    return "success";
+  }
+  if (["fail", "failed", "declined", "cancelled", "canceled", "error", "invalid"].some((term) => combined.includes(term))) {
+    return "fail";
+  }
+  if (["later", "pending", "timeout", "unable"].some((term) => combined.includes(term))) {
+    return "pending";
+  }
+
+  return "pending";
+}
+
 function buildAppDeepLink(outcome: string, sessionId: string) {
   const path =
     outcome === "success"
@@ -444,8 +474,16 @@ router.get("/iveri/launch/:session_id", async (req, res) => {
   }
 });
 
-router.get("/iveri/return", async (req, res) => {
-  const sessionId = String(req.query.session_id ?? "").trim();
+async function handleIveriReturn(req: any, res: any) {
+  const sourcePayload = {
+    ...(req.method === "POST" ? req.body ?? {} : {}),
+    ...(req.query ?? {}),
+  };
+  const sessionId = String(
+    sourcePayload.session_id ??
+      sourcePayload.passprive_session_id ??
+      ""
+  ).trim();
   if (!sessionId) {
     return res.status(400).json({ error: "Missing session_id" });
   }
@@ -456,12 +494,17 @@ router.get("/iveri/return", async (req, res) => {
       return res.status(404).json({ error: "Payment session not found" });
     }
 
-    const outcome = normalizeOutcome(typeof req.query.outcome === "string" ? req.query.outcome : undefined);
+    const outcome = inferOutcomeFromGatewayPayload(sourcePayload);
     await updatePaymentSession(sessionId, {
       status: "RETURNED",
       gateway_payload: {
         ...(session.gateway_payload ?? {}),
-        return_query: req.query,
+        return_request: {
+          method: req.method,
+          query: req.query ?? {},
+          body: req.body ?? {},
+          inferred_outcome: outcome,
+        },
       },
     });
 
@@ -469,7 +512,10 @@ router.get("/iveri/return", async (req, res) => {
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || "Failed to handle iVeri return" });
   }
-});
+}
+
+router.get("/iveri/return", handleIveriReturn);
+router.post("/iveri/return", handleIveriReturn);
 
 router.post("/iveri/verify", async (req, res) => {
   const parsed = VerifySchema.safeParse(req.body);
