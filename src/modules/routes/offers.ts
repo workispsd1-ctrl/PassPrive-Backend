@@ -621,7 +621,7 @@ function normalizeApplicableOffer(offer: any, applicability: { is_eligible: bool
   };
 }
 
-async function evaluateApplicableOffers(params: {
+export async function evaluateApplicableOffers(params: {
   entityType: "STORE" | "RESTAURANT";
   entityId: string;
   query: z.infer<typeof ApplicableOfferQuerySchema>;

@@ -1,0 +1,481 @@
+import { Router } from "express";
+import { z } from "zod";
+import {
+  getAuthenticatedCustomer,
+  requireAuth,
+} from "../services/authService";
+import {
+  BookingPayloadSchema,
+  confirmRestaurantBooking,
+  evaluateBookingPaymentRequirement,
+} from "../services/restaurantBookingService";
+import {
+  buildBillPaymentContext,
+  finalizeBillPayment,
+} from "../services/billPaymentService";
+import {
+  buildIveriAuthoriseRequest,
+  generateMerchantTrace,
+  getIveriConfig,
+} from "../services/iveriService";
+import {
+  createPaymentSession,
+  getPaymentSessionById,
+  updatePaymentSession,
+} from "../services/paymentSessionService";
+import { verifyPaymentSessionWithIveri } from "../services/paymentVerificationService";
+
+const router = Router();
+
+const InitiateSchema = z.object({
+  payment_context: z.enum(["BOOKING", "BILL_PAYMENT"]),
+  restaurant_id: z.string().uuid().optional(),
+  store_id: z.string().uuid().optional(),
+  booking_payload: BookingPayloadSchema.optional(),
+  bill_payload: z
+    .object({
+      bill_amount: z.coerce.number().positive(),
+      item_id: z.string().uuid().nullable().optional(),
+      quantity: z.coerce.number().int().positive().optional(),
+      selected_offer_ids: z.array(z.string().uuid()).optional(),
+      payment_instrument_type: z.string().trim().nullable().optional(),
+      card_network: z.string().trim().nullable().optional(),
+      issuer_bank_name: z.string().trim().nullable().optional(),
+      bin: z.string().trim().nullable().optional(),
+      coupon_code: z.string().trim().nullable().optional(),
+    })
+    .optional(),
+}).superRefine((value, ctx) => {
+  const hasRestaurantId = !!value.restaurant_id;
+  const hasStoreId = !!value.store_id;
+
+  if (value.payment_context === "BOOKING") {
+    if (!hasRestaurantId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["restaurant_id"], message: "restaurant_id is required for BOOKING" });
+    }
+    if (hasStoreId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["store_id"], message: "store_id is not allowed for BOOKING" });
+    }
+    if (!value.booking_payload) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["booking_payload"], message: "booking_payload is required for BOOKING" });
+    }
+    if (value.bill_payload) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["bill_payload"], message: "bill_payload is not allowed for BOOKING" });
+    }
+  }
+
+  if (value.payment_context === "BILL_PAYMENT") {
+    if (hasRestaurantId === hasStoreId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["restaurant_id"],
+        message: "BILL_PAYMENT requires exactly one of restaurant_id or store_id",
+      });
+    }
+    if (!value.bill_payload) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["bill_payload"], message: "bill_payload is required for BILL_PAYMENT" });
+    }
+    if (value.booking_payload) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["booking_payload"], message: "booking_payload is not allowed for BILL_PAYMENT" });
+    }
+  }
+});
+
+const VerifySchema = z.object({
+  session_id: z.string().uuid(),
+});
+
+const FinalizeSchema = z.object({
+  session_id: z.string().uuid(),
+});
+
+function splitName(fullName: string | null) {
+  const trimmed = String(fullName ?? "").trim();
+  if (!trimmed) return { firstName: "Guest", lastName: "Customer" };
+  const [firstName, ...rest] = trimmed.split(/\s+/);
+  return {
+    firstName,
+    lastName: rest.join(" ") || "Customer",
+  };
+}
+
+function normalizeOutcome(value: string | undefined) {
+  const outcome = String(value ?? "").trim().toLowerCase();
+  if (["success", "fail", "pending", "error"].includes(outcome)) return outcome;
+  return "pending";
+}
+
+function buildAppDeepLink(outcome: string, sessionId: string) {
+  const path =
+    outcome === "success"
+      ? "success"
+      : outcome === "fail"
+      ? "fail"
+      : "pending";
+  return `passprive://payment/${path}?session_id=${encodeURIComponent(sessionId)}`;
+}
+
+router.post("/iveri/initiate", async (req, res) => {
+  const parsed = InitiateSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid payment initiation payload", details: parsed.error.flatten() });
+  }
+
+  const customer = await getAuthenticatedCustomer(req, res);
+  if (!customer) return;
+
+  try {
+    const config = getIveriConfig();
+    const merchantTrace = generateMerchantTrace(parsed.data.payment_context);
+    const { firstName, lastName } = splitName(customer.fullName);
+
+    let paymentContext: "BOOKING" | "BILL_PAYMENT" = parsed.data.payment_context;
+    let amountMajor = 0;
+    let restaurantId: string | null = null;
+    let storeId: string | null = null;
+    let discountAmount = 0;
+    let cashbackAmount = 0;
+    let originalAmount = 0;
+    let contextPayload: Record<string, any> = {};
+    let merchantReference = merchantTrace.slice(-20);
+
+    if (paymentContext === "BOOKING") {
+      if (!parsed.data.booking_payload) {
+        return res.status(400).json({ error: "booking_payload is required for BOOKING payment context" });
+      }
+
+      const bookingRestaurantId =
+        typeof parsed.data.booking_payload.restaurant === "string"
+          ? parsed.data.booking_payload.restaurant
+          : parsed.data.booking_payload.restaurant.id;
+      if (parsed.data.restaurant_id !== bookingRestaurantId) {
+        return res.status(400).json({ error: "restaurant_id must match booking_payload.restaurant for BOOKING" });
+      }
+
+      const evaluation = await evaluateBookingPaymentRequirement(parsed.data.booking_payload, customer);
+      if (!evaluation.ok) {
+        return res.status(evaluation.status).json(evaluation.body);
+      }
+      if (!evaluation.paymentRequired) {
+        return res.status(400).json({ error: "Selected booking does not require payment" });
+      }
+
+      amountMajor = evaluation.verifiedCoverChargeAmount;
+      originalAmount = evaluation.verifiedCoverChargeAmount;
+      restaurantId = evaluation.restaurantId;
+      contextPayload = {
+        restaurant_id: parsed.data.restaurant_id,
+        booking_payload: parsed.data.booking_payload,
+      };
+    } else {
+      if (!parsed.data.bill_payload) {
+        return res.status(400).json({ error: "bill_payload is required for BILL_PAYMENT payment context" });
+      }
+
+      const billContext = await buildBillPaymentContext({
+        restaurant_id: parsed.data.restaurant_id ?? null,
+        store_id: parsed.data.store_id ?? null,
+        ...parsed.data.bill_payload,
+        user_id: customer.userId,
+      });
+
+      amountMajor = billContext.payableAmount;
+      originalAmount = billContext.originalAmount;
+      discountAmount = billContext.discountAmount;
+      cashbackAmount = billContext.cashbackAmount;
+      restaurantId = billContext.restaurant?.id ?? null;
+      storeId = billContext.store?.id ?? null;
+      contextPayload = {
+        restaurant_id: parsed.data.restaurant_id ?? null,
+        store_id: parsed.data.store_id ?? null,
+        bill_payload: parsed.data.bill_payload,
+      };
+    }
+
+    const session = await createPaymentSession({
+      payment_context: paymentContext,
+      user_id: customer.userId,
+      restaurant_id: restaurantId,
+      store_id: storeId,
+      merchant_trace: merchantTrace,
+      merchant_application_id: config.applicationId,
+      amount_major: amountMajor,
+      amount_minor: Math.round(amountMajor * 100),
+      currency_code: "MUR",
+      discount_amount: discountAmount,
+      cashback_amount: cashbackAmount,
+      original_amount: originalAmount,
+      status: "PENDING",
+      gateway_payload: {
+        context_payload: contextPayload,
+        mode: config.mode,
+      },
+    });
+
+    const gatewayRequest = buildIveriAuthoriseRequest({
+      config,
+      sessionId: session.id,
+      merchantTrace,
+      amountMajor,
+      currencyCode: "MUR",
+      merchantReference,
+      customer: {
+        email: customer.email ?? "payments@passprive.app",
+        firstName,
+        lastName,
+        phone: customer.phone,
+      },
+      context: paymentContext,
+      additionalFields: {
+        passprive_trace_guard: merchantTrace,
+      },
+    });
+
+    const updatedSession = await updatePaymentSession(session.id, {
+      gateway_payload: {
+        ...(session.gateway_payload ?? {}),
+        gateway_request: gatewayRequest,
+      },
+    });
+
+    return res.status(201).json({
+      session_id: updatedSession.id,
+      merchant_trace: updatedSession.merchant_trace,
+      expected_amount: {
+        major: updatedSession.amount_major,
+        minor: updatedSession.amount_minor,
+        currency_code: updatedSession.currency_code,
+      },
+      gateway: {
+        url: gatewayRequest.gatewayUrl,
+        method: "POST",
+        fields: gatewayRequest.fields,
+      },
+      redirect: {
+        success_url: gatewayRequest.fields.Lite_Success_Url,
+        fail_url: gatewayRequest.fields.Lite_Fail_Url,
+        try_later_url: gatewayRequest.fields.Lite_TryLater_Url,
+        error_url: gatewayRequest.fields.Lite_Error_Url,
+        app_deep_links: {
+          success: buildAppDeepLink("success", updatedSession.id),
+          fail: buildAppDeepLink("fail", updatedSession.id),
+          pending: buildAppDeepLink("pending", updatedSession.id),
+        },
+      },
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Failed to initiate iVeri payment" });
+  }
+});
+
+router.get("/iveri/return", async (req, res) => {
+  const sessionId = String(req.query.session_id ?? "").trim();
+  if (!sessionId) {
+    return res.status(400).json({ error: "Missing session_id" });
+  }
+
+  try {
+    const session = await getPaymentSessionById(sessionId);
+    if (!session) {
+      return res.status(404).json({ error: "Payment session not found" });
+    }
+
+    const outcome = normalizeOutcome(typeof req.query.outcome === "string" ? req.query.outcome : undefined);
+    await updatePaymentSession(sessionId, {
+      status: "RETURNED",
+      gateway_payload: {
+        ...(session.gateway_payload ?? {}),
+        return_query: req.query,
+      },
+    });
+
+    return res.redirect(302, buildAppDeepLink(outcome, sessionId));
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Failed to handle iVeri return" });
+  }
+});
+
+router.post("/iveri/verify", async (req, res) => {
+  const parsed = VerifySchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid verify payload", details: parsed.error.flatten() });
+  }
+
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+
+  try {
+    const config = getIveriConfig();
+    const session = await getPaymentSessionById(parsed.data.session_id);
+    if (!session) {
+      return res.status(404).json({ error: "Payment session not found" });
+    }
+    if (session.user_id !== auth.user.id) {
+      return res.status(403).json({ error: "Access denied" });
+    }
+
+    const verification = await verifyPaymentSessionWithIveri({
+      sessionId: parsed.data.session_id,
+      applicationId: config.applicationId,
+      authoriseInfoUrl: config.authoriseInfoUrl,
+    });
+
+    return res.json({
+      session_id: verification.session.id,
+      merchant_trace: verification.session.merchant_trace,
+      verified: verification.verification.verified,
+      status: verification.verification.status,
+      gateway_status: verification.session.gateway_status,
+      result_description: verification.session.gateway_result_description,
+      amount: {
+        major: verification.session.amount_major,
+        minor: verification.session.amount_minor,
+        currency_code: verification.session.currency_code,
+      },
+      transaction: {
+        transaction_index: verification.session.transaction_index,
+        authorization_code: verification.session.authorization_code,
+        bank_reference: verification.session.bank_reference,
+      },
+      raw_fields: verification.verification.fields,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Failed to verify iVeri payment" });
+  }
+});
+
+router.post("/iveri/finalize-booking", async (req, res) => {
+  const parsed = FinalizeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid finalize payload", details: parsed.error.flatten() });
+  }
+
+  const customer = await getAuthenticatedCustomer(req, res);
+  if (!customer) return;
+
+  try {
+    const session = await getPaymentSessionById(parsed.data.session_id);
+    if (!session) {
+      return res.status(404).json({ error: "Payment session not found" });
+    }
+    if (session.user_id !== customer.userId) {
+      return res.status(403).json({ error: "Access denied" });
+    }
+    if (session.payment_context !== "BOOKING") {
+      return res.status(400).json({ error: "Payment session is not a booking payment" });
+    }
+    if (session.status === "FINALIZED") {
+      return res.json({
+        session_id: session.id,
+        finalized: true,
+        booking_reference_id: session.context_reference_id ?? null,
+      });
+    }
+    if (session.status !== "VERIFIED_SUCCESS") {
+      return res.status(409).json({ error: "Payment session has not been verified as successful" });
+    }
+
+    const bookingPayload = session.gateway_payload?.context_payload?.booking_payload;
+    const parsedBooking = BookingPayloadSchema.safeParse(bookingPayload);
+    if (!parsedBooking.success) {
+      return res.status(500).json({ error: "Stored booking payload is invalid" });
+    }
+
+    const result = await confirmRestaurantBooking(
+      {
+        ...parsedBooking.data,
+        payment: {
+          amount: session.amount_major,
+          status: "verified",
+          method: "IVERI_HOSTED",
+          reference: session.transaction_index ?? session.bank_reference ?? session.merchant_trace,
+          verified: true,
+          paymentSessionId: session.id,
+        },
+      },
+      customer
+    );
+
+    if (!result.ok) {
+      return res.status(result.status).json(result.body);
+    }
+
+    const bookingReferenceId = result.body.booking.id;
+    await updatePaymentSession(session.id, {
+      status: "FINALIZED",
+      context_reference_id: bookingReferenceId,
+      gateway_payload: {
+        ...(session.gateway_payload ?? {}),
+        finalized_booking: result.body.booking,
+      },
+    });
+
+    return res.json({
+      session_id: session.id,
+      finalized: true,
+      booking: result.body.booking,
+      duplicate: result.body.duplicate ?? false,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Failed to finalize booking payment" });
+  }
+});
+
+router.post("/iveri/finalize-bill", async (req, res) => {
+  const parsed = FinalizeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid finalize payload", details: parsed.error.flatten() });
+  }
+
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+
+  try {
+    const session = await getPaymentSessionById(parsed.data.session_id);
+    if (!session) {
+      return res.status(404).json({ error: "Payment session not found" });
+    }
+    if (session.user_id !== auth.user.id) {
+      return res.status(403).json({ error: "Access denied" });
+    }
+    if (session.payment_context !== "BILL_PAYMENT") {
+      return res.status(400).json({ error: "Payment session is not a bill payment" });
+    }
+    if (session.status === "FINALIZED") {
+      return res.json({
+        session_id: session.id,
+        finalized: true,
+        bill_payment_reference_id: session.context_reference_id ?? null,
+      });
+    }
+    if (session.status !== "VERIFIED_SUCCESS") {
+      return res.status(409).json({ error: "Payment session has not been verified as successful" });
+    }
+
+    const result = await finalizeBillPayment({
+      session,
+      userId: auth.user.id,
+    });
+
+    await updatePaymentSession(session.id, {
+      status: "FINALIZED",
+      context_reference_id: result.billPayment.id,
+      gateway_payload: {
+        ...(session.gateway_payload ?? {}),
+        finalized_bill_payment: result.billPayment,
+      },
+    });
+
+    return res.json({
+      session_id: session.id,
+      finalized: true,
+      bill_payment: result.billPayment,
+      redemptions: result.redemptions,
+      duplicate: result.duplicate,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ error: err?.message || "Failed to finalize bill payment" });
+  }
+});
+
+export default router;

@@ -1,0 +1,211 @@
+import { createHash, randomUUID } from "crypto";
+import https from "https";
+import { URL } from "url";
+
+export interface IveriConfig {
+  mode: "TEST" | "LIVE";
+  applicationId: string;
+  sharedSecret: string | null;
+  authoriseUrl: string;
+  authoriseInfoUrl: string;
+  returnSuccessUrl: string;
+  returnFailUrl: string;
+  returnTryLaterUrl: string;
+  returnErrorUrl: string;
+}
+
+export function getIveriConfig(): IveriConfig {
+  const mode = String(process.env.IVERI_MODE ?? "TEST").trim().toUpperCase() === "LIVE" ? "LIVE" : "TEST";
+  const applicationId =
+    mode === "LIVE" ? process.env.IVERI_APPLICATION_ID_LIVE : process.env.IVERI_APPLICATION_ID_TEST;
+
+  if (!applicationId) {
+    throw new Error(`Missing iVeri application id for ${mode} mode`);
+  }
+
+  const baseUrl = process.env.IVERI_GATEWAY_BASE_URL?.trim().replace(/\/+$/, "") ?? "";
+
+  return {
+    mode,
+    applicationId,
+    sharedSecret: process.env.IVERI_SHARED_SECRET?.trim() || null,
+    authoriseUrl:
+      process.env.IVERI_AUTHORISE_URL?.trim() ||
+      (baseUrl ? `${baseUrl}/Lite/Authorise.aspx` : "https://portal.host.iveri.com/Lite/Authorise.aspx"),
+    authoriseInfoUrl:
+      process.env.IVERI_AUTHORISE_INFO_URL?.trim() ||
+      (baseUrl ? `${baseUrl}/Lite/AuthoriseInfo.aspx` : "https://backoffice.iveri.co.za/Lite/Transactions/New/AuthoriseInfo.aspx"),
+    returnSuccessUrl: requireEnv("IVERI_RETURN_SUCCESS_URL"),
+    returnFailUrl: requireEnv("IVERI_RETURN_FAIL_URL"),
+    returnTryLaterUrl: requireEnv("IVERI_RETURN_TRY_LATER_URL"),
+    returnErrorUrl: requireEnv("IVERI_RETURN_ERROR_URL"),
+  };
+}
+
+function requireEnv(name: string) {
+  const value = process.env[name]?.trim();
+  if (!value) throw new Error(`Missing ${name}`);
+  return value;
+}
+
+function normalizeApplicationIdForToken(applicationId: string) {
+  const trimmed = applicationId.trim().toUpperCase();
+  if (trimmed.startsWith("{") && trimmed.endsWith("}")) {
+    return trimmed;
+  }
+  if (/^[0-9A-F-]{36}$/.test(trimmed)) {
+    return `{${trimmed}}`;
+  }
+  return trimmed;
+}
+
+function majorToMinor(amountMajor: number) {
+  return Math.round(amountMajor * 100);
+}
+
+function withQuery(urlString: string, params: Record<string, string>) {
+  const url = new URL(urlString);
+  for (const [key, value] of Object.entries(params)) {
+    url.searchParams.set(key, value);
+  }
+  return url.toString();
+}
+
+export function generateMerchantTrace(context: string) {
+  const compactUuid = randomUUID().replace(/-/g, "").slice(0, 20).toUpperCase();
+  return `PP-${context}-${Date.now()}-${compactUuid}`.slice(0, 64);
+}
+
+export function generateTransactionToken(params: {
+  secretKey: string;
+  resource: string;
+  applicationId: string;
+  amountMinor: number;
+  emailAddress: string;
+}) {
+  const time = Math.floor(Date.now() / 1000).toString();
+  const normalizedApplicationId = normalizeApplicationIdForToken(params.applicationId);
+  const tokenInput =
+    params.secretKey +
+    time +
+    params.resource +
+    normalizedApplicationId +
+    String(params.amountMinor) +
+    params.emailAddress.trim();
+
+  const hash = createHash("sha256").update(tokenInput, "utf8").digest("hex");
+  return `${time}:${hash}`;
+}
+
+export function buildIveriAuthoriseRequest(params: {
+  config: IveriConfig;
+  sessionId: string;
+  merchantTrace: string;
+  amountMajor: number;
+  currencyCode: string;
+  merchantReference: string;
+  customer: {
+    email: string;
+    firstName?: string | null;
+    lastName?: string | null;
+    phone?: string | null;
+  };
+  context: "BOOKING" | "BILL_PAYMENT";
+  additionalFields?: Record<string, string>;
+}) {
+  const amountMinor = majorToMinor(params.amountMajor);
+  const resourcePath = "/Lite/Authorise.aspx";
+  const fields: Record<string, string> = {
+    Lite_Merchant_ApplicationId: params.config.applicationId,
+    Lite_Order_Amount: String(amountMinor),
+    Lite_Currency_AlphaCode: params.currencyCode,
+    Lite_Merchant_Trace: params.merchantTrace,
+    MerchantReference: params.merchantReference.slice(0, 20),
+    Lite_Version: "4.0",
+    Ecom_BillTo_Online_Email: params.customer.email,
+    Ecom_BillTo_Postal_Name_First: (params.customer.firstName ?? "Guest").slice(0, 15),
+    Ecom_BillTo_Postal_Name_Last: (params.customer.lastName ?? "Customer").slice(0, 15),
+    Lite_Success_Url: withQuery(params.config.returnSuccessUrl, {
+      session_id: params.sessionId,
+      outcome: "success",
+    }),
+    Lite_Fail_Url: withQuery(params.config.returnFailUrl, {
+      session_id: params.sessionId,
+      outcome: "fail",
+    }),
+    Lite_TryLater_Url: withQuery(params.config.returnTryLaterUrl, {
+      session_id: params.sessionId,
+      outcome: "pending",
+    }),
+    Lite_Error_Url: withQuery(params.config.returnErrorUrl, {
+      session_id: params.sessionId,
+      outcome: "error",
+    }),
+    passprive_session_id: params.sessionId,
+    passprive_payment_context: params.context,
+  };
+
+  if (params.customer.phone) {
+    fields.Ecom_BillTo_Telecom_Phone_Number = params.customer.phone.replace(/\D+/g, "").slice(0, 15);
+  }
+
+  if (params.config.sharedSecret) {
+    fields.Lite_Transaction_Token = generateTransactionToken({
+      secretKey: params.config.sharedSecret,
+      resource: resourcePath,
+      applicationId: params.config.applicationId,
+      amountMinor,
+      emailAddress: params.customer.email,
+    });
+  }
+
+  for (const [key, value] of Object.entries(params.additionalFields ?? {})) {
+    if (value !== undefined && value !== null) {
+      fields[key] = String(value);
+    }
+  }
+
+  return {
+    gatewayUrl: params.config.authoriseUrl,
+    amountMinor,
+    fields,
+  };
+}
+
+export async function postForm(urlString: string, formFields: Record<string, string>) {
+  const url = new URL(urlString);
+  const body = new URLSearchParams(formFields).toString();
+
+  return new Promise<{ statusCode: number; headers: Record<string, string | string[] | undefined>; body: string }>(
+    (resolve, reject) => {
+      const request = https.request(
+        {
+          method: "POST",
+          protocol: url.protocol,
+          hostname: url.hostname,
+          port: url.port || undefined,
+          path: `${url.pathname}${url.search}`,
+          headers: {
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Content-Length": Buffer.byteLength(body),
+          },
+        },
+        (response) => {
+          const chunks: Buffer[] = [];
+          response.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+          response.on("end", () => {
+            resolve({
+              statusCode: response.statusCode ?? 0,
+              headers: response.headers,
+              body: Buffer.concat(chunks).toString("utf8"),
+            });
+          });
+        }
+      );
+
+      request.on("error", reject);
+      request.write(body);
+      request.end();
+    }
+  );
+}
