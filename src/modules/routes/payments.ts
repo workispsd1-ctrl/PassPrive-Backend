@@ -143,6 +143,44 @@ function escapeHtml(value: string) {
     .replace(/'/g, "&#39;");
 }
 
+function buildSafeGatewayFieldSummary(fields: Record<string, string>) {
+  const interestingKeys = [
+    "Lite_Merchant_ApplicationId",
+    "Lite_Order_Amount",
+    "Lite_Currency_AlphaCode",
+    "Lite_Merchant_Trace",
+    "MerchantReference",
+    "Lite_Version",
+    "Lite_Success_Url",
+    "Lite_Fail_Url",
+    "Lite_TryLater_Url",
+    "Lite_Error_Url",
+    "Lite_Transaction_Token",
+    "Ecom_BillTo_Online_Email",
+  ];
+
+  const summary: Record<string, string | boolean | null> = {};
+  for (const key of interestingKeys) {
+    if (!(key in fields)) continue;
+
+    if (key === "Lite_Transaction_Token") {
+      summary[key] = Boolean(fields[key]);
+      continue;
+    }
+
+    if (key === "Ecom_BillTo_Online_Email") {
+      const email = String(fields[key] ?? "");
+      const [name, domain] = email.split("@");
+      summary[key] = name && domain ? `${name.slice(0, 2)}***@${domain}` : "***";
+      continue;
+    }
+
+    summary[key] = fields[key] ?? null;
+  }
+
+  return summary;
+}
+
 router.post("/iveri/initiate", async (req, res) => {
   const parsed = InitiateSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -315,6 +353,15 @@ router.get("/iveri/launch/:session_id", async (req, res) => {
     if (!gatewayRequest?.gatewayUrl || !gatewayRequest?.fields) {
       return res.status(409).json({ error: "Payment launch data is not available for this session" });
     }
+
+    console.log("[iVeri launch] Preparing hosted payment redirect", {
+      session_id: session.id,
+      payment_context: session.payment_context,
+      merchant_trace: session.merchant_trace,
+      gateway_url: gatewayRequest.gatewayUrl,
+      field_count: Object.keys(gatewayRequest.fields).length,
+      field_summary: buildSafeGatewayFieldSummary(gatewayRequest.fields as Record<string, string>),
+    });
 
     const hiddenInputs = Object.entries(gatewayRequest.fields as Record<string, string>)
       .map(
