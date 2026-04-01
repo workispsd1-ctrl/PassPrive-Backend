@@ -286,6 +286,9 @@ export async function finalizeBillPayment(params: {
   for (const offer of recalculated.selectedOffers) {
     const benefit = computeOfferBenefit(offer, recalculated.originalAmount);
     const isRestaurant = recalculated.entityType === "RESTAURANT";
+    const paymentReference =
+      params.session.transaction_index ?? params.session.bank_reference ?? params.session.merchant_trace ?? null;
+    const finalAmount = Number(Math.max(0, recalculated.originalAmount - benefit).toFixed(2));
     const { data: redemption, error: redemptionError } = await supabase
       .from("offer_redemptions")
       .insert({
@@ -295,8 +298,10 @@ export async function finalizeBillPayment(params: {
         store_id: isRestaurant ? null : recalculated.store.id,
         user_id: params.userId,
         order_reference: billPayment.id,
-        bill_amount: recalculated.originalAmount,
+        payment_reference: paymentReference,
+        original_amount: recalculated.originalAmount,
         discount_amount: benefit,
+        final_amount: finalAmount,
         currency_code: params.session.currency_code,
         redemption_status: "APPLIED",
         redeemed_at: new Date().toISOString(),

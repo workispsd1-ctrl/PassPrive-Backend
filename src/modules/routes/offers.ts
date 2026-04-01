@@ -180,13 +180,25 @@ const RedemptionBodySchema = z
     restaurant_id: z.string().uuid().nullable().optional(),
     user_id: z.string().uuid().nullable().optional(),
     order_reference: z.string().trim().nullable().optional(),
-    bill_amount: z.coerce.number().min(0),
+    payment_reference: z.string().trim().nullable().optional(),
+    bill_amount: z.coerce.number().min(0).optional(),
+    original_amount: z.coerce.number().min(0).optional(),
     discount_amount: z.coerce.number().min(0),
+    final_amount: z.coerce.number().min(0).optional(),
     currency_code: z.string().trim().optional(),
     redemption_status: z.string().trim().optional(),
     redeemed_at: z.string().datetime().nullable().optional(),
     expires_at: z.string().datetime().nullable().optional(),
     metadata: z.any().optional(),
+  })
+  .superRefine((value, ctx) => {
+    if (value.bill_amount === undefined && value.original_amount === undefined) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["original_amount"],
+        message: "Provide original_amount (or bill_amount for backward compatibility)",
+      });
+    }
   })
   .strict();
 
@@ -1284,15 +1296,28 @@ router.post("/:id/redemptions", async (req, res) => {
   const admin = await requireAdmin(req, res);
   if (!admin) return;
 
+  const originalAmount = parsed.data.original_amount ?? parsed.data.bill_amount ?? 0;
+  const finalAmount =
+    parsed.data.final_amount ?? Math.max(0, Number(originalAmount) - Number(parsed.data.discount_amount ?? 0));
+
   const { data, error } = await supabase
     .from(REDEMPTIONS_TABLE)
     .insert(
       buildNullAwarePayload({
         offer_id: offerIdParsed.data,
-        ...parsed.data,
+        entity_type: parsed.data.entity_type,
+        store_id: parsed.data.store_id ?? null,
+        restaurant_id: parsed.data.restaurant_id ?? null,
+        user_id: parsed.data.user_id ?? null,
+        order_reference: parsed.data.order_reference ?? null,
+        payment_reference: parsed.data.payment_reference ?? null,
+        original_amount: originalAmount,
+        discount_amount: parsed.data.discount_amount,
+        final_amount: Number(finalAmount.toFixed(2)),
         currency_code: parsed.data.currency_code ?? "MUR",
         redemption_status: parsed.data.redemption_status ?? "APPLIED",
         redeemed_at: parsed.data.redeemed_at ?? new Date().toISOString(),
+        expires_at: parsed.data.expires_at ?? null,
         metadata: parsed.data.metadata ?? {},
       })
     )
