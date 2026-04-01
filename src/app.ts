@@ -19,6 +19,7 @@ import Stores from "./modules/routes/stores";
 import StoresHomeBanners from "./modules/routes/storesHomeBanners";
 import corporatesRouter from "./modules/routes/corporates";
 import Payments from "./modules/routes/payments";
+import EditorialCollections from "./modules/routes/editorialCollections";
 
 const app = express();
 const allowAllCors = String(process.env.CORS_ALLOW_ALL ?? "true").trim().toLowerCase() !== "false";
@@ -114,6 +115,7 @@ app.use("/api/restaurant", Restaurants); // Alias
 app.use("/api/store-catalogue", StoreCatalogue);
 app.use("/api/store-catalog", StoreCatalogue); // Alias for clients using US spelling
 app.use("/api/payments", Payments);
+app.use("/api/editorial-collections", EditorialCollections);
 app.use("/api/stores-home", StoresHomeSections);
 app.use("/api/stores", Stores);
 app.use("/api/store", Stores);       // Alias
