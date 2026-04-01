@@ -249,6 +249,30 @@ function renderAppRedirectPage(params: {
 </html>`;
 }
 
+function buildSafeReturnSummary(payload: Record<string, any>) {
+  const interestingKeys = [
+    "outcome",
+    "session_id",
+    "passprive_session_id",
+    "Lite_Merchant_ApplicationId",
+    "Lite_Merchant_Trace",
+    "Lite_Result_Description",
+    "Lite_Payment_Card_Status",
+    "Lite_TransactionIndex",
+    "MerchantReference",
+    "Lite_Order_Amount",
+  ];
+
+  const summary: Record<string, any> = {};
+  for (const key of interestingKeys) {
+    if (!(key in payload)) continue;
+    summary[key] = payload[key];
+  }
+
+  summary.body_key_count = Object.keys(payload).length;
+  return summary;
+}
+
 function buildSafeGatewayFieldSummary(fields: Record<string, string>) {
   const interestingKeys = [
     "Lite_Merchant_ApplicationId",
@@ -582,6 +606,7 @@ async function handleIveriReturn(req: any, res: any) {
       lite_status: sourcePayload.Lite_Payment_Card_Status ?? null,
       lite_result_description: sourcePayload.Lite_Result_Description ?? null,
       lite_transaction_index: sourcePayload.Lite_TransactionIndex ?? null,
+      payload_summary: buildSafeReturnSummary(sourcePayload),
     });
     await updatePaymentSession(sessionId, {
       status: "RETURNED",
