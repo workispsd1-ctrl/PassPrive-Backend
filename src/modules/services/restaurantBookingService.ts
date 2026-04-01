@@ -553,7 +553,49 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
   }
 
   if (evaluation.duplicateBooking) {
-    const existingBooking = evaluation.duplicateBooking;
+    let existingBooking = evaluation.duplicateBooking;
+
+    if (paymentRequired && paymentVerified) {
+      const currentPaymentStatus = String(existingBooking.payment_status ?? "").trim().toLowerCase();
+      const nextPaymentReference = payment?.reference ?? existingBooking.payment_reference ?? null;
+      const nextPaymentMethod = payment?.method ?? existingBooking.payment_method ?? null;
+      const shouldSyncPaidState =
+        currentPaymentStatus !== "paid" ||
+        existingBooking.payment_reference !== nextPaymentReference ||
+        existingBooking.payment_method !== nextPaymentMethod;
+
+      if (shouldSyncPaidState) {
+        const { data: updatedBooking, error: updateError } = await supabase
+          .from("restaurant_bookings")
+          .update({
+            payment_status: "paid",
+            payment_method: nextPaymentMethod,
+            payment_reference: nextPaymentReference,
+            payment_amount: evaluation.verifiedCoverChargeAmount,
+            payment_required: true,
+            cover_charge_required: true,
+            cover_charge_amount: evaluation.verifiedCoverChargeAmount,
+            status: existingBooking.status === "pending" ? "confirmed" : existingBooking.status,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", existingBooking.id)
+          .select("*")
+          .single();
+
+        if (updateError) {
+          return {
+            ok: false as const,
+            status: 500,
+            body: { error: updateError.message, code: "BOOKING_PAYMENT_SYNC_FAILED" },
+          };
+        }
+
+        if (updatedBooking) {
+          existingBooking = updatedBooking;
+        }
+      }
+    }
+
     return {
       ok: true as const,
       status: 200,
@@ -569,6 +611,8 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
           selected_offer: existingBooking.selected_offer ?? null,
           cover_charge_amount: existingBooking.cover_charge_amount ?? null,
           payment_status: existingBooking.payment_status ?? null,
+          payment_method: existingBooking.payment_method ?? null,
+          payment_reference: existingBooking.payment_reference ?? null,
         },
         duplicate: true,
       },
