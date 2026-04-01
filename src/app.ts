@@ -21,6 +21,7 @@ import corporatesRouter from "./modules/routes/corporates";
 import Payments from "./modules/routes/payments";
 
 const app = express();
+const allowAllCors = String(process.env.CORS_ALLOW_ALL ?? "true").trim().toLowerCase() !== "false";
 
 const allowedOrigins = [
   "http://localhost:3000",
@@ -61,10 +62,11 @@ function isAllowedOrigin(origin: string) {
 
 const corsOptions: cors.CorsOptions = {
   origin(origin, callback) {
-    if (!origin || isAllowedOrigin(origin)) {
+    if (!origin || allowAllCors || isAllowedOrigin(origin)) {
       return callback(null, true);
     }
 
+    console.warn("[CORS] Blocked origin", origin);
     return callback(new Error("Not allowed by CORS"));
   },
   methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
