@@ -114,9 +114,11 @@ export function buildIveriAuthoriseRequest(params: {
     MerchantReference: params.merchantReference.slice(0, 20),
     Ecom_ConsumerOrderID: consumerOrderId,
     Lite_ConsumerOrderID_Prefix: consumerOrderId.slice(0, 8) || "PASSPRIV",
-    Lite_ConsumerOrderIDPrefix: consumerOrderId.slice(0, 8) || "PASSPRIV",
     Lite_Version: "4.0",
+    Ecom_SchemaVersion: "1.0",
     Ecom_BillTo_Online_Email: params.customer.email,
+    Ecom_BillTo_Postal_Name_First: (params.customer.firstName ?? "Guest").slice(0, 15),
+    Ecom_BillTo_Postal_Name_Last: (params.customer.lastName ?? "Customer").slice(0, 15),
     Lite_Website_Successful_Url: withQuery(params.config.returnSuccessUrl, {
       session_id: params.sessionId,
       outcome: "success",
@@ -160,6 +162,10 @@ export function buildIveriAuthoriseRequest(params: {
 
   if (params.discountMajor && params.discountMajor > 0) {
     fields.Lite_Order_DiscountAmount = String(majorToMinor(params.discountMajor));
+  }
+
+  if (params.customer.phone) {
+    fields.Ecom_BillTo_Telecom_Phone_Number = params.customer.phone.replace(/\D+/g, "").slice(0, 15);
   }
 
   for (const [key, value] of Object.entries(params.additionalFields ?? {})) {
