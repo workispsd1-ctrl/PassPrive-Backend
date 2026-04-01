@@ -173,6 +173,10 @@ function escapeHtml(value: string) {
     .replace(/'/g, "&#39;");
 }
 
+function buildPendingDeepLink(sessionId: string) {
+  return buildAppDeepLink("pending", sessionId);
+}
+
 function buildSafeGatewayFieldSummary(fields: Record<string, string>) {
   const interestingKeys = [
     "Lite_Merchant_ApplicationId",
@@ -466,6 +470,9 @@ router.get("/iveri/launch/:session_id", async (req, res) => {
     </form>
     <script>
       document.getElementById("iveri-launch-form").submit();
+      setTimeout(function () {
+        window.location.href = ${JSON.stringify(buildPendingDeepLink(session.id))};
+      }, 15000);
     </script>
   </body>
 </html>`);
