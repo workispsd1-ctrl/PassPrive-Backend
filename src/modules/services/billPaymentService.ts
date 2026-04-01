@@ -221,8 +221,15 @@ export async function finalizeBillPayment(params: {
     throw new Error("Missing bill payment context payload");
   }
 
+  const billPayload =
+    contextPayload.bill_payload && typeof contextPayload.bill_payload === "object"
+      ? contextPayload.bill_payload
+      : contextPayload;
+
   const recalculated = await buildBillPaymentContext({
-    ...contextPayload,
+    restaurant_id: contextPayload.restaurant_id ?? billPayload.restaurant_id ?? null,
+    store_id: contextPayload.store_id ?? billPayload.store_id ?? null,
+    ...billPayload,
     user_id: params.userId,
   });
 
