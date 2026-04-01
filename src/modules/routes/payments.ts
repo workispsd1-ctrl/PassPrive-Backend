@@ -340,6 +340,35 @@ function buildGatewayDiagnostics(session: any, gatewayRequest: { fields: Record<
   };
 }
 
+function validateIveriGatewayConfiguration(params: {
+  authoriseUrl: string;
+  currencyCode: string;
+}) {
+  const allowNonCimForMur =
+    String(process.env.IVERI_ALLOW_NON_CIM_FOR_MUR ?? "false").trim().toLowerCase() === "true";
+
+  try {
+    const url = new URL(params.authoriseUrl);
+    const host = String(url.host ?? "").trim().toLowerCase();
+    const currencyCode = String(params.currencyCode ?? "").trim().toUpperCase();
+
+    if (
+      currencyCode === "MUR" &&
+      !allowNonCimForMur &&
+      host === "portal.host.iveri.com"
+    ) {
+      throw new Error(
+        "iVeri gateway host is set to portal.host.iveri.com for MUR transactions. Configure IVERI_GATEWAY_BASE_URL to the distributor endpoint (for CIM use https://portal.merchant.cim.mu)."
+      );
+    }
+  } catch (err: any) {
+    if (err instanceof TypeError) {
+      throw new Error("Invalid iVeri authorise URL configuration");
+    }
+    throw err;
+  }
+}
+
 router.post("/iveri/initiate", async (req, res) => {
   const parsed = InitiateSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -351,6 +380,10 @@ router.post("/iveri/initiate", async (req, res) => {
 
   try {
     const config = getIveriConfig();
+    validateIveriGatewayConfiguration({
+      authoriseUrl: config.authoriseUrl,
+      currencyCode: "MUR",
+    });
     const merchantTrace = generateMerchantTrace(parsed.data.payment_context);
     const { firstName, lastName } = splitName(customer.fullName);
 
