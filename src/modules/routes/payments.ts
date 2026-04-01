@@ -902,14 +902,19 @@ router.post("/iveri/finalize-bill", async (req, res) => {
       userId: auth.user.id,
     });
 
-    await updatePaymentSession(session.id, {
-      status: "FINALIZED",
-      context_reference_id: result.billPayment.id,
-      gateway_payload: {
-        ...(session.gateway_payload ?? {}),
-        finalized_bill_payment: result.billPayment,
+    const updated = await updatePaymentSessionIfStatusIn({
+      sessionId: session.id,
+      allowedCurrentStatuses: ["VERIFIED_SUCCESS"],
+      updates: {
+        status: "FINALIZED",
+        context_reference_id: result.billPayment.id,
+        gateway_payload: {
+          ...(session.gateway_payload ?? {}),
+          finalized_bill_payment: result.billPayment,
+        },
       },
     });
+    const effectiveSession = updated ?? (await getPaymentSessionById(session.id));
 
     return res.json({
       session_id: session.id,
@@ -917,6 +922,7 @@ router.post("/iveri/finalize-bill", async (req, res) => {
       bill_payment: result.billPayment,
       redemptions: result.redemptions,
       duplicate: result.duplicate,
+      bill_payment_reference_id: effectiveSession?.context_reference_id ?? result.billPayment.id,
     });
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || "Failed to finalize bill payment" });

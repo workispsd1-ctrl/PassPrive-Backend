@@ -28,7 +28,7 @@ export function getIveriConfig(): IveriConfig {
 
   const sharedSecret = process.env.IVERI_SHARED_SECRET?.trim() || null;
   const requireToken =
-    String(process.env.IVERI_REQUIRE_SHARED_SECRET ?? (mode === "LIVE" ? "true" : "false"))
+    String(process.env.IVERI_REQUIRE_SHARED_SECRET ?? "true")
       .trim()
       .toLowerCase() === "true";
 
@@ -138,6 +138,7 @@ export function buildIveriAuthoriseRequest(params: {
   const consumerOrderId = params.merchantTrace.replace(/[^A-Za-z0-9]/g, "").slice(0, 20) || params.sessionId.replace(/-/g, "").slice(0, 20);
   const fields: Record<string, string> = {
     Lite_Merchant_ApplicationID: params.config.applicationId,
+    Lite_Merchant_ApplicationId: params.config.applicationId,
     Lite_Order_Amount: String(amountMinor),
     Lite_Currency_AlphaCode: params.currencyCode,
     Lite_Merchant_Trace: params.merchantTrace,
@@ -145,6 +146,8 @@ export function buildIveriAuthoriseRequest(params: {
     Ecom_ConsumerOrderID: consumerOrderId,
     Lite_ConsumerOrderID_Prefix: consumerOrderId.slice(0, 8) || "PASSPRIV",
     Lite_Version: "4.0",
+    Ecom_SchemaVersion: "1.0",
+    Lite_Recurring_Payment: "False",
     Ecom_BillTo_Online_Email: params.customer.email,
     Ecom_BillTo_Postal_Name_First: (params.customer.firstName ?? "Guest").slice(0, 15),
     Ecom_BillTo_Postal_Name_Last: (params.customer.lastName ?? "Customer").slice(0, 15),

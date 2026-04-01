@@ -50,6 +50,7 @@ export async function verifyPaymentSessionWithIveri(params: {
   }
 
   const response = await postForm(params.authoriseInfoUrl, {
+    Lite_Merchant_ApplicationID: params.applicationId,
     Lite_Merchant_ApplicationId: params.applicationId,
     Lite_Merchant_Trace: session.merchant_trace,
   });
