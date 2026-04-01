@@ -121,12 +121,15 @@ export function buildIveriAuthoriseRequest(params: {
 }) {
   const amountMinor = majorToMinor(params.amountMajor);
   const resourcePath = "/Lite/Authorise.aspx";
+  const consumerOrderId = params.merchantTrace.replace(/[^A-Za-z0-9]/g, "").slice(0, 20) || params.sessionId.replace(/-/g, "").slice(0, 20);
   const fields: Record<string, string> = {
     Lite_Merchant_ApplicationId: params.config.applicationId,
     Lite_Order_Amount: String(amountMinor),
     Lite_Currency_AlphaCode: params.currencyCode,
     Lite_Merchant_Trace: params.merchantTrace,
     MerchantReference: params.merchantReference.slice(0, 20),
+    Ecom_ConsumerOrderID: consumerOrderId,
+    Lite_ConsumerOrderIDPrefix: consumerOrderId.slice(0, 8) || "PASSPRIV",
     Lite_Version: "4.0",
     Ecom_BillTo_Online_Email: params.customer.email,
     Ecom_BillTo_Postal_Name_First: (params.customer.firstName ?? "Guest").slice(0, 15),
