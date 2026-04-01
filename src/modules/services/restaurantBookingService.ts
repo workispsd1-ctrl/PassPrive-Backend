@@ -353,6 +353,12 @@ function generateBookingCode() {
   return `PP-${dateSegment}-${randomSegment}`;
 }
 
+function deriveClientStatus(booking: any) {
+  return String(booking?.payment_status ?? "").trim().toLowerCase() === "paid"
+    ? "payment_successfull"
+    : booking?.status;
+}
+
 async function getRestaurantSlotBookingCount(restaurantId: string, bookingDate: string, bookingTime: string) {
   const { count, error } = await supabase
     .from("restaurant_bookings")
@@ -607,7 +613,8 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
           booking_date: existingBooking.booking_date,
           booking_time: existingBooking.booking_time,
           party_size: existingBooking.party_size,
-          status: existingBooking.status,
+          status: deriveClientStatus(existingBooking),
+          booking_status: existingBooking.status,
           selected_offer: existingBooking.selected_offer ?? null,
           cover_charge_amount: existingBooking.cover_charge_amount ?? null,
           payment_status: existingBooking.payment_status ?? null,
@@ -686,7 +693,8 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
         booking_date: booking.booking_date,
         booking_time: booking.booking_time,
         party_size: booking.party_size,
-        status: booking.status,
+        status: deriveClientStatus(booking),
+        booking_status: booking.status,
         selected_offer: booking.selected_offer ?? null,
         cover_charge_amount: booking.cover_charge_amount ?? null,
         payment_status: booking.payment_status ?? null,
