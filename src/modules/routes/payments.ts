@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import supabase from "../../database/supabase";
 import {
   getAuthenticatedCustomer,
   requireAuth,
@@ -41,6 +42,7 @@ const InitiateSchema = z.object({
   bill_payload: z
     .object({
       bill_amount: z.coerce.number().positive(),
+      booking_id: z.string().uuid().nullable().optional(),
       item_id: z.string().uuid().nullable().optional(),
       quantity: z.coerce.number().int().positive().optional(),
       selected_offer_ids: z.array(z.string().uuid()).optional(),
@@ -830,13 +832,6 @@ router.post("/iveri/finalize-booking", async (req, res) => {
     if (session.payment_context !== "BOOKING") {
       return res.status(400).json({ error: "Payment session is not a booking payment" });
     }
-    const contextPayload = session.gateway_payload?.context_payload;
-    if (!contextPayload?.booking_payload || contextPayload?.bill_payload) {
-      return res.status(409).json({
-        error:
-          "Flow mismatch: this session does not contain booking payload for booking finalization. Use /api/payments/iveri/finalize-bill for bill flows.",
-      });
-    }
     if (session.status === "FINALIZED") {
       return res.json({
         session_id: session.id,
@@ -848,7 +843,7 @@ router.post("/iveri/finalize-booking", async (req, res) => {
       return res.status(409).json({ error: "Payment session has not been verified as successful" });
     }
 
-    const bookingPayload = contextPayload.booking_payload;
+    const bookingPayload = session.gateway_payload?.context_payload?.booking_payload;
     const parsedBooking = BookingPayloadSchema.safeParse(bookingPayload);
     if (!parsedBooking.success) {
       return res.status(500).json({ error: "Stored booking payload is invalid" });
@@ -920,13 +915,6 @@ router.post("/iveri/finalize-bill", async (req, res) => {
     if (session.payment_context !== "BILL_PAYMENT") {
       return res.status(400).json({ error: "Payment session is not a bill payment" });
     }
-    const contextPayload = session.gateway_payload?.context_payload;
-    if (!contextPayload?.bill_payload || contextPayload?.booking_payload) {
-      return res.status(409).json({
-        error:
-          "Flow mismatch: this session does not contain bill payload for bill finalization. Use /api/payments/iveri/finalize-booking for booking flows.",
-      });
-    }
     if (session.status === "FINALIZED") {
       return res.json({
         session_id: session.id,
@@ -942,6 +930,56 @@ router.post("/iveri/finalize-bill", async (req, res) => {
       session,
       userId: auth.user.id,
     });
+
+    const linkedBookingId = session.gateway_payload?.context_payload?.bill_payload?.booking_id ?? null;
+    let linkedBooking: any = null;
+    if (linkedBookingId) {
+      const paymentReference = session.transaction_index ?? session.bank_reference ?? session.merchant_trace ?? null;
+      console.info("[finalize bill] Syncing linked booking after verified payment", {
+        session_id: session.id,
+        booking_id: linkedBookingId,
+        user_id: auth.user.id,
+        payment_amount: session.amount_major,
+        payment_reference: paymentReference,
+      });
+
+      const { data: updatedBooking, error: bookingUpdateError } = await supabase
+        .from("restaurant_bookings")
+        .update({
+          payment_status: "paid",
+          payment_method: "IVERI_HOSTED",
+          payment_reference: paymentReference,
+          payment_amount: session.amount_major,
+          status: "confirmed",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", linkedBookingId)
+        .eq("customer_user_id", auth.user.id)
+        .select("id, status, payment_status, payment_amount, payment_reference")
+        .single();
+
+      if (bookingUpdateError) {
+        console.error("[finalize bill] Linked booking payment sync failed", {
+          session_id: session.id,
+          booking_id: linkedBookingId,
+          error: bookingUpdateError.message,
+        });
+      } else {
+        linkedBooking = updatedBooking;
+        console.info("[finalize bill] Linked booking payment sync complete", {
+          session_id: session.id,
+          booking_id: updatedBooking.id,
+          status: updatedBooking.status,
+          payment_status: updatedBooking.payment_status,
+          payment_amount: updatedBooking.payment_amount,
+          payment_reference: updatedBooking.payment_reference,
+        });
+      }
+    } else {
+      console.info("[finalize bill] No linked booking_id found in bill payload; skipping restaurant_bookings sync", {
+        session_id: session.id,
+      });
+    }
 
     const updated = await updatePaymentSessionIfStatusIn({
       sessionId: session.id,
@@ -964,6 +1002,7 @@ router.post("/iveri/finalize-bill", async (req, res) => {
       redemptions: result.redemptions,
       duplicate: result.duplicate,
       bill_payment_reference_id: effectiveSession?.context_reference_id ?? result.billPayment.id,
+      linked_booking: linkedBooking,
     });
   } catch (err: any) {
     return res.status(500).json({ error: err?.message || "Failed to finalize bill payment" });
