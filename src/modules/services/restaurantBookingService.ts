@@ -243,12 +243,14 @@ function isOfferDateActive(candidate: any, bookingDate: string) {
     candidate?.start_at ??
     candidate?.starts_at ??
     candidate?.start_date ??
+    candidate?.startDate ??   
     candidate?.valid_from ??
     null;
   const endValue =
     candidate?.end_at ??
     candidate?.ends_at ??
     candidate?.end_date ??
+    candidate?.endDate ??     
     candidate?.valid_until ??
     null;
 
@@ -296,12 +298,14 @@ function isOfferTimeActive(candidate: any, bookingTime: string) {
     candidate?.from_time ??
     candidate?.time_start ??
     candidate?.window_start ??
+    candidate?.slotStart ??  
     null;
   const endValue =
     candidate?.end_time ??
     candidate?.to_time ??
     candidate?.time_end ??
     candidate?.window_end ??
+     candidate?.slotEnd ??  
     null;
 
   if (!startValue || !endValue) return true;
@@ -326,6 +330,13 @@ function isOfferActive(candidate: any, bookingDate: string, bookingDateValue: Da
 }
 
 function findVerifiedOffer(restaurantOffer: any, option: any, bookingDate: string, bookingDateValue: Date, bookingTime: string) {
+  const embeddedOffer =
+    option?.offer ?? option?.data?.offer ?? option?.billPaymentOffer ?? option?.data?.billPaymentOffer ?? null;
+
+  if (embeddedOffer && isOfferActive(embeddedOffer, bookingDate, bookingDateValue, bookingTime)) {
+    return embeddedOffer;
+  }
+
   const candidates = extractOfferCandidates(restaurantOffer);
   return candidates.find(
     (candidate) =>
@@ -333,6 +344,7 @@ function findVerifiedOffer(restaurantOffer: any, option: any, bookingDate: strin
       isOfferActive(candidate, bookingDate, bookingDateValue, bookingTime)
   );
 }
+
 
 function buildSelectedOfferSummary(offer: any) {
   if (!offer) return null;
