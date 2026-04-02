@@ -601,10 +601,10 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
             payment_status: "paid",
             payment_method: nextPaymentMethod,
             payment_reference: nextPaymentReference,
-            payment_amount: evaluation.verifiedCoverChargeAmount,
-            payment_required: true,
-            cover_charge_required: true,
-            cover_charge_amount: evaluation.verifiedCoverChargeAmount,
+            payment_amount: 0,
+            payment_required: false,
+            cover_charge_required: false,
+            cover_charge_amount: 0,
             status: existingBooking.status === "pending" ? "confirmed" : existingBooking.status,
             updated_at: new Date().toISOString(),
           })
@@ -664,6 +664,7 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
   }
 
   const normalizedPaymentStatus = paymentRequired ? (paymentVerified ? "paid" : "pending") : "paid";
+  const clearPaymentRequirement = paymentRequired && paymentVerified;
   const bookingCode = generateBookingCode();
   const insertPayload = {
     restaurant_id: evaluation.restaurantId,
@@ -682,10 +683,10 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
     read: false,
     customer_booking_number: (customerBookingNumberResp.count ?? 0) + 1,
     selected_offer: buildSelectedOfferSummary(evaluation.verifiedOffer),
-    payment_required: paymentRequired,
-    cover_charge_required: paymentRequired,
-    cover_charge_amount: paymentRequired ? evaluation.verifiedCoverChargeAmount : 0,
-    payment_amount: paymentRequired ? evaluation.verifiedCoverChargeAmount : 0,
+    payment_required: clearPaymentRequirement ? false : paymentRequired,
+    cover_charge_required: clearPaymentRequirement ? false : paymentRequired,
+    cover_charge_amount: clearPaymentRequirement ? 0 : paymentRequired ? evaluation.verifiedCoverChargeAmount : 0,
+    payment_amount: clearPaymentRequirement ? 0 : paymentRequired ? evaluation.verifiedCoverChargeAmount : 0,
     payment_status: normalizedPaymentStatus,
     payment_method: payment?.method ?? null,
     payment_reference: payment?.reference ?? null,

@@ -14,7 +14,7 @@ interface BillContextInput {
   bin?: string | null;
   coupon_code?: string | null;
   user_id?: string | null;
-  booking_id?: string | null;
+  
 }
 
 function validateBillEntitySelection(input: BillContextInput) {
@@ -234,12 +234,6 @@ export async function finalizeBillPayment(params: {
     throw new Error("Verified bill amount does not match the initiated payment session");
   }
 
-  const bookingId =
-  (typeof billPayload?.booking_id === "string" && billPayload.booking_id.trim()) ||
-  (typeof contextPayload?.booking_id === "string" && contextPayload.booking_id.trim()) ||
-  null;
-
-
   const existing = await supabase
     .from("bill_payments")
     .select("*")
@@ -284,29 +278,6 @@ export async function finalizeBillPayment(params: {
     .single();
 
   if (billPaymentError) throw billPaymentError;
-
-  if (bookingId) {
-  const paymentReference =
-    params.session.transaction_index ??
-    params.session.bank_reference ??
-    params.session.merchant_trace ??
-    null;
-
-  const { error: bookingUpdateError } = await supabase
-    .from("restaurant_bookings")
-    .update({
-      payment_status: "paid",
-      payment_method: "IVERI",
-      payment_reference: paymentReference,
-      payment_amount: recalculated.payableAmount,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", bookingId)
-    .eq("customer_user_id", params.userId);
-
-  if (bookingUpdateError) throw bookingUpdateError;
-}
-
 
   const redemptions: any[] = [];
   for (const offer of recalculated.selectedOffers) {
