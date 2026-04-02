@@ -830,6 +830,13 @@ router.post("/iveri/finalize-booking", async (req, res) => {
     if (session.payment_context !== "BOOKING") {
       return res.status(400).json({ error: "Payment session is not a booking payment" });
     }
+    const contextPayload = session.gateway_payload?.context_payload;
+    if (!contextPayload?.booking_payload || contextPayload?.bill_payload) {
+      return res.status(409).json({
+        error:
+          "Flow mismatch: this session does not contain booking payload for booking finalization. Use /api/payments/iveri/finalize-bill for bill flows.",
+      });
+    }
     if (session.status === "FINALIZED") {
       return res.json({
         session_id: session.id,
@@ -841,7 +848,7 @@ router.post("/iveri/finalize-booking", async (req, res) => {
       return res.status(409).json({ error: "Payment session has not been verified as successful" });
     }
 
-    const bookingPayload = session.gateway_payload?.context_payload?.booking_payload;
+    const bookingPayload = contextPayload.booking_payload;
     const parsedBooking = BookingPayloadSchema.safeParse(bookingPayload);
     if (!parsedBooking.success) {
       return res.status(500).json({ error: "Stored booking payload is invalid" });
@@ -865,17 +872,6 @@ router.post("/iveri/finalize-booking", async (req, res) => {
     if (!result.ok) {
       return res.status(result.status).json(result.body);
     }
-
-    console.info("[finalize booking] Verified payment finalized into booking", {
-      session_id: session.id,
-      user_id: customer.userId,
-      booking_id: result.body.booking.id,
-      booking_status: result.body.booking.booking_status ?? null,
-      client_status: result.body.booking.status ?? null,
-      payment_status: result.body.booking.payment_status ?? null,
-      payment_reference: result.body.booking.payment_reference ?? null,
-      payment_amount: session.amount_major,
-    });
 
     const bookingReferenceId = result.body.booking.id;
     const updated = await updatePaymentSessionIfStatusIn({
@@ -923,6 +919,13 @@ router.post("/iveri/finalize-bill", async (req, res) => {
     }
     if (session.payment_context !== "BILL_PAYMENT") {
       return res.status(400).json({ error: "Payment session is not a bill payment" });
+    }
+    const contextPayload = session.gateway_payload?.context_payload;
+    if (!contextPayload?.bill_payload || contextPayload?.booking_payload) {
+      return res.status(409).json({
+        error:
+          "Flow mismatch: this session does not contain bill payload for bill finalization. Use /api/payments/iveri/finalize-booking for booking flows.",
+      });
     }
     if (session.status === "FINALIZED") {
       return res.json({

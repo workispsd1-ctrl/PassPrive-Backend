@@ -573,14 +573,6 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
   const paymentRequired = evaluation.paymentRequired;
   const payment = body.payment ?? null;
   const paymentVerified = !paymentRequired || isPaymentVerified(payment);
-  const requestedPaymentAmount = parseNumericSignal(payment?.amount);
-  const effectivePaymentAmount = paymentVerified
-    ? requestedPaymentAmount > 0
-      ? requestedPaymentAmount
-      : evaluation.verifiedCoverChargeAmount
-    : paymentRequired
-    ? evaluation.verifiedCoverChargeAmount
-    : 0;
 
   if (paymentRequired && !paymentVerified) {
     return {
@@ -597,32 +589,19 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
       const currentPaymentStatus = String(existingBooking.payment_status ?? "").trim().toLowerCase();
       const nextPaymentReference = payment?.reference ?? existingBooking.payment_reference ?? null;
       const nextPaymentMethod = payment?.method ?? existingBooking.payment_method ?? null;
-      const nextPaymentAmount = Number(effectivePaymentAmount.toFixed(2));
-      const currentPaymentAmount = Number(parseNumericSignal(existingBooking.payment_amount).toFixed(2));
       const shouldSyncPaidState =
         currentPaymentStatus !== "paid" ||
         existingBooking.payment_reference !== nextPaymentReference ||
-        existingBooking.payment_method !== nextPaymentMethod ||
-        currentPaymentAmount !== nextPaymentAmount;
+        existingBooking.payment_method !== nextPaymentMethod;
 
       if (shouldSyncPaidState) {
-        console.info("[booking payment sync] Updating existing booking after verified payment", {
-          booking_id: existingBooking.id,
-          customer_user_id: customer.userId,
-          previous_payment_status: existingBooking.payment_status,
-          next_payment_status: "paid",
-          previous_payment_amount: currentPaymentAmount,
-          next_payment_amount: nextPaymentAmount,
-          payment_reference: nextPaymentReference,
-          payment_method: nextPaymentMethod,
-        });
         const { data: updatedBooking, error: updateError } = await supabase
           .from("restaurant_bookings")
           .update({
             payment_status: "paid",
             payment_method: nextPaymentMethod,
             payment_reference: nextPaymentReference,
-            payment_amount: nextPaymentAmount,
+            payment_amount: evaluation.verifiedCoverChargeAmount,
             payment_required: true,
             cover_charge_required: true,
             cover_charge_amount: evaluation.verifiedCoverChargeAmount,
@@ -643,20 +622,7 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
 
         if (updatedBooking) {
           existingBooking = updatedBooking;
-          console.info("[booking payment sync] Existing booking updated", {
-            booking_id: existingBooking.id,
-            payment_status: existingBooking.payment_status,
-            payment_amount: existingBooking.payment_amount,
-            payment_reference: existingBooking.payment_reference,
-          });
         }
-      } else {
-        console.info("[booking payment sync] Existing booking already in paid state", {
-          booking_id: existingBooking.id,
-          payment_status: existingBooking.payment_status,
-          payment_amount: existingBooking.payment_amount,
-          payment_reference: existingBooking.payment_reference,
-        });
       }
     }
 
@@ -719,23 +685,12 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
     payment_required: paymentRequired,
     cover_charge_required: paymentRequired,
     cover_charge_amount: paymentRequired ? evaluation.verifiedCoverChargeAmount : 0,
-    payment_amount: Number(effectivePaymentAmount.toFixed(2)),
+    payment_amount: paymentRequired ? evaluation.verifiedCoverChargeAmount : 0,
     payment_status: normalizedPaymentStatus,
     payment_method: payment?.method ?? null,
     payment_reference: payment?.reference ?? null,
     booked_slot_label: body.selectedTime ?? null,
   };
-
-  if (paymentVerified) {
-    console.info("[booking payment sync] Creating booking with verified payment", {
-      customer_user_id: customer.userId,
-      restaurant_id: evaluation.restaurantId,
-      payment_status: normalizedPaymentStatus,
-      payment_amount: insertPayload.payment_amount,
-      payment_reference: insertPayload.payment_reference,
-      payment_method: insertPayload.payment_method,
-    });
-  }
 
   const { data: booking, error: insertError } = await supabase
     .from("restaurant_bookings")
@@ -749,15 +704,6 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
       status: 500,
       body: { error: insertError.message, code: "BOOKING_INSERT_FAILED" },
     };
-  }
-
-  if (paymentVerified) {
-    console.info("[booking payment sync] Booking created after verified payment", {
-      booking_id: booking.id,
-      payment_status: booking.payment_status,
-      payment_amount: booking.payment_amount,
-      payment_reference: booking.payment_reference,
-    });
   }
 
   return {
