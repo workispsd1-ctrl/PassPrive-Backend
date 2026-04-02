@@ -69,8 +69,6 @@ async function getCallerInfo(req: any) {
       role = normalizeRoleValue(String(user.user_metadata.role));
     }
 
-    // If the public profile row is missing or unreadable, keep the caller identified.
-    // Self-updates should still be allowed, and admin privileges can be recovered from auth metadata.
     if (!role && user.user_metadata?.app_role) {
       role = normalizeRoleValue(String(user.user_metadata.app_role));
     }
@@ -99,8 +97,13 @@ router.put("/users/:userId", async (req, res) => {
   const caller = await getCallerInfo(req);
   if (!caller) return res.status(401).json({ error: "Unauthorized" });
 
-  const { userId: targetId } = req.params;
+  const rawTargetId = String(req.params.userId ?? "").trim();
+  const targetId = ["me", "self"].includes(rawTargetId.toLowerCase()) ? caller.id : rawTargetId;
   const { full_name, phone, role: newRole } = req.body;
+
+  if (!targetId) {
+    return res.status(400).json({ error: "Invalid user id" });
+  }
 
   const callerRole = normalizeRoleValue(caller.role);
   const isSuperAdmin = callerRole === "superadmin";

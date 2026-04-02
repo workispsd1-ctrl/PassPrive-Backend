@@ -21,6 +21,14 @@ const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
   auth: { persistSession: false, autoRefreshToken: false },
 });
 
+function normalizeAdminRole(value: any) {
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (!raw) return "";
+  if (["superadmin", "super_admin", "super admin"].includes(raw)) return "superadmin";
+  if (["admin", "admin_user", "admin user"].includes(raw)) return "admin";
+  return raw.replace(/[_\s]+/g, "");
+}
+
 async function requireAdmin(req: any, res: any) {
   const sb = supabaseAuthed(req);
   if (!sb) {
@@ -40,15 +48,11 @@ async function requireAdmin(req: any, res: any) {
     .eq("id", user.id)
     .maybeSingle();
 
-  const role = String(row?.role ?? user.user_metadata?.role ?? user.user_metadata?.app_role ?? "")
-    .trim()
-    .toLowerCase();
-
+  const role = normalizeAdminRole(row?.role ?? user.user_metadata?.role ?? user.user_metadata?.app_role);
   if (!role && roleErr) {
     res.status(403).json({ error: "Access denied" });
     return null;
   }
-
   if (!["admin", "superadmin"].includes(role)) {
     res.status(403).json({ error: "Access denied" });
     return null;

@@ -16,6 +16,14 @@ export interface AuthenticatedCustomer {
   email: string | null;
 }
 
+function normalizeAdminRole(value: any) {
+  const raw = String(value ?? "").trim().toLowerCase();
+  if (!raw) return "";
+  if (["superadmin", "super_admin", "super admin"].includes(raw)) return "superadmin";
+  if (["admin", "admin_user", "admin user"].includes(raw)) return "admin";
+  return raw.replace(/[_\s]+/g, "");
+}
+
 export function getBearerToken(req: any) {
   const header = req.headers.authorization || "";
   const [type, token] = header.split(" ");
@@ -94,17 +102,13 @@ export async function requireAdmin(req: any, res: Response) {
     .eq("id", userData.user.id)
     .maybeSingle();
 
-  const role = String(
-    roleRow?.role ?? userData.user.user_metadata?.role ?? userData.user.user_metadata?.app_role ?? ""
-  )
-    .trim()
-    .toLowerCase();
-
+  const role = normalizeAdminRole(
+    roleRow?.role ?? userData.user.user_metadata?.role ?? userData.user.user_metadata?.app_role
+  );
   if (!role && roleErr) {
     res.status(403).json({ error: "Access denied" });
     return null;
   }
-
   if (!["admin", "superadmin"].includes(role)) {
     res.status(403).json({ error: "Access denied" });
     return null;
