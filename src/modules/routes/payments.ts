@@ -866,6 +866,17 @@ router.post("/iveri/finalize-booking", async (req, res) => {
       return res.status(result.status).json(result.body);
     }
 
+    console.info("[finalize booking] Verified payment finalized into booking", {
+      session_id: session.id,
+      user_id: customer.userId,
+      booking_id: result.body.booking.id,
+      booking_status: result.body.booking.booking_status ?? null,
+      client_status: result.body.booking.status ?? null,
+      payment_status: result.body.booking.payment_status ?? null,
+      payment_reference: result.body.booking.payment_reference ?? null,
+      payment_amount: session.amount_major,
+    });
+
     const bookingReferenceId = result.body.booking.id;
     const updated = await updatePaymentSessionIfStatusIn({
       sessionId: session.id,
