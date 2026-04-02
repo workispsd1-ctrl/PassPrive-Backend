@@ -2,7 +2,7 @@ import { z } from "zod";
 import supabase from "../../database/supabase";
 import type { AuthenticatedCustomer } from "./authService";
 
-const NON_CANCELLED_STATUSES = ["pending", "confirmed", "payment_successfull", "seated", "completed"];
+const NON_CANCELLED_STATUSES = ["pending", "confirmed", "seated", "completed"];
 const WEEKDAY_NAMES = [
   "sunday",
   "monday",
@@ -378,9 +378,7 @@ function generateBookingCode() {
 }
 
 function deriveClientStatus(booking: any) {
-  return String(booking?.payment_status ?? "").trim().toLowerCase() === "paid"
-    ? "payment_successfull"
-    : booking?.status;
+  return booking?.status;
 }
 
 async function getRestaurantSlotBookingCount(restaurantId: string, bookingDate: string, bookingTime: string) {
@@ -605,7 +603,7 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
             payment_required: true,
             cover_charge_required: true,
             cover_charge_amount: evaluation.verifiedCoverChargeAmount,
-            status: "payment_successfull",
+            status: existingBooking.status === "pending" ? "confirmed" : existingBooking.status,
             updated_at: new Date().toISOString(),
           })
           .eq("id", existingBooking.id)
@@ -664,7 +662,6 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
   }
 
   const normalizedPaymentStatus = paymentRequired ? (paymentVerified ? "paid" : "pending") : "paid";
-  const persistedBookingStatus = paymentRequired && paymentVerified ? "payment_successfull" : "confirmed";
   const bookingCode = generateBookingCode();
   const insertPayload = {
     restaurant_id: evaluation.restaurantId,
@@ -676,7 +673,7 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
     booking_time: evaluation.bookingTime,
     duration_minutes: parseNumericSignal(evaluation.restaurant.avg_duration_minutes) || 90,
     party_size: evaluation.partySize,
-    status: persistedBookingStatus,
+    status: "confirmed",
     source: "app",
     special_request: body.notes ?? null,
     booking_code: bookingCode,
