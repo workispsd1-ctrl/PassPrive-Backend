@@ -17,12 +17,24 @@ interface BillContextInput {
   
 }
 
+export class BillPaymentValidationError extends Error {
+  status: number;
+
+  constructor(message: string, status = 400) {
+    super(message);
+    this.name = "BillPaymentValidationError";
+    this.status = status;
+  }
+}
+
 function validateBillEntitySelection(input: BillContextInput) {
   const hasRestaurantId = typeof input.restaurant_id === "string" && input.restaurant_id.trim().length > 0;
   const hasStoreId = typeof input.store_id === "string" && input.store_id.trim().length > 0;
 
   if (hasRestaurantId === hasStoreId) {
-    throw new Error("Bill payment must include exactly one of restaurant_id or store_id");
+    throw new BillPaymentValidationError(
+      "Bill payment must include exactly one of restaurant_id or store_id"
+    );
   }
 
   return {
@@ -64,7 +76,9 @@ function isCashbackOffer(offer: any) {
 function validateSelectedOffers(offers: any[]) {
   const nonStackable = offers.find((offer) => offer.is_stackable !== true);
   if (nonStackable && offers.length > 1) {
-    throw new Error(`Offer ${nonStackable.id} cannot be stacked with other offers`);
+    throw new BillPaymentValidationError(
+      `Offer ${nonStackable.id} cannot be stacked with other offers`
+    );
   }
 
   const seenGroups = new Set<string>();
@@ -72,22 +86,38 @@ function validateSelectedOffers(offers: any[]) {
     const stackGroup = String(offer.stack_group ?? "").trim();
     if (!stackGroup) continue;
     if (seenGroups.has(stackGroup)) {
-      throw new Error(`Offers in stack group ${stackGroup} cannot be combined`);
+      throw new BillPaymentValidationError(
+        `Offers in stack group ${stackGroup} cannot be combined`
+      );
     }
     seenGroups.add(stackGroup);
   }
 }
 
+function extractRestaurantMinimumBillAmount(offer: any) {
+  if (offer === null || offer === undefined) return null;
+
+  if (typeof offer === "object" && !Array.isArray(offer)) {
+    const rawAmount = (offer as Record<string, any>).minimum_bill_amount;
+    if (rawAmount === "" || rawAmount === null || rawAmount === undefined) return null;
+    const parsed = Number(rawAmount);
+    if (!Number.isFinite(parsed) || parsed < 0) return null;
+    return parsed;
+  }
+
+  return null;
+}
+
 export async function buildBillPaymentContext(input: BillContextInput) {
   const quantity = input.quantity ?? 1;
   if (!Number.isInteger(quantity) || quantity <= 0) {
-    throw new Error("Quantity must be a positive integer");
+    throw new BillPaymentValidationError("Quantity must be a positive integer");
   }
 
   const { hasRestaurantId, hasStoreId } = validateBillEntitySelection(input);
   const originalAmount = Number(parseNumeric(input.bill_amount).toFixed(2));
   if (originalAmount <= 0) {
-    throw new Error("bill_amount must be greater than zero");
+    throw new BillPaymentValidationError("bill_amount must be greater than zero");
   }
 
   let entityType: "RESTAURANT" | "STORE";
@@ -104,7 +134,12 @@ export async function buildBillPaymentContext(input: BillContextInput) {
 
     if (restaurantError) throw restaurantError;
     if (!restaurant || restaurant.is_active !== true) {
-      throw new Error("Restaurant not found");
+      throw new BillPaymentValidationError("Restaurant not found", 404);
+    }
+
+    const minimumBillAmount = extractRestaurantMinimumBillAmount(restaurant.offer);
+    if (minimumBillAmount !== null && originalAmount < minimumBillAmount) {
+      throw new BillPaymentValidationError("Minimum bill not met");
     }
 
     entityType = "RESTAURANT";
@@ -118,9 +153,17 @@ export async function buildBillPaymentContext(input: BillContextInput) {
       .maybeSingle();
 
     if (storeError) throw storeError;
-    if (!store) throw new Error("Store not found");
+    if (!store) throw new BillPaymentValidationError("Store not found", 404);
 
+<<<<<<< HEAD
   
+=======
+    const premiumEnabled =
+      store.pickup_premium_enabled === true || String(store.pickup_mode ?? "").toUpperCase() === "PREMIUM";
+    if (!premiumEnabled) {
+      throw new BillPaymentValidationError("Bill payments require premium-enabled stores");
+    }
+>>>>>>> a1d1b5b (minimum bill amount update)
 
     if (input.item_id) {
       const { data: storeItem, error: itemError } = await supabase
@@ -131,9 +174,9 @@ export async function buildBillPaymentContext(input: BillContextInput) {
         .maybeSingle();
 
       if (itemError) throw itemError;
-      if (!storeItem) throw new Error("Billable item not found");
+      if (!storeItem) throw new BillPaymentValidationError("Billable item not found", 404);
       if (storeItem.is_billable !== true) {
-        throw new Error("Selected item is not billable");
+        throw new BillPaymentValidationError("Selected item is not billable");
       }
 
       item = storeItem;
@@ -168,7 +211,7 @@ export async function buildBillPaymentContext(input: BillContextInput) {
   const selectedOffers = eligibleOffers.filter((offer: any) => selectedOfferIds.includes(offer.id));
 
   if (selectedOffers.length !== selectedOfferIds.length) {
-    throw new Error("One or more selected offers are no longer eligible");
+    throw new BillPaymentValidationError("One or more selected offers are no longer eligible");
   }
 
   validateSelectedOffers(selectedOffers);

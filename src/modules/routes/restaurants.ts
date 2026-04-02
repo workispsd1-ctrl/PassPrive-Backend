@@ -412,6 +412,105 @@ const UpdateBookingTermsSchema = z.preprocess(
   z.union([z.array(z.string()), z.null(), z.undefined()])
 );
 
+const OfferObjectSchema = z
+  .object({
+    text: z.string().trim().optional(),
+    minimum_bill_amount: z.preprocess(
+      (value) => {
+        if (value === "" || value === undefined) return undefined;
+        if (value === null) return null;
+        if (typeof value === "number") return value;
+        if (typeof value === "string") return Number(value);
+        return value;
+      },
+      z.number().min(0).nullable().optional()
+    ),
+  })
+  .passthrough();
+
+const OfferInputSchema = z.union([z.string(), OfferObjectSchema, z.null()]);
+
+function normalizeOfferMinimumBillAmount(value: any) {
+  if (value === "" || value === undefined || value === null) return null;
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount < 0) return null;
+  return amount;
+}
+
+function normalizeRestaurantOfferForWrite(offer: any) {
+  if (offer === undefined) return undefined;
+  if (offer === null) return null;
+
+  if (typeof offer === "string") {
+    const text = offer.trim();
+    if (!text) return null;
+    return {
+      text,
+      minimum_bill_amount: null,
+    };
+  }
+
+  if (typeof offer === "object" && !Array.isArray(offer)) {
+    const normalized = { ...offer } as Record<string, any>;
+
+    if (typeof normalized.text === "string") {
+      normalized.text = normalized.text.trim();
+      if (!normalized.text) delete normalized.text;
+    }
+
+    normalized.minimum_bill_amount = normalizeOfferMinimumBillAmount(
+      normalized.minimum_bill_amount
+    );
+
+    return normalized;
+  }
+
+  return null;
+}
+
+function normalizeRestaurantOfferForResponse(offer: any) {
+  if (offer === null || offer === undefined) return null;
+
+  if (typeof offer === "string") {
+    const text = offer.trim();
+    return text
+      ? {
+          text,
+          minimum_bill_amount: null,
+        }
+      : null;
+  }
+
+  if (typeof offer === "object" && !Array.isArray(offer)) {
+    const normalized = { ...offer } as Record<string, any>;
+
+    if (typeof normalized.text === "string") {
+      normalized.text = normalized.text.trim();
+      if (!normalized.text) delete normalized.text;
+    }
+
+    normalized.minimum_bill_amount = normalizeOfferMinimumBillAmount(
+      normalized.minimum_bill_amount
+    );
+
+    return normalized;
+  }
+
+  return null;
+}
+
+function mapRestaurantForResponse(restaurant: any) {
+  if (!restaurant || typeof restaurant !== "object") return restaurant;
+  return {
+    ...restaurant,
+    offer: normalizeRestaurantOfferForResponse(restaurant.offer),
+  };
+}
+
+function mapRestaurantsForResponse(restaurants: any[]) {
+  return (restaurants ?? []).map((restaurant) => mapRestaurantForResponse(restaurant));
+}
+
 /**
  * ✅ POST create restaurant ONLY (NO partner creation here)
  * owner_user_id can be passed from frontend after /api/auth/create-user returns id
@@ -426,7 +525,7 @@ const CreateRestaurantSchema = z.object({
   cuisines: z.array(z.string()).optional().default([]),
   cost_for_two: z.coerce.number().int().optional().nullable(),
   distance: z.coerce.number().optional().nullable(),
-  offer: z.record(z.string(), z.any()).optional().nullable(),
+  offer: OfferInputSchema.optional(),
 
   facilities: z.array(z.string()).optional().default([]),
   highlights: z.array(z.string()).optional().default([]),
@@ -473,7 +572,7 @@ const UpdateRestaurantSchema = z.object({
   cuisines: z.array(z.string()).optional(),
   cost_for_two: z.coerce.number().int().nullable().optional(),
   distance: z.coerce.number().nullable().optional(),
-  offer: z.record(z.string(), z.any()).nullable().optional(),
+  offer: OfferInputSchema.optional(),
 
   facilities: z.array(z.string()).optional(),
   highlights: z.array(z.string()).optional(),
@@ -587,7 +686,10 @@ router.get("/", async (req, res) => {
   const { data, error, count } = await query.range(from, to);
   if (error) return res.status(500).json({ error: error.message });
 
-  return res.json({ items: data ?? [], page: { limit, offset, total: count ?? 0 } });
+  return res.json({
+    items: mapRestaurantsForResponse(data ?? []),
+    page: { limit, offset, total: count ?? 0 },
+  });
 });
 
 // ✅ Public: GET /api/restaurants/in-the-limelight?city=Hyderabad
@@ -628,7 +730,7 @@ router.get("/in-the-limelight", async (req, res) => {
   .sort(compareGrabYourDealRestaurants);
 
   return res.json({
-    items,
+    items: mapRestaurantsForResponse(items),
     city,
     derived_collection: "in_the_limelight",
   });
@@ -678,7 +780,7 @@ router.get("/grab-your-deal", async (req, res) => {
       .sort(compareGrabYourDealRestaurants)
       .slice(0, limit);
 
-    return res.json({ items });
+    return res.json({ items: mapRestaurantsForResponse(items) });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
@@ -783,7 +885,7 @@ router.get("/featured-in-your-location", async (req, res) => {
 
     const items = [...areaRanked, ...cityOnlyRanked, ...overallFallbackRanked].slice(0, limit);
 
-    return res.json({ items });
+    return res.json({ items: mapRestaurantsForResponse(items) });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
@@ -884,7 +986,7 @@ router.get("/foodie-frontrow", async (req, res) => {
       .sort(compareGrabYourDealRestaurants)
       .slice(0, limit);
 
-    return res.json({ items });
+    return res.json({ items: mapRestaurantsForResponse(items) });
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
   }
@@ -904,7 +1006,7 @@ router.get("/:id", async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   if (!data) return res.status(404).json({ error: "Restaurant not found" });
 
-  return res.json({ item: data });
+  return res.json({ item: mapRestaurantForResponse(data) });
 });
 
 /**
@@ -937,7 +1039,7 @@ router.post("/", async (req, res) => {
       cuisines: body.cuisines ?? [],
       cost_for_two: body.cost_for_two ?? null,
       distance: body.distance ?? null,
-      offer: body.offer ?? null,
+      offer: normalizeRestaurantOfferForWrite(body.offer),
 
       facilities: body.facilities ?? [],
       highlights: body.highlights ?? [],
@@ -980,7 +1082,7 @@ router.post("/", async (req, res) => {
     return res.status(500).json({ error: error.message });
   }
 
-  return res.status(201).json({ restaurant: data });
+  return res.status(201).json({ restaurant: mapRestaurantForResponse(data) });
 });
 
 /**
@@ -1018,6 +1120,10 @@ router.put("/:id", async (req, res) => {
 
   const payload: any = { ...bodyParsed.data };
 
+  if (payload.offer !== undefined) {
+    payload.offer = normalizeRestaurantOfferForWrite(payload.offer);
+  }
+
   // 🛡️ SECURITY: Only allow admins to change owner_user_id
   if (payload.owner_user_id !== undefined && !isAdminRole(access.role)) {
     delete payload.owner_user_id;
@@ -1039,7 +1145,7 @@ router.put("/:id", async (req, res) => {
   }
 
   console.log("[PUT /restaurants/:id] Update successful:", { id });
-  return res.json({ item: data });
+  return res.json({ item: mapRestaurantForResponse(data) });
 });
 
 /**

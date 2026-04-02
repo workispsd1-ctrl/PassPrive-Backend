@@ -11,6 +11,7 @@ import {
   evaluateBookingPaymentRequirement,
 } from "../services/restaurantBookingService";
 import {
+  BillPaymentValidationError,
   buildBillPaymentContext,
   finalizeBillPayment,
 } from "../services/billPaymentService";
@@ -545,6 +546,9 @@ router.post("/iveri/initiate", async (req, res) => {
       },
     });
   } catch (err: any) {
+    if (err instanceof BillPaymentValidationError) {
+      return res.status(err.status).json({ error: err.message });
+    }
     return res.status(500).json({ error: err?.message || "Failed to initiate iVeri payment" });
   }
 });
@@ -1005,6 +1009,9 @@ router.post("/iveri/finalize-bill", async (req, res) => {
       linked_booking: linkedBooking,
     });
   } catch (err: any) {
+    if (err instanceof BillPaymentValidationError) {
+      return res.status(err.status).json({ error: err.message });
+    }
     return res.status(500).json({ error: err?.message || "Failed to finalize bill payment" });
   }
 });
