@@ -94,8 +94,18 @@ export async function requireAdmin(req: any, res: Response) {
     .eq("id", userData.user.id)
     .maybeSingle();
 
-  const role = roleRow?.role?.toLowerCase();
-  if (roleErr || !role || !["admin", "superadmin"].includes(role)) {
+  const role = String(
+    roleRow?.role ?? userData.user.user_metadata?.role ?? userData.user.user_metadata?.app_role ?? ""
+  )
+    .trim()
+    .toLowerCase();
+
+  if (!role && roleErr) {
+    res.status(403).json({ error: "Access denied" });
+    return null;
+  }
+
+  if (!["admin", "superadmin"].includes(role)) {
     res.status(403).json({ error: "Access denied" });
     return null;
   }
