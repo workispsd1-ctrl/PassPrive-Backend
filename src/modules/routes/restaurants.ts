@@ -441,28 +441,17 @@ function normalizeRestaurantOfferForWrite(offer: any) {
   if (offer === undefined) return undefined;
   if (offer === null) return null;
 
-  if (typeof offer === "string") {
-    const text = offer.trim();
-    if (!text) return null;
-    return {
-      text,
-      minimum_bill_amount: null,
-    };
+  if (Array.isArray(offer)) {
+    return offer;
   }
 
-  if (typeof offer === "object" && !Array.isArray(offer)) {
-    const normalized = { ...offer } as Record<string, any>;
+  if (typeof offer === "string") {
+    const text = offer.trim();
+    return text ? text : null;
+  }
 
-    if (typeof normalized.text === "string") {
-      normalized.text = normalized.text.trim();
-      if (!normalized.text) delete normalized.text;
-    }
-
-    normalized.minimum_bill_amount = normalizeOfferMinimumBillAmount(
-      normalized.minimum_bill_amount
-    );
-
-    return normalized;
+  if (typeof offer === "object") {
+    return offer;
   }
 
   return null;
@@ -471,33 +460,22 @@ function normalizeRestaurantOfferForWrite(offer: any) {
 function normalizeRestaurantOfferForResponse(offer: any) {
   if (offer === null || offer === undefined) return null;
 
-  if (typeof offer === "string") {
-    const text = offer.trim();
-    return text
-      ? {
-          text,
-          minimum_bill_amount: null,
-        }
-      : null;
+  if (Array.isArray(offer)) {
+    return offer;
   }
 
-  if (typeof offer === "object" && !Array.isArray(offer)) {
-    const normalized = { ...offer } as Record<string, any>;
+  if (typeof offer === "string") {
+    const text = offer.trim();
+    return text || null;
+  }
 
-    if (typeof normalized.text === "string") {
-      normalized.text = normalized.text.trim();
-      if (!normalized.text) delete normalized.text;
-    }
-
-    normalized.minimum_bill_amount = normalizeOfferMinimumBillAmount(
-      normalized.minimum_bill_amount
-    );
-
-    return normalized;
+  if (typeof offer === "object") {
+    return offer;
   }
 
   return null;
 }
+
 
 function mapRestaurantForResponse(restaurant: any) {
   if (!restaurant || typeof restaurant !== "object") return restaurant;
@@ -525,7 +503,7 @@ const CreateRestaurantSchema = z.object({
   cuisines: z.array(z.string()).optional().default([]),
   cost_for_two: z.coerce.number().int().optional().nullable(),
   distance: z.coerce.number().optional().nullable(),
-  offer: OfferInputSchema.optional(),
+ offer: z.array(z.any()).optional().nullable(),
 
   facilities: z.array(z.string()).optional().default([]),
   highlights: z.array(z.string()).optional().default([]),
@@ -572,7 +550,7 @@ const UpdateRestaurantSchema = z.object({
   cuisines: z.array(z.string()).optional(),
   cost_for_two: z.coerce.number().int().nullable().optional(),
   distance: z.coerce.number().nullable().optional(),
-  offer: OfferInputSchema.optional(),
+ offer: z.array(z.any()).optional().nullable(),
 
   facilities: z.array(z.string()).optional(),
   highlights: z.array(z.string()).optional(),
