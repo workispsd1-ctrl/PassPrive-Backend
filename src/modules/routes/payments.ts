@@ -950,7 +950,7 @@ router.post("/iveri/finalize-bill", async (req, res) => {
           payment_method: "IVERI_HOSTED",
           payment_reference: paymentReference,
           payment_amount: session.amount_major,
-          status: "confirmed",
+          status: "payment_successfull",
           updated_at: new Date().toISOString(),
         })
         .eq("id", linkedBookingId)
