@@ -119,11 +119,7 @@ export async function buildBillPaymentContext(input: BillContextInput) {
     if (storeError) throw storeError;
     if (!store) throw new Error("Store not found");
 
-    const premiumEnabled =
-      store.pickup_premium_enabled === true || String(store.pickup_mode ?? "").toUpperCase() === "PREMIUM";
-    if (!premiumEnabled) {
-      throw new Error("Bill payments require premium-enabled stores");
-    }
+  
 
     if (input.item_id) {
       const { data: storeItem, error: itemError } = await supabase
