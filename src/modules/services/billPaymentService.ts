@@ -155,15 +155,11 @@ export async function buildBillPaymentContext(input: BillContextInput) {
     if (storeError) throw storeError;
     if (!store) throw new BillPaymentValidationError("Store not found", 404);
 
-<<<<<<< HEAD
-  
-=======
     const premiumEnabled =
       store.pickup_premium_enabled === true || String(store.pickup_mode ?? "").toUpperCase() === "PREMIUM";
     if (!premiumEnabled) {
       throw new BillPaymentValidationError("Bill payments require premium-enabled stores");
     }
->>>>>>> a1d1b5b (minimum bill amount update)
 
     if (input.item_id) {
       const { data: storeItem, error: itemError } = await supabase
