@@ -51,8 +51,8 @@ async function getCallerInfo(req: any) {
       return null;
     }
 
-    // Fetch user role from Public Profile table
-    const { data: profile, error: dbError } = await sb
+    // Fetch role with service client to avoid RLS false negatives on admin checks.
+    const { data: profile, error: dbError } = await supabaseService
       .from("users")
       .select("id, role")
       .eq("id", user.id)

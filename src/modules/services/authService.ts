@@ -88,7 +88,7 @@ export async function requireAdmin(req: any, res: Response) {
     return null;
   }
 
-  const { data: roleRow, error: roleErr } = await sb
+  const { data: roleRow, error: roleErr } = await supabase
     .from("users")
     .select("role")
     .eq("id", userData.user.id)

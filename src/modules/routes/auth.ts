@@ -34,7 +34,7 @@ async function requireAdmin(req: any, res: any) {
     return null;
   }
 
-  const { data: row, error: roleErr } = await sb
+  const { data: row, error: roleErr } = await supabaseService
     .from("users")
     .select("role")
     .eq("id", user.id)
