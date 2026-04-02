@@ -84,32 +84,44 @@ export function normalizeDateString(value: string) {
 }
 
 export function normalizeTimeString(value: string) {
-  const trimmed = value.trim();
-  const directMatch = trimmed.match(/(\d{1,2}):(\d{2})(?::(\d{2}))?/);
-  if (!directMatch) return null;
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed) return null;
 
-  const hours = Number(directMatch[1]);
-  const minutes = Number(directMatch[2]);
-  const seconds = Number(directMatch[3] ?? 0);
+  const meridiemMatch = trimmed.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)$/i);
+  if (meridiemMatch) {
+    let hours = Number(meridiemMatch[1]);
+    const minutes = Number(meridiemMatch[2]);
+    const seconds = Number(meridiemMatch[3] ?? 0);
+    const meridiem = meridiemMatch[4].toUpperCase();
 
-  if (
-    !Number.isInteger(hours) ||
-    !Number.isInteger(minutes) ||
-    !Number.isInteger(seconds) ||
-    hours < 0 ||
-    hours > 23 ||
-    minutes < 0 ||
-    minutes > 59 ||
-    seconds < 0 ||
-    seconds > 59
-  ) {
-    return null;
+    if (
+      !Number.isInteger(hours) || !Number.isInteger(minutes) || !Number.isInteger(seconds) ||
+      hours < 1 || hours > 12 || minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59
+    ) return null;
+
+    if (meridiem === "PM" && hours !== 12) hours += 12;
+    if (meridiem === "AM" && hours === 12) hours = 0;
+
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
   }
 
-  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(
-    seconds
-  ).padStart(2, "0")}`;
+  const match24 = trimmed.match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (match24) {
+    const hours = Number(match24[1]);
+    const minutes = Number(match24[2]);
+    const seconds = Number(match24[3] ?? 0);
+
+    if (
+      !Number.isInteger(hours) || !Number.isInteger(minutes) || !Number.isInteger(seconds) ||
+      hours < 0 || hours > 23 || minutes < 0 || minutes > 59 || seconds < 0 || seconds > 59
+    ) return null;
+
+    return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}:${String(seconds).padStart(2, "0")}`;
+  }
+
+  return null;
 }
+
 
 function timeToMinutes(value: string) {
   const normalized = normalizeTimeString(value);
