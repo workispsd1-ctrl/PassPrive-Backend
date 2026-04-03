@@ -1159,8 +1159,44 @@ router.delete("/:id", async (req, res) => {
   if (!exists.data) return res.status(404).json({ error: "Restaurant not found" });
 
   if (hard) {
-    const { error } = await access.sb.from("restaurants").delete().eq("id", id);
-    if (error) return res.status(500).json({ error: error.message });
+    const { data, error } = await access.sb.rpc("hard_delete_restaurant_with_dependencies", {
+      p_restaurant_id: id,
+    });
+
+    if (error) {
+      const msg = String(error.message || "").toLowerCase();
+      const isMissingRpc =
+        msg.includes("hard_delete_restaurant_with_dependencies") &&
+        (msg.includes("does not exist") || msg.includes("not find") || msg.includes("no function"));
+
+      // Backend-only fallback when DB migration/RPC is not yet applied.
+      // This keeps admin delete working safely without hard-deleting historical records.
+      if (isMissingRpc) {
+        const { error: fallbackError } = await access.sb
+          .from("restaurants")
+          .update({ is_active: false, offer: null })
+          .eq("id", id);
+
+        if (fallbackError) return res.status(500).json({ error: fallbackError.message });
+
+        return res.status(200).json({
+          ok: true,
+          deleted: "soft",
+          id,
+          note: "Hard-delete migration not applied. Restaurant was soft-deleted instead.",
+        });
+      }
+
+      return res.status(500).json({ error: error.message });
+    }
+
+    if (!data?.ok) {
+      return res.status(409).json({
+        error: data?.error || "Hard delete failed",
+        code: data?.code || null,
+      });
+    }
+
     return res.json({ ok: true, deleted: "hard", id });
   }
 
