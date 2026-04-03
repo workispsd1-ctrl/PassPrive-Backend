@@ -8,6 +8,7 @@ const router = Router();
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_ANON_KEY = process.env.SUPABASE_SERVICE_KEY!;
+const LIST_QUERY_TIMEOUT_MS = Number(process.env.LIST_QUERY_TIMEOUT_MS ?? 5000);
 
 if (!SUPABASE_URL || !SUPABASE_ANON_KEY) {
   throw new Error("Missing SUPABASE_URL or SUPABASE_ANON_KEY in env");
@@ -22,6 +23,24 @@ const RESTAURANT_REVIEW_AGGREGATE_FIELDS = [
   "ambience_rating",
   "crowd_rating",
 ];
+
+async function withTimeout<T>(promise: PromiseLike<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    Promise.resolve(promise)
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
 
 /* ---------------------------------------------
    Helpers
@@ -661,8 +680,32 @@ router.get("/", async (req, res) => {
   const from = offset;
   const to = offset + limit - 1;
 
-  const { data, error, count } = await query.range(from, to);
-  if (error) return res.status(500).json({ error: error.message });
+  let data: any[] | null = null;
+  let count: number | null = null;
+  try {
+    const result = await withTimeout(
+      query.range(from, to),
+      LIST_QUERY_TIMEOUT_MS,
+      "GET /api/restaurants query"
+    );
+    const { data: rows, error, count: total } = result as any;
+    if (error) return res.status(500).json({ error: error.message });
+    data = rows ?? [];
+    count = total ?? 0;
+  } catch (error: any) {
+    const isTimeout = String(error?.message ?? "").includes("timed out");
+    if (isTimeout) {
+      console.error("[GET /api/restaurants] Timed out", {
+        timeout_ms: LIST_QUERY_TIMEOUT_MS,
+        offset,
+        limit,
+        sort,
+        order,
+      });
+      return res.status(503).json({ error: "Request timed out. Please retry." });
+    }
+    return res.status(500).json({ error: error?.message ?? "Unexpected error" });
+  }
 
   return res.json({
     items: mapRestaurantsForResponse(data ?? []),

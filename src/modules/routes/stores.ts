@@ -12,6 +12,7 @@ const router = Router();
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
+const LIST_QUERY_TIMEOUT_MS = Number(process.env.LIST_QUERY_TIMEOUT_MS ?? 5000);
 
 function supabaseAuthed(req: any) {
   const h = req.headers.authorization || "";
@@ -182,6 +183,24 @@ function compareStoresForFeed(a: any, b: any, sort: string, order: "asc" | "desc
   return comparePrimitiveValues(a?.created_at, b?.created_at, false);
 }
 
+async function withTimeout<T>(promise: PromiseLike<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    Promise.resolve(promise)
+      .then((value) => {
+        clearTimeout(timer);
+        resolve(value);
+      })
+      .catch((error) => {
+        clearTimeout(timer);
+        reject(error);
+      });
+  });
+}
+
 // GET /api/stores
 // /api/stores?search=&city=&category=&tag=&status=&includeInactive=&limit=&offset=&sort=&order=&is_featured=
 router.get("/", async (req, res) => {
@@ -256,19 +275,50 @@ router.get("/", async (req, res) => {
     );
   }
 
-  const { data, error, count } = await query;
+  // DB-side ordering + pagination for better tail latency under load.
+  query = query
+    .order("is_advertised", { ascending: false })
+    .order("ad_priority", { ascending: true, nullsFirst: false })
+    .order("pickup_premium_enabled", { ascending: false })
+    .order(sort, { ascending: order === "asc" });
 
-  if (error) return res.status(500).json({ error: error.message });
-
-  const orderedItems = (data ?? []).sort((a: any, b: any) =>
-    compareStoresForFeed(a, b, sort, order)
-  );
+  if (sort !== "created_at") {
+    query = query.order("created_at", { ascending: false });
+  }
 
   const from = offset;
-  const to = offset + limit;
+  const to = offset + limit - 1;
+
+  let data: any[] | null = null;
+  let count: number | null = null;
+  try {
+    const result = await withTimeout(
+      query.range(from, to),
+      LIST_QUERY_TIMEOUT_MS,
+      "GET /api/stores query"
+    );
+
+    const { data: rows, error, count: total } = result as any;
+    if (error) return res.status(500).json({ error: error.message });
+    data = rows ?? [];
+    count = total ?? 0;
+  } catch (error: any) {
+    const isTimeout = String(error?.message ?? "").includes("timed out");
+    if (isTimeout) {
+      console.error("[GET /api/stores] Timed out", {
+        timeout_ms: LIST_QUERY_TIMEOUT_MS,
+        offset,
+        limit,
+        sort,
+        order,
+      });
+      return res.status(503).json({ error: "Request timed out. Please retry." });
+    }
+    return res.status(500).json({ error: error?.message ?? "Unexpected error" });
+  }
 
   return res.json({
-    items: orderedItems.slice(from, to),
+    items: data ?? [],
     page: { limit, offset, total: count ?? 0 },
   });
 });

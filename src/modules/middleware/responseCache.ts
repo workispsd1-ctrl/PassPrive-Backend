@@ -4,6 +4,7 @@ interface CacheEntry {
   body: string;
   contentType: string;
   statusCode: number;
+  etag?: string;
   expiresAt: number;
 }
 
@@ -54,6 +55,39 @@ function trimExpiredAndOverflow() {
 
 function setCacheHeaders(res: Response, hit: "HIT" | "MISS") {
   res.setHeader("X-Cache", hit);
+}
+
+function headerToString(value: string | string[] | undefined) {
+  if (!value) return "";
+  if (Array.isArray(value)) return value.join(",");
+  return value;
+}
+
+function matchesIfNoneMatch(ifNoneMatchHeader: string | string[] | undefined, etag?: string) {
+  const ifNoneMatch = headerToString(ifNoneMatchHeader).trim();
+  if (!ifNoneMatch || !etag) return false;
+  if (ifNoneMatch === "*") return true;
+
+  return ifNoneMatch
+    .split(",")
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .includes(etag);
+}
+
+function sendCachedResponse(req: Request, res: Response, cached: CacheEntry) {
+  if (cached.etag) {
+    res.setHeader("ETag", cached.etag);
+  }
+
+  if (matchesIfNoneMatch(req.headers["if-none-match"], cached.etag)) {
+    res.status(304);
+    return res.end();
+  }
+
+  res.status(cached.statusCode);
+  res.type(cached.contentType || "application/json");
+  return res.send(cached.body);
 }
 
 function invalidateByPath(path: string) {
@@ -111,9 +145,7 @@ export function responseCacheMiddleware(req: Request, res: Response, next: NextF
   const cached = store.get(key);
   if (cached && cached.expiresAt > now) {
     setCacheHeaders(res, "HIT");
-    res.status(cached.statusCode);
-    res.type(cached.contentType || "application/json");
-    return res.send(cached.body);
+    return sendCachedResponse(req, res, cached);
   }
 
   setCacheHeaders(res, "MISS");
@@ -123,9 +155,7 @@ export function responseCacheMiddleware(req: Request, res: Response, next: NextF
       .then(() => {
         const replay = store.get(key);
         if (replay && replay.expiresAt > Date.now()) {
-          res.status(replay.statusCode);
-          res.type(replay.contentType || "application/json");
-          return res.send(replay.body);
+          return sendCachedResponse(req, res, replay);
         }
         return next();
       })
@@ -144,10 +174,12 @@ export function responseCacheMiddleware(req: Request, res: Response, next: NextF
     inflight.delete(key);
     if (res.statusCode >= 200 && res.statusCode < 300 && bodyBuffer.length > 0) {
       const contentType = String(res.getHeader("content-type") ?? "application/json");
+      const etag = headerToString(res.getHeader("etag") as string | string[] | undefined) || undefined;
       store.set(key, {
         statusCode: res.statusCode,
         contentType,
         body: bodyBuffer,
+        etag,
         expiresAt: Date.now() + defaultTtlMs,
       });
       trimExpiredAndOverflow();
