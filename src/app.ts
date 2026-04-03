@@ -20,6 +20,9 @@ import StoresHomeBanners from "./modules/routes/storesHomeBanners";
 import corporatesRouter from "./modules/routes/corporates";
 import Payments from "./modules/routes/payments";
 import EditorialCollections from "./modules/routes/editorialCollections";
+import { cacheInvalidationMiddleware, responseCacheMiddleware } from "./modules/middleware/responseCache";
+import { requestTelemetryMiddleware } from "./modules/middleware/requestTelemetry";
+import { rateLimitMiddleware } from "./modules/middleware/rateLimit";
 
 const app = express();
 const allowAllCors = String(process.env.CORS_ALLOW_ALL ?? "true").trim().toLowerCase() !== "false";
@@ -80,12 +83,10 @@ app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
-
-// Request logging middleware
-app.use((req, res, next) => {
-  console.log(`${req.method} ${req.path}`);
-  next();
-});
+app.use(rateLimitMiddleware);
+app.use(cacheInvalidationMiddleware);
+app.use(responseCacheMiddleware);
+app.use(requestTelemetryMiddleware);
 
 app.get("/", (req, res) => {
   res.send("Backend running...");
