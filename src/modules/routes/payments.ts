@@ -518,6 +518,7 @@ router.post("/iveri/initiate", async (req, res) => {
 
     return res.status(201).json({
       session_id: updatedSession.id,
+      tracking_id: updatedSession.tracking_id ?? null,
       merchant_trace: updatedSession.merchant_trace,
       launch_url: launchUrl,
       mobile_redirect_url: launchUrl,
@@ -792,6 +793,7 @@ router.post("/iveri/verify", async (req, res) => {
 
     return res.json({
       session_id: verification.session.id,
+      tracking_id: verification.session.tracking_id ?? null,
       merchant_trace: verification.session.merchant_trace,
       verified: verification.verification.verified,
       status: verification.verification.status,
@@ -839,6 +841,7 @@ router.post("/iveri/finalize-booking", async (req, res) => {
     if (session.status === "FINALIZED") {
       return res.json({
         session_id: session.id,
+        tracking_id: session.tracking_id ?? null,
         finalized: true,
         booking_reference_id: session.context_reference_id ?? null,
       });
@@ -889,6 +892,7 @@ router.post("/iveri/finalize-booking", async (req, res) => {
 
     return res.json({
       session_id: session.id,
+      tracking_id: effectiveSession?.tracking_id ?? session.tracking_id ?? null,
       finalized: true,
       booking: result.body.booking,
       duplicate: result.body.duplicate ?? false,
@@ -922,6 +926,7 @@ router.post("/iveri/finalize-bill", async (req, res) => {
     if (session.status === "FINALIZED") {
       return res.json({
         session_id: session.id,
+        tracking_id: session.tracking_id ?? null,
         finalized: true,
         bill_payment_reference_id: session.context_reference_id ?? null,
       });
@@ -1001,6 +1006,7 @@ router.post("/iveri/finalize-bill", async (req, res) => {
 
     return res.json({
       session_id: session.id,
+      tracking_id: effectiveSession?.tracking_id ?? session.tracking_id ?? null,
       finalized: true,
       bill_payment: result.billPayment,
       redemptions: result.redemptions,
