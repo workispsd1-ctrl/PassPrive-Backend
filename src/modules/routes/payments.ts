@@ -519,7 +519,9 @@ router.post("/iveri/initiate", async (req, res) => {
         {
           description: membershipContext.lineItemDescription,
           quantity: 1,
-          unitAmountMajor: membershipContext.finalAmount,
+          // iVeri validates: line item total = order amount + discount.
+          // So with promo discounts, line item amount must represent original amount.
+          unitAmountMajor: membershipContext.originalAmount,
         },
       ];
     }
