@@ -22,9 +22,28 @@ const excludedPrefixes = [
   "/api/user",
 ];
 
+function normalizePath(value: string) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function isPaymentRoute(req: Request) {
+  const path = normalizePath(req.path);
+  const originalUrl = normalizePath(req.originalUrl);
+
+  return (
+    path.startsWith("/api/payments") ||
+    originalUrl.startsWith("/api/payments") ||
+    path.startsWith("/payments") ||
+    originalUrl.startsWith("/payments") ||
+    path.startsWith("/iveri/") ||
+    originalUrl.includes("/iveri/")
+  );
+}
+
 function shouldHandle(req: Request) {
   if (!enabled) return false;
   if (req.method !== "GET") return false;
+  if (isPaymentRoute(req)) return false;
   if (!req.path.startsWith("/api/")) return false;
   if (req.headers.authorization) return false;
   if (String(req.query?.nocache ?? "").trim().toLowerCase() === "true") return false;
@@ -136,6 +155,9 @@ export function cacheInvalidationMiddleware(req: Request, _res: Response, next: 
 
 export function responseCacheMiddleware(req: Request, res: Response, next: NextFunction) {
   if (!shouldHandle(req)) {
+    if (isPaymentRoute(req)) {
+      res.setHeader("X-Cache", "BYPASS");
+    }
     return next();
   }
 
