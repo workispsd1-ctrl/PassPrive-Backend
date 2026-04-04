@@ -1,7 +1,7 @@
 import supabase from "../../database/supabase";
 import { randomBytes } from "crypto";
 
-export type PaymentContext = "BOOKING" | "BILL_PAYMENT";
+export type PaymentContext = "BOOKING" | "BILL_PAYMENT" | "MEMBERSHIP";
 export type PaymentStatus =
   | "CREATED"
   | "PENDING"

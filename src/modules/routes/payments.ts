@@ -16,6 +16,12 @@ import {
   finalizeBillPayment,
 } from "../services/billPaymentService";
 import {
+  buildMembershipPaymentContext,
+  finalizeMembershipPayment,
+  MembershipPayloadSchema,
+  MembershipPaymentValidationError,
+} from "../services/membershipPaymentService";
+import {
   buildIveriAuthoriseRequest,
   generateMerchantTrace,
   getIveriConfig,
@@ -35,8 +41,8 @@ import {
 
 const router = Router();
 
-const InitiateSchema = z.object({
-  payment_context: z.enum(["BOOKING", "BILL_PAYMENT"]),
+export const InitiateSchema = z.object({
+  payment_context: z.enum(["BOOKING", "BILL_PAYMENT", "MEMBERSHIP"]),
   restaurant_id: z.string().uuid().optional(),
   store_id: z.string().uuid().optional(),
   booking_payload: BookingPayloadSchema.optional(),
@@ -54,6 +60,7 @@ const InitiateSchema = z.object({
       coupon_code: z.string().trim().nullable().optional(),
     })
     .optional(),
+  membership_payload: MembershipPayloadSchema.optional(),
 }).superRefine((value, ctx) => {
   const hasRestaurantId = !!value.restaurant_id;
   const hasStoreId = !!value.store_id;
@@ -86,6 +93,24 @@ const InitiateSchema = z.object({
     }
     if (value.booking_payload) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["booking_payload"], message: "booking_payload is not allowed for BILL_PAYMENT" });
+    }
+  }
+
+  if (value.payment_context === "MEMBERSHIP") {
+    if (hasRestaurantId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["restaurant_id"], message: "restaurant_id is not allowed for MEMBERSHIP" });
+    }
+    if (hasStoreId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["store_id"], message: "store_id is not allowed for MEMBERSHIP" });
+    }
+    if (!value.membership_payload) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["membership_payload"], message: "membership_payload is required for MEMBERSHIP" });
+    }
+    if (value.booking_payload) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["booking_payload"], message: "booking_payload is not allowed for MEMBERSHIP" });
+    }
+    if (value.bill_payload) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["bill_payload"], message: "bill_payload is not allowed for MEMBERSHIP" });
     }
   }
 });
@@ -388,7 +413,7 @@ router.post("/iveri/initiate", async (req, res) => {
     const merchantTrace = generateMerchantTrace(parsed.data.payment_context);
     const { firstName, lastName } = splitName(customer.fullName);
 
-    let paymentContext: "BOOKING" | "BILL_PAYMENT" = parsed.data.payment_context;
+    let paymentContext: "BOOKING" | "BILL_PAYMENT" | "MEMBERSHIP" = parsed.data.payment_context;
     let amountMajor = 0;
     let restaurantId: string | null = null;
     let storeId: string | null = null;
@@ -436,7 +461,7 @@ router.post("/iveri/initiate", async (req, res) => {
           unitAmountMajor: amountMajor,
         },
       ];
-    } else {
+    } else if (paymentContext === "BILL_PAYMENT") {
       if (!parsed.data.bill_payload) {
         return res.status(400).json({ error: "bill_payload is required for BILL_PAYMENT payment context" });
       }
@@ -468,6 +493,35 @@ router.post("/iveri/initiate", async (req, res) => {
             : billContext.originalAmount,
         },
       ];
+    } else {
+      if (!parsed.data.membership_payload) {
+        return res.status(400).json({ error: "membership_payload is required for MEMBERSHIP payment context" });
+      }
+
+      const membershipContext = await buildMembershipPaymentContext({
+        userId: customer.userId,
+        payload: parsed.data.membership_payload,
+      });
+
+      amountMajor = membershipContext.finalAmount;
+      originalAmount = membershipContext.originalAmount;
+      discountAmount = membershipContext.discountAmount;
+      cashbackAmount = 0;
+      restaurantId = null;
+      storeId = null;
+
+      contextPayload = {
+        membership_payload: parsed.data.membership_payload,
+        membership_purchase: membershipContext.metadata.membership_purchase,
+      };
+
+      lineItems = [
+        {
+          description: membershipContext.lineItemDescription,
+          quantity: 1,
+          unitAmountMajor: membershipContext.finalAmount,
+        },
+      ];
     }
 
     const session = await createPaymentSession({
@@ -487,6 +541,12 @@ router.post("/iveri/initiate", async (req, res) => {
       gateway_payload: {
         context_payload: contextPayload,
         mode: config.mode,
+        ...(paymentContext === "MEMBERSHIP"
+          ? {
+              membership_purchase:
+                (contextPayload as any)?.membership_purchase ?? null,
+            }
+          : {}),
       },
     });
 
@@ -547,7 +607,7 @@ router.post("/iveri/initiate", async (req, res) => {
       },
     });
   } catch (err: any) {
-    if (err instanceof BillPaymentValidationError) {
+    if (err instanceof BillPaymentValidationError || err instanceof MembershipPaymentValidationError) {
       return res.status(err.status).json({ error: err.message });
     }
     return res.status(500).json({ error: err?.message || "Failed to initiate iVeri payment" });
@@ -1019,6 +1079,75 @@ router.post("/iveri/finalize-bill", async (req, res) => {
       return res.status(err.status).json({ error: err.message });
     }
     return res.status(500).json({ error: err?.message || "Failed to finalize bill payment" });
+  }
+});
+
+router.post("/iveri/finalize-membership", async (req, res) => {
+  const parsed = FinalizeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid finalize payload", details: parsed.error.flatten() });
+  }
+
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+
+  try {
+    const session = await getPaymentSessionById(parsed.data.session_id);
+    if (!session) {
+      return res.status(404).json({ error: "Payment session not found" });
+    }
+    if (session.user_id !== auth.user.id) {
+      return res.status(403).json({ error: "Access denied" });
+    }
+    if (session.payment_context !== "MEMBERSHIP") {
+      return res.status(400).json({ error: "Payment session is not a membership payment" });
+    }
+    if (session.status === "FINALIZED") {
+      return res.json({
+        session_id: session.id,
+        tracking_id: session.tracking_id ?? null,
+        finalized: true,
+        membership: session.gateway_payload?.finalized_membership ?? null,
+        membership_reference_id: session.context_reference_id ?? auth.user.id,
+      });
+    }
+    if (session.status !== "VERIFIED_SUCCESS") {
+      return res.status(409).json({ error: "Payment session has not been verified as successful" });
+    }
+
+    const result = await finalizeMembershipPayment({
+      session,
+      userId: auth.user.id,
+    });
+
+    const updated = await updatePaymentSessionIfStatusIn({
+      sessionId: session.id,
+      allowedCurrentStatuses: ["VERIFIED_SUCCESS"],
+      updates: {
+        status: "FINALIZED",
+        context_reference_id: auth.user.id,
+        gateway_payload: {
+          ...(session.gateway_payload ?? {}),
+          finalized_membership: result.membership,
+        },
+      },
+    });
+    const effectiveSession = updated ?? (await getPaymentSessionById(session.id));
+
+    return res.json({
+      session_id: session.id,
+      tracking_id: effectiveSession?.tracking_id ?? session.tracking_id ?? null,
+      finalized: true,
+      duplicate: result.duplicate,
+      membership: result.membership,
+      user: result.user ?? null,
+      membership_reference_id: effectiveSession?.context_reference_id ?? auth.user.id,
+    });
+  } catch (err: any) {
+    if (err instanceof MembershipPaymentValidationError) {
+      return res.status(err.status).json({ error: err.message });
+    }
+    return res.status(500).json({ error: err?.message || "Failed to finalize membership payment" });
   }
 });
 
