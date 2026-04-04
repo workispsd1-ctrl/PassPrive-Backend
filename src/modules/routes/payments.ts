@@ -418,6 +418,10 @@ router.post("/iveri/initiate", async (req, res) => {
     let restaurantId: string | null = null;
     let storeId: string | null = null;
     let discountAmount = 0;
+    let discountSource: "NONE" | "BANK" | "PLATFORM" | "PARTNER" = "NONE";
+    let discountCode: string | null = null;
+    let discountName: string | null = null;
+    let discountMeta: Record<string, any> = {};
     let cashbackAmount = 0;
     let originalAmount = 0;
     let contextPayload: Record<string, any> = {};
@@ -452,6 +456,7 @@ router.post("/iveri/initiate", async (req, res) => {
         restaurant_id: parsed.data.restaurant_id,
         booking_payload: parsed.data.booking_payload,
       };
+      discountSource = "NONE";
       lineItems = [
         {
           description: evaluation.verifiedOffer?.title
@@ -476,6 +481,10 @@ router.post("/iveri/initiate", async (req, res) => {
       amountMajor = billContext.payableAmount;
       originalAmount = billContext.originalAmount;
       discountAmount = billContext.discountAmount;
+      discountSource = billContext.discountSource ?? "NONE";
+      discountCode = billContext.discountCode ?? null;
+      discountName = billContext.discountName ?? null;
+      discountMeta = billContext.discountMeta ?? {};
       cashbackAmount = billContext.cashbackAmount;
       restaurantId = billContext.restaurant?.id ?? null;
       storeId = billContext.store?.id ?? null;
@@ -506,6 +515,10 @@ router.post("/iveri/initiate", async (req, res) => {
       amountMajor = membershipContext.finalAmount;
       originalAmount = membershipContext.originalAmount;
       discountAmount = membershipContext.discountAmount;
+      discountSource = membershipContext.discountDetails.source;
+      discountCode = membershipContext.discountDetails.code;
+      discountName = membershipContext.discountDetails.name;
+      discountMeta = membershipContext.discountDetails.meta;
       cashbackAmount = 0;
       restaurantId = null;
       storeId = null;
@@ -537,6 +550,10 @@ router.post("/iveri/initiate", async (req, res) => {
       amount_minor: Math.round(amountMajor * 100),
       currency_code: "MUR",
       discount_amount: discountAmount,
+      discount_source: discountSource,
+      discount_code: discountCode,
+      discount_name: discountName,
+      discount_meta: discountMeta,
       cashback_amount: cashbackAmount,
       original_amount: originalAmount,
       status: "PENDING",
@@ -589,6 +606,22 @@ router.post("/iveri/initiate", async (req, res) => {
         minor: updatedSession.amount_minor,
         currency_code: updatedSession.currency_code,
       },
+      amount_breakdown: {
+        original_major: updatedSession.original_amount ?? updatedSession.amount_major,
+        discount_major: updatedSession.discount_amount ?? 0,
+        cashback_major: updatedSession.cashback_amount ?? 0,
+        payable_major: updatedSession.amount_major,
+      },
+      discount_details: {
+        source: updatedSession.discount_source ?? "NONE",
+        code: updatedSession.discount_code ?? null,
+        name: updatedSession.discount_name ?? null,
+        meta: updatedSession.discount_meta ?? {},
+      },
+      membership_purchase:
+        paymentContext === "MEMBERSHIP"
+          ? updatedSession.gateway_payload?.membership_purchase ?? null
+          : null,
       gateway: {
         url: gatewayRequest.gatewayUrl,
         method: "POST",
@@ -868,6 +901,18 @@ router.post("/iveri/verify", async (req, res) => {
         minor: verification.session.amount_minor,
         currency_code: verification.session.currency_code,
       },
+      amount_breakdown: {
+        original_major: verification.session.original_amount ?? verification.session.amount_major,
+        discount_major: verification.session.discount_amount ?? 0,
+        cashback_major: verification.session.cashback_amount ?? 0,
+        payable_major: verification.session.amount_major,
+      },
+      discount_details: {
+        source: verification.session.discount_source ?? "NONE",
+        code: verification.session.discount_code ?? null,
+        name: verification.session.discount_name ?? null,
+        meta: verification.session.discount_meta ?? {},
+      },
       transaction: {
         transaction_index: verification.session.transaction_index,
         authorization_code: verification.session.authorization_code,
@@ -1143,6 +1188,13 @@ router.post("/iveri/finalize-membership", async (req, res) => {
       duplicate: result.duplicate,
       membership: result.membership,
       user: result.user ?? null,
+      amount_breakdown: result.membership?.amount_breakdown ?? null,
+      discount_details: {
+        source: effectiveSession?.discount_source ?? session.discount_source ?? "NONE",
+        code: effectiveSession?.discount_code ?? session.discount_code ?? null,
+        name: effectiveSession?.discount_name ?? session.discount_name ?? null,
+        meta: effectiveSession?.discount_meta ?? session.discount_meta ?? {},
+      },
       membership_reference_id: effectiveSession?.context_reference_id ?? auth.user.id,
     });
   } catch (err: any) {

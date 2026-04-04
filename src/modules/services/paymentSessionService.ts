@@ -24,6 +24,10 @@ export interface CreatePaymentSessionInput {
   amount_minor: number;
   currency_code: string;
   discount_amount?: number;
+  discount_source?: "NONE" | "BANK" | "PLATFORM" | "PARTNER";
+  discount_code?: string | null;
+  discount_name?: string | null;
+  discount_meta?: Record<string, any>;
   cashback_amount?: number;
   original_amount?: number;
   status?: PaymentStatus;
@@ -85,6 +89,10 @@ export async function createPaymentSession(input: CreatePaymentSessionInput) {
       amount_minor: input.amount_minor,
       currency_code: input.currency_code,
       discount_amount: input.discount_amount ?? 0,
+      discount_source: input.discount_source ?? "NONE",
+      discount_code: input.discount_code ?? null,
+      discount_name: input.discount_name ?? null,
+      discount_meta: input.discount_meta ?? {},
       cashback_amount: input.cashback_amount ?? 0,
       original_amount: input.original_amount ?? input.amount_major,
       status: input.status ?? "CREATED",

@@ -94,6 +94,25 @@ function validateSelectedOffers(offers: any[]) {
   }
 }
 
+function normalizeDiscountSource(value: any): "NONE" | "BANK" | "PLATFORM" | "PARTNER" {
+  const normalized = normalizeText(value);
+  if (normalized === "BANK") return "BANK";
+  if (normalized === "PARTNER" || normalized === "MERCHANT") return "PARTNER";
+  if (normalized === "PLATFORM") return "PLATFORM";
+  return "NONE";
+}
+
+function deriveDiscountSourceFromOffers(offers: any[]): "NONE" | "BANK" | "PLATFORM" | "PARTNER" {
+  if (!offers.length) return "NONE";
+  const mapped = offers.map((offer) =>
+    normalizeDiscountSource(offer?.source_type ?? offer?.sponsor_type ?? offer?.metadata?.discount_source)
+  );
+  if (mapped.includes("BANK")) return "BANK";
+  if (mapped.includes("PARTNER")) return "PARTNER";
+  if (mapped.includes("PLATFORM")) return "PLATFORM";
+  return "NONE";
+}
+
 function extractRestaurantMinimumBillAmount(offer: any) {
   if (offer === null || offer === undefined) return null;
 
@@ -221,6 +240,8 @@ export async function buildBillPaymentContext(input: BillContextInput) {
   discountAmount = Number(discountAmount.toFixed(2));
   cashbackAmount = Number(cashbackAmount.toFixed(2));
   const payableAmount = Number(Math.max(0, originalAmount - discountAmount).toFixed(2));
+  const discountSource = deriveDiscountSourceFromOffers(selectedOffers);
+  const primaryOffer = selectedOffers[0] ?? null;
 
   return {
     entityType,
@@ -234,6 +255,21 @@ export async function buildBillPaymentContext(input: BillContextInput) {
     cashbackAmount,
     payableAmount,
     selectedOffers,
+    discountSource,
+    discountCode:
+      String(input.coupon_code ?? "").trim() ||
+      String(primaryOffer?.payment_rules?.coupon_code ?? "").trim() ||
+      null,
+    discountName: primaryOffer ? String(primaryOffer.title ?? primaryOffer.offer_type ?? "Offer") : null,
+    discountMeta: {
+      selected_offer_ids: selectedOffers.map((offer: any) => offer.id),
+      selected_offers: selectedOffers.map((offer: any) => ({
+        id: offer.id,
+        title: offer.title,
+        source_type: offer.source_type ?? null,
+        offer_type: offer.offer_type ?? null,
+      })),
+    },
     eligibleOffers,
     lineItemDescription:
       item?.title ??

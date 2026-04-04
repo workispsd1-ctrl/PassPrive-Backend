@@ -111,6 +111,20 @@ function resolveMembershipTier(planName: any) {
   return "premium";
 }
 
+function normalizeDiscountSource(value: any): "NONE" | "BANK" | "PLATFORM" | "PARTNER" {
+  const normalized = normalizeText(value);
+  if (normalized === "bank") return "BANK";
+  if (normalized === "partner" || normalized === "merchant") return "PARTNER";
+  if (normalized === "platform") return "PLATFORM";
+  return "NONE";
+}
+
+function toMoney(value: any, fallback = 0) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return fallback;
+  return roundMoney(parsed);
+}
+
 function isPromoEligibleForPlan(plans: any, plan: { id: string; plan_name: string; price_id?: string | null; product_id?: string | null }) {
   if (!Array.isArray(plans) || plans.length === 0) return false;
   const normalizedCandidates = new Set(
@@ -150,6 +164,12 @@ export interface MembershipPaymentContext {
   membershipTier: string;
   lineItemDescription: string;
   metadata: Record<string, any>;
+  discountDetails: {
+    source: "NONE" | "BANK" | "PLATFORM" | "PARTNER";
+    code: string | null;
+    name: string | null;
+    meta: Record<string, any>;
+  };
 }
 
 export async function buildMembershipPaymentContext(params: {
@@ -195,6 +215,9 @@ export async function buildMembershipPaymentContext(params: {
   const promoCode = String(params.payload.promo_code ?? "").trim();
   let promo: MembershipPaymentContext["promo"] = null;
   let discountAmount = 0;
+  let discountSource: "NONE" | "BANK" | "PLATFORM" | "PARTNER" = "NONE";
+  let discountName: string | null = null;
+  let discountMeta: Record<string, any> = {};
 
   if (promoCode) {
     const { data: promoRow, error: promoError } = await db
@@ -239,6 +262,28 @@ export async function buildMembershipPaymentContext(params: {
         typeof promoRow.metadata === "object" && promoRow.metadata !== null
           ? (promoRow.metadata as Record<string, any>)
           : {},
+    };
+    discountSource = normalizeDiscountSource(
+      promoRow.discount_source ??
+        promoRow.source_type ??
+        promoRow.sponsor_type ??
+        promoRow.metadata?.discount_source ??
+        promoRow.metadata?.source_type ??
+        "PLATFORM"
+    );
+    discountName = String(
+      promoRow.name ??
+        promoRow.title ??
+        promoRow.promo_name ??
+        promoRow.code ??
+        "Membership Promo"
+    );
+    discountMeta = {
+      promo_id: promoRow.id ?? null,
+      promo_code: promo?.code ?? promoCode,
+      promo_discount_percent: discountPercent,
+      source_hint:
+        promoRow.source_type ?? promoRow.sponsor_type ?? promoRow.metadata?.source_type ?? null,
     };
   }
 
@@ -288,6 +333,12 @@ export async function buildMembershipPaymentContext(params: {
         payment_instrument_type: params.payload.payment_instrument_type ?? null,
         applied_promo: params.payload.applied_promo ?? null,
       },
+    },
+    discountDetails: {
+      source: discountSource,
+      code: promo?.code ?? null,
+      name: discountName,
+      meta: discountMeta,
     },
   } satisfies MembershipPaymentContext;
 }
@@ -351,6 +402,10 @@ export async function finalizeMembershipPayment(params: {
   const membershipExpiry = addDays(now, durationDays).toISOString();
   const promoCode = String(purchaseMeta.promo_code ?? "").trim() || null;
   const membershipTier = resolveMembershipTier(purchaseMeta.plan_name ?? planRow.plan_name);
+  const baseAmount = toMoney(purchaseMeta.base_amount, 0);
+  const finalAmount = toMoney(purchaseMeta.final_amount, 0);
+  const discountAmount = toMoney(purchaseMeta.discount_amount, 0);
+  const promoDiscountPercent = toMoney(purchaseMeta.promo_discount_percent, 0);
 
   const { data: updatedUser, error: userUpdateError } = await db
     .from("users")
@@ -388,6 +443,12 @@ export async function finalizeMembershipPayment(params: {
         params.session.transaction_index ??
         params.session.bank_reference ??
         params.session.merchant_trace,
+      amount_breakdown: {
+        base_amount: baseAmount,
+        discount_amount: discountAmount,
+        final_amount: finalAmount,
+        promo_discount_percent: promoDiscountPercent,
+      },
     },
     user: updatedUser,
   };
