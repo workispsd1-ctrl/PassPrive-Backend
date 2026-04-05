@@ -110,6 +110,55 @@ function validateSelectedOffers(offers: any[]) {
   }
 }
 
+function offerPriorityValue(offer: any) {
+  const raw = Number(offer?.priority ?? offer?.sort_order ?? 0);
+  return Number.isFinite(raw) ? raw : 0;
+}
+
+function pickBestOffer(candidates: any[], baseAmount: number) {
+  if (!candidates.length) return null;
+  const scored = [...candidates].sort((a, b) => {
+    const benefitDiff = computeOfferBenefit(b, baseAmount) - computeOfferBenefit(a, baseAmount);
+    if (benefitDiff !== 0) return benefitDiff;
+    const priorityDiff = offerPriorityValue(b) - offerPriorityValue(a);
+    if (priorityDiff !== 0) return priorityDiff;
+    return String(b?.id ?? "").localeCompare(String(a?.id ?? ""));
+  });
+  return scored[0] ?? null;
+}
+
+function normalizeOffersForStacking(offers: any[], baseAmount: number) {
+  if (offers.length <= 1) return offers;
+
+  const nonStackables = offers.filter((offer) => offer.is_stackable !== true);
+  if (nonStackables.length > 0) {
+    const best = pickBestOffer(nonStackables, baseAmount);
+    return best ? [best] : [];
+  }
+
+  const bestByGroup = new Map<string, any>();
+  const withoutGroup: any[] = [];
+
+  for (const offer of offers) {
+    const group = String(offer?.stack_group ?? "").trim();
+    if (!group) {
+      withoutGroup.push(offer);
+      continue;
+    }
+
+    const currentBest = bestByGroup.get(group);
+    if (!currentBest) {
+      bestByGroup.set(group, offer);
+      continue;
+    }
+
+    const better = pickBestOffer([currentBest, offer], baseAmount);
+    bestByGroup.set(group, better);
+  }
+
+  return [...withoutGroup, ...Array.from(bestByGroup.values())];
+}
+
 function normalizeDiscountSource(value: any): "NONE" | "BANK" | "PLATFORM" | "PARTNER" {
   const normalized = normalizeText(value);
   if (normalized === "BANK") return "BANK";
@@ -256,6 +305,7 @@ export async function buildBillPaymentContext(input: BillContextInput) {
     throw new BillPaymentValidationError("One or more selected offers are no longer eligible");
   }
 
+  selectedOffers = normalizeOffersForStacking(selectedOffers, originalAmount);
   validateSelectedOffers(selectedOffers);
 
   let discountAmount = 0;
