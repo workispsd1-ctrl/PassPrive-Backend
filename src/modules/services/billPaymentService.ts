@@ -52,6 +52,22 @@ function normalizeText(value: any) {
   return String(value ?? "").trim().toUpperCase();
 }
 
+function extractOfferCouponCode(offer: any) {
+  const candidates = [
+    offer?.coupon_code,
+    offer?.promo_code,
+    offer?.payment_rules?.coupon_code,
+    offer?.metadata?.coupon_code,
+  ];
+
+  for (const value of candidates) {
+    const normalized = String(value ?? "").trim();
+    if (normalized.length > 0) return normalized;
+  }
+
+  return null;
+}
+
 function computeOfferBenefit(offer: any, baseAmount: number) {
   let value = 0;
   if (offer.benefit_percent !== null && offer.benefit_percent !== undefined) {
@@ -218,9 +234,25 @@ export async function buildBillPaymentContext(input: BillContextInput) {
 
   const selectedOfferIds = input.selected_offer_ids ?? [];
   const eligibleOffers = offerEvaluation.body.items ?? [];
-  const selectedOffers = eligibleOffers.filter((offer: any) => selectedOfferIds.includes(offer.id));
+  const normalizedCouponCode = String(input.coupon_code ?? "").trim().toUpperCase();
+  let selectedOffers = eligibleOffers.filter((offer: any) => selectedOfferIds.includes(offer.id));
 
-  if (selectedOffers.length !== selectedOfferIds.length) {
+  if (selectedOfferIds.length === 0 && normalizedCouponCode) {
+    selectedOffers = eligibleOffers.filter((offer: any) => {
+      const offerCoupon = extractOfferCouponCode(offer);
+      return offerCoupon ? offerCoupon.toUpperCase() === normalizedCouponCode : false;
+    });
+
+    if (selectedOffers.length === 0) {
+      throw new BillPaymentValidationError("Provided coupon code is not eligible for this bill");
+    }
+  }
+
+  if (selectedOfferIds.length === 0 && !normalizedCouponCode) {
+    selectedOffers = eligibleOffers.filter((offer: any) => offer?.is_auto_apply === true);
+  }
+
+  if (selectedOfferIds.length > 0 && selectedOffers.length !== selectedOfferIds.length) {
     throw new BillPaymentValidationError("One or more selected offers are no longer eligible");
   }
 
