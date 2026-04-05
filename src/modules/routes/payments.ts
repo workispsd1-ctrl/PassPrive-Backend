@@ -657,10 +657,21 @@ router.post("/iveri/initiate", async (req, res) => {
         cashback_major: updatedSession.cashback_amount ?? 0,
         payable_major: updatedSession.amount_major,
       },
+      benefit_breakdown: {
+        discount_major: updatedSession.discount_amount ?? 0,
+        cashback_major: updatedSession.cashback_amount ?? 0,
+        total_benefit_major: Number(
+          (
+            Number(updatedSession.discount_amount ?? 0) +
+            Number(updatedSession.cashback_amount ?? 0)
+          ).toFixed(2)
+        ),
+      },
       discount_details: {
         source: updatedSession.discount_source ?? "NONE",
         code: updatedSession.discount_code ?? null,
         name: updatedSession.discount_name ?? null,
+        applied_amount_major: updatedSession.discount_amount ?? 0,
         meta: updatedSession.discount_meta ?? {},
       },
       membership_purchase:
@@ -952,10 +963,21 @@ router.post("/iveri/verify", async (req, res) => {
         cashback_major: verification.session.cashback_amount ?? 0,
         payable_major: verification.session.amount_major,
       },
+      benefit_breakdown: {
+        discount_major: verification.session.discount_amount ?? 0,
+        cashback_major: verification.session.cashback_amount ?? 0,
+        total_benefit_major: Number(
+          (
+            Number(verification.session.discount_amount ?? 0) +
+            Number(verification.session.cashback_amount ?? 0)
+          ).toFixed(2)
+        ),
+      },
       discount_details: {
         source: verification.session.discount_source ?? "NONE",
         code: verification.session.discount_code ?? null,
         name: verification.session.discount_name ?? null,
+        applied_amount_major: verification.session.discount_amount ?? 0,
         meta: verification.session.discount_meta ?? {},
       },
       transaction: {
@@ -1238,6 +1260,7 @@ router.post("/iveri/finalize-membership", async (req, res) => {
         source: effectiveSession?.discount_source ?? session.discount_source ?? "NONE",
         code: effectiveSession?.discount_code ?? session.discount_code ?? null,
         name: effectiveSession?.discount_name ?? session.discount_name ?? null,
+        applied_amount_major: effectiveSession?.discount_amount ?? session.discount_amount ?? 0,
         meta: effectiveSession?.discount_meta ?? session.discount_meta ?? {},
       },
       membership_reference_id: effectiveSession?.context_reference_id ?? auth.user.id,
