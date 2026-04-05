@@ -242,6 +242,15 @@ export async function buildBillPaymentContext(input: BillContextInput) {
   const payableAmount = Number(Math.max(0, originalAmount - discountAmount).toFixed(2));
   const discountSource = deriveDiscountSourceFromOffers(selectedOffers);
   const primaryOffer = selectedOffers[0] ?? null;
+  const derivedDiscountCode = [
+    input.coupon_code,
+    primaryOffer?.coupon_code,
+    primaryOffer?.promo_code,
+    primaryOffer?.payment_rules?.coupon_code,
+    primaryOffer?.metadata?.coupon_code,
+  ]
+    .map((value) => String(value ?? "").trim())
+    .find((value) => value.length > 0) ?? null;
 
   return {
     entityType,
@@ -256,10 +265,7 @@ export async function buildBillPaymentContext(input: BillContextInput) {
     payableAmount,
     selectedOffers,
     discountSource,
-    discountCode:
-      String(input.coupon_code ?? "").trim() ||
-      String(primaryOffer?.payment_rules?.coupon_code ?? "").trim() ||
-      null,
+    discountCode: derivedDiscountCode,
     discountName: primaryOffer ? String(primaryOffer.title ?? primaryOffer.offer_type ?? "Offer") : null,
     discountMeta: {
       selected_offer_ids: selectedOffers.map((offer: any) => offer.id),

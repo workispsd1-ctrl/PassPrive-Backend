@@ -361,6 +361,14 @@ function buildGatewayDiagnostics(session: any, gatewayRequest: { fields: Record<
   };
 }
 
+function normalizeDiscountSource(value: any): "NONE" | "BANK" | "PLATFORM" | "PARTNER" {
+  const normalized = String(value ?? "").trim().toUpperCase();
+  if (normalized === "BANK") return "BANK";
+  if (normalized === "PLATFORM") return "PLATFORM";
+  if (normalized === "PARTNER" || normalized === "MERCHANT") return "PARTNER";
+  return "NONE";
+}
+
 function validateIveriGatewayConfiguration(params: {
   authoriseUrl: string;
   currencyCode: string;
@@ -450,13 +458,50 @@ router.post("/iveri/initiate", async (req, res) => {
       }
 
       amountMajor = evaluation.verifiedCoverChargeAmount;
-      originalAmount = evaluation.verifiedCoverChargeAmount;
+      const defaultCoverCharge = Number(evaluation.restaurant?.cover_charge_amount ?? 0);
+      const baselineCoverCharge = Number.isFinite(defaultCoverCharge) && defaultCoverCharge > 0
+        ? Math.max(defaultCoverCharge, evaluation.verifiedCoverChargeAmount)
+        : evaluation.verifiedCoverChargeAmount;
+      originalAmount = baselineCoverCharge;
+      discountAmount = Number(Math.max(0, baselineCoverCharge - evaluation.verifiedCoverChargeAmount).toFixed(2));
       restaurantId = evaluation.restaurantId;
       contextPayload = {
         restaurant_id: parsed.data.restaurant_id,
         booking_payload: parsed.data.booking_payload,
       };
-      discountSource = "NONE";
+      if (discountAmount > 0 && evaluation.verifiedOffer) {
+        discountSource = normalizeDiscountSource(
+          evaluation.verifiedOffer.source_type ??
+            evaluation.verifiedOffer.sponsor_type ??
+            evaluation.verifiedOffer.metadata?.discount_source
+        );
+        discountCode = String(
+          evaluation.verifiedOffer.promo_code ??
+            evaluation.verifiedOffer.promoCode ??
+            evaluation.selectedOption?.id ??
+            ""
+        ).trim() || null;
+        discountName = String(
+          evaluation.verifiedOffer.title ??
+            evaluation.verifiedOffer.label ??
+            "Booking Offer"
+        ).trim() || "Booking Offer";
+        discountMeta = {
+          offer_id:
+            evaluation.verifiedOffer.id ??
+            evaluation.verifiedOffer.offer_id ??
+            null,
+          offer_title:
+            evaluation.verifiedOffer.title ??
+            evaluation.verifiedOffer.label ??
+            null,
+          selected_option_type: evaluation.selectedOption?.type ?? null,
+          baseline_cover_charge: baselineCoverCharge,
+          payable_cover_charge: evaluation.verifiedCoverChargeAmount,
+        };
+      } else {
+        discountSource = "NONE";
+      }
       lineItems = [
         {
           description: evaluation.verifiedOffer?.title
