@@ -45,10 +45,25 @@ export const InitiateSchema = z.object({
   payment_context: z.enum(["BOOKING", "BILL_PAYMENT", "MEMBERSHIP"]),
   restaurant_id: z.string().uuid().optional(),
   store_id: z.string().uuid().optional(),
+  original_amount: z.coerce.number().nonnegative().optional(),
+  discount_amount: z.coerce.number().nonnegative().optional(),
+  cashback_amount: z.coerce.number().nonnegative().optional(),
+  selected_offer_ids: z.array(z.string().uuid()).optional(),
+  amount_breakdown: z
+    .object({
+      original_amount: z.coerce.number().nonnegative().optional(),
+      discount_amount: z.coerce.number().nonnegative().optional(),
+      cashback_amount: z.coerce.number().nonnegative().optional(),
+      payable_amount: z.coerce.number().nonnegative().optional(),
+    })
+    .optional(),
   booking_payload: BookingPayloadSchema.optional(),
   bill_payload: z
     .object({
       bill_amount: z.coerce.number().positive(),
+      original_amount: z.coerce.number().nonnegative().optional(),
+      discount_amount: z.coerce.number().nonnegative().optional(),
+      cashback_amount: z.coerce.number().nonnegative().optional(),
       booking_id: z.string().uuid().nullable().optional(),
       item_id: z.string().uuid().nullable().optional(),
       quantity: z.coerce.number().int().positive().optional(),
@@ -369,6 +384,114 @@ function normalizeDiscountSource(value: any): "NONE" | "BANK" | "PLATFORM" | "PA
   return "NONE";
 }
 
+function roundMoney(value: number) {
+  return Number(value.toFixed(2));
+}
+
+function deriveClientAmountBreakdown(input: {
+  top_level?: {
+    original_amount?: number;
+    discount_amount?: number;
+    cashback_amount?: number;
+  };
+  payload_level?: {
+    original_amount?: number;
+    discount_amount?: number;
+    cashback_amount?: number;
+    bill_amount?: number;
+  };
+  amount_breakdown?: {
+    original_amount?: number;
+    discount_amount?: number;
+    cashback_amount?: number;
+    payable_amount?: number;
+  };
+}) {
+  const top = input.top_level ?? {};
+  const payload = input.payload_level ?? {};
+  const breakdown = input.amount_breakdown ?? {};
+
+  const hasAnyAmountInput =
+    top.original_amount !== undefined ||
+    top.discount_amount !== undefined ||
+    top.cashback_amount !== undefined ||
+    payload.original_amount !== undefined ||
+    payload.discount_amount !== undefined ||
+    payload.cashback_amount !== undefined ||
+    payload.bill_amount !== undefined ||
+    breakdown.original_amount !== undefined ||
+    breakdown.discount_amount !== undefined ||
+    breakdown.cashback_amount !== undefined ||
+    breakdown.payable_amount !== undefined;
+
+  if (!hasAnyAmountInput) return null;
+
+  const originalAmount = roundMoney(
+    Number(
+      breakdown.original_amount ??
+        top.original_amount ??
+        payload.original_amount ??
+        payload.bill_amount ??
+        0
+    )
+  );
+  const discountAmount = roundMoney(
+    Number(
+      breakdown.discount_amount ??
+        top.discount_amount ??
+        payload.discount_amount ??
+        0
+    )
+  );
+  const cashbackAmount = roundMoney(
+    Number(
+      breakdown.cashback_amount ??
+        top.cashback_amount ??
+        payload.cashback_amount ??
+        0
+    )
+  );
+  const payableAmount = roundMoney(
+    Number(
+      breakdown.payable_amount ??
+        Math.max(0, originalAmount - discountAmount)
+    )
+  );
+
+  if (
+    !Number.isFinite(originalAmount) ||
+    !Number.isFinite(discountAmount) ||
+    !Number.isFinite(cashbackAmount) ||
+    !Number.isFinite(payableAmount)
+  ) {
+    throw new Error("Invalid amount values in request");
+  }
+
+  if (originalAmount <= 0) {
+    throw new Error("original_amount must be greater than zero");
+  }
+  if (discountAmount < 0 || cashbackAmount < 0 || payableAmount < 0) {
+    throw new Error("Amount values cannot be negative");
+  }
+  if (discountAmount > originalAmount) {
+    throw new Error("discount_amount cannot exceed original_amount");
+  }
+
+  const expectedPayable = roundMoney(Math.max(0, originalAmount - discountAmount));
+  if (Math.abs(expectedPayable - payableAmount) > 0.01) {
+    throw new Error(
+      "amount_breakdown.payable_amount must equal original_amount - discount_amount"
+    );
+  }
+
+  return {
+    originalAmount,
+    discountAmount,
+    cashbackAmount,
+    payableAmount,
+  };
+}
+
 function validateIveriGatewayConfiguration(params: {
   authoriseUrl: string;
   currencyCode: string;
@@ -457,6 +580,19 @@ router.post("/iveri/initiate", async (req, res) => {
         return res.status(400).json({ error: "Selected booking does not require payment" });
       }
 
+      const clientBreakdown = deriveClientAmountBreakdown({
+        top_level: {
+          original_amount: parsed.data.original_amount,
+          discount_amount: parsed.data.discount_amount,
+          cashback_amount: parsed.data.cashback_amount,
+        },
+        amount_breakdown: parsed.data.amount_breakdown,
+      });
+      console.info("[iVeri initiate][BOOKING raw request]", {
+        payment_context: parsed.data.payment_context,
+        body: req.body,
+      });
+
       amountMajor = evaluation.verifiedCoverChargeAmount;
       const defaultCoverCharge = Number(evaluation.restaurant?.cover_charge_amount ?? 0);
       const baselineCoverCharge = Number.isFinite(defaultCoverCharge) && defaultCoverCharge > 0
@@ -502,13 +638,28 @@ router.post("/iveri/initiate", async (req, res) => {
       } else {
         discountSource = "NONE";
       }
+      if (clientBreakdown) {
+        originalAmount = clientBreakdown.originalAmount;
+        discountAmount = clientBreakdown.discountAmount;
+        cashbackAmount = clientBreakdown.cashbackAmount;
+        amountMajor = clientBreakdown.payableAmount;
+      }
+      console.info("[iVeri initiate][BOOKING parsed amounts]", {
+        parsed_original_amount: parsed.data.original_amount ?? null,
+        parsed_discount_amount: parsed.data.discount_amount ?? null,
+        parsed_cashback_amount: parsed.data.cashback_amount ?? null,
+        parsed_amount_breakdown: parsed.data.amount_breakdown ?? null,
+        derived_client_amounts: clientBreakdown,
+        computed_payable_amount: amountMajor,
+      });
       lineItems = [
         {
           description: evaluation.verifiedOffer?.title
             ? `Booking cover charge - ${evaluation.verifiedOffer.title}`
             : "Restaurant booking cover charge",
           quantity: 1,
-          unitAmountMajor: amountMajor,
+          // iVeri validates line-item total against order amount + discount.
+          unitAmountMajor: originalAmount,
         },
       ];
     } else if (paymentContext === "BILL_PAYMENT") {
@@ -538,13 +689,51 @@ router.post("/iveri/initiate", async (req, res) => {
         store_id: parsed.data.store_id ?? null,
         bill_payload: parsed.data.bill_payload,
       };
+      const clientBreakdown = deriveClientAmountBreakdown({
+        top_level: {
+          original_amount: parsed.data.original_amount,
+          discount_amount: parsed.data.discount_amount,
+          cashback_amount: parsed.data.cashback_amount,
+        },
+        payload_level: {
+          bill_amount: parsed.data.bill_payload.bill_amount,
+          original_amount: parsed.data.bill_payload.original_amount,
+          discount_amount: parsed.data.bill_payload.discount_amount,
+          cashback_amount: parsed.data.bill_payload.cashback_amount,
+        },
+        amount_breakdown: parsed.data.amount_breakdown,
+      });
+      console.info("[iVeri initiate][BILL_PAYMENT raw request]", {
+        payment_context: parsed.data.payment_context,
+        body: req.body,
+      });
+      if (clientBreakdown) {
+        originalAmount = clientBreakdown.originalAmount;
+        discountAmount = clientBreakdown.discountAmount;
+        cashbackAmount = clientBreakdown.cashbackAmount;
+        amountMajor = clientBreakdown.payableAmount;
+      }
+      console.info("[iVeri initiate][BILL_PAYMENT parsed amounts]", {
+        parsed_original_amount: parsed.data.original_amount ?? null,
+        parsed_discount_amount: parsed.data.discount_amount ?? null,
+        parsed_cashback_amount: parsed.data.cashback_amount ?? null,
+        parsed_bill_payload_amounts: {
+          bill_amount: parsed.data.bill_payload.bill_amount,
+          original_amount: parsed.data.bill_payload.original_amount ?? null,
+          discount_amount: parsed.data.bill_payload.discount_amount ?? null,
+          cashback_amount: parsed.data.bill_payload.cashback_amount ?? null,
+        },
+        parsed_amount_breakdown: parsed.data.amount_breakdown ?? null,
+        derived_client_amounts: clientBreakdown,
+        computed_payable_amount: amountMajor,
+      });
       lineItems = [
         {
           description: billContext.lineItemDescription,
           quantity: billContext.item ? billContext.quantity : 1,
           unitAmountMajor: billContext.item
-            ? Number((billContext.originalAmount / billContext.quantity).toFixed(2))
-            : billContext.originalAmount,
+            ? Number((originalAmount / billContext.quantity).toFixed(2))
+            : originalAmount,
         },
       ];
     } else {
@@ -612,6 +801,15 @@ router.post("/iveri/initiate", async (req, res) => {
             }
           : {}),
       },
+    });
+    console.info("[iVeri initiate][persisted session amounts]", {
+      session_id: session.id,
+      payment_context: session.payment_context,
+      original_amount: session.original_amount,
+      discount_amount: session.discount_amount,
+      cashback_amount: session.cashback_amount,
+      payable_amount: session.amount_major,
+      payable_minor: session.amount_minor,
     });
 
     const gatewayRequest = buildIveriAuthoriseRequest({
