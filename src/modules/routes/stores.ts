@@ -173,6 +173,12 @@ const NewKickInQuerySchema = z.object({
     .optional()
     .transform((v) => (v ? Number(v) : 0))
     .refine((n) => Number.isFinite(n) && n >= 0, "offset must be >= 0"),
+  freshnessDays: z
+    .string()
+    .optional()
+    .transform((v) => (v ? Number(v) : 30))
+    .refine((n) => Number.isFinite(n) && n > 0 && n <= 90, "freshnessDays 1-90"),
+  excludeStoreIds: z.string().optional(),
 });
 
 function summarizeStoreFeedRows(rows: any[]) {
@@ -192,6 +198,17 @@ function summarizeStoreFeedRows(rows: any[]) {
   }
 
   return summary;
+}
+
+function parseStoreIdList(value: string | undefined) {
+  if (!value) return new Set<string>();
+
+  return new Set(
+    value
+      .split(",")
+      .map((item) => item.trim())
+      .filter(Boolean)
+  );
 }
 
 function isStoreAdvertisementActive(store: any, now = new Date()) {
@@ -298,12 +315,6 @@ function compareStoresForSmartFeed(a: any, b: any, feedLocation: any, userLat: n
     }
   }
 
-  const aCreatedAt = a?.created_at ? new Date(a.created_at).getTime() : 0;
-  const bCreatedAt = b?.created_at ? new Date(b.created_at).getTime() : 0;
-  if (aCreatedAt !== bCreatedAt) {
-    return bCreatedAt - aCreatedAt;
-  }
-
   const aFeatured = !!a?.is_featured;
   const bFeatured = !!b?.is_featured;
   if (aFeatured !== bFeatured) {
@@ -342,6 +353,12 @@ function compareStoresForSmartFeed(a: any, b: any, feedLocation: any, userLat: n
     return aSortOrder - bSortOrder;
   }
 
+  const aCreatedAt = a?.created_at ? new Date(a.created_at).getTime() : 0;
+  const bCreatedAt = b?.created_at ? new Date(b.created_at).getTime() : 0;
+  if (aCreatedAt !== bCreatedAt) {
+    return bCreatedAt - aCreatedAt;
+  }
+
   return String(a?.name || "").localeCompare(String(b?.name || ""));
 }
 
@@ -358,16 +375,16 @@ function compareStoresForNewKickIn(
     return aAd ? -1 : 1;
   }
 
-  const aLocation = isStoreLocationMatch(a, feedLocation);
-  const bLocation = isStoreLocationMatch(b, feedLocation);
-  if (aLocation !== bLocation) {
-    return bLocation - aLocation;
-  }
-
   const aCreatedAt = a?.created_at ? new Date(a.created_at).getTime() : 0;
   const bCreatedAt = b?.created_at ? new Date(b.created_at).getTime() : 0;
   if (aCreatedAt !== bCreatedAt) {
     return bCreatedAt - aCreatedAt;
+  }
+
+  const aLocation = isStoreLocationMatch(a, feedLocation);
+  const bLocation = isStoreLocationMatch(b, feedLocation);
+  if (aLocation !== bLocation) {
+    return bLocation - aLocation;
   }
 
   if (aAd && bAd) {
@@ -499,10 +516,6 @@ router.get("/", async (req, res) => {
   }
 
   // filters
-  if (city) query = query.ilike("city", `%${city}%`);
-  if (region) query = query.ilike("region", `%${region}%`);
-  if (country) query = query.ilike("country", `%${country}%`);
-
   if (category) query = query.eq("category", category);
   if (subcategory) query = query.eq("subcategory", subcategory);
 
@@ -628,9 +641,6 @@ router.get("/feed", async (req, res) => {
   if (!includeInactive) {
     query = query.eq("is_active", true);
   }
-  if (city) query = query.ilike("city", `%${city}%`);
-  if (region) query = query.ilike("region", `%${region}%`);
-  if (country) query = query.ilike("country", `%${country}%`);
   if (category) query = query.eq("category", category);
   if (subcategory) query = query.eq("subcategory", subcategory);
   if (tag) query = query.contains("tags", [tag]);
@@ -733,16 +743,18 @@ router.get("/new-kick-in", async (req, res) => {
     lng,
     limit,
     offset,
+    freshnessDays,
+    excludeStoreIds,
   } = parsed.data;
+
+  const excludedStoreIds = parseStoreIdList(excludeStoreIds);
+  const freshnessCutoff = new Date(Date.now() - freshnessDays * 24 * 60 * 60 * 1000);
 
   let query = supabase.from("stores").select("*", { count: "exact" });
 
   if (!includeInactive) {
     query = query.eq("is_active", true);
   }
-  if (city) query = query.ilike("city", `%${city}%`);
-  if (region) query = query.ilike("region", `%${region}%`);
-  if (country) query = query.ilike("country", `%${country}%`);
   if (category) query = query.eq("category", category);
   if (subcategory) query = query.eq("subcategory", subcategory);
   if (tag) query = query.contains("tags", [tag]);
@@ -775,12 +787,66 @@ router.get("/new-kick-in", async (req, res) => {
     const { data: rows, error, count: total } = result as any;
     if (error) return res.status(500).json({ error: error.message });
 
-    const ranked = (rows ?? [])
-      .slice()
+    const rawRows = rows ?? [];
+    console.info("[GET /api/stores/new-kick-in] raw result", {
+      count: rawRows.length,
+      total: total ?? null,
+      scanLimit,
+      freshnessDays,
+      excludedCount: excludedStoreIds.size,
+      sample: summarizeStoreFeedRows(rawRows),
+    });
+
+    const freshRows = rawRows.filter((row: any) => {
+      if (!row?.created_at) return false;
+      const createdAt = new Date(row.created_at);
+      return Number.isFinite(createdAt.getTime()) && createdAt >= freshnessCutoff;
+    });
+    console.info("[GET /api/stores/new-kick-in] freshness filter", {
+      freshnessDays,
+      cutoff: freshnessCutoff.toISOString(),
+      count: freshRows.length,
+    });
+
+    const freshRanked = freshRows
+      .filter((row: any) => !excludedStoreIds.has(String(row?.id || row?.store_id || "")))
       .sort((a: any, b: any) =>
         compareStoresForNewKickIn(a, b, { city, region, country }, lat, lng)
       );
+    console.info("[GET /api/stores/new-kick-in] overlap exclusion", {
+      hard: true,
+      before: freshRows.length,
+      after: freshRanked.length,
+      excludedCount: freshRows.length - freshRanked.length,
+    });
+
+    const fallbackRows = rawRows
+      .filter((row: any) => {
+        if (!row?.created_at) return true;
+        const createdAt = new Date(row.created_at);
+        return !Number.isFinite(createdAt.getTime()) || createdAt < freshnessCutoff;
+      })
+      .filter((row: any) => !excludedStoreIds.has(String(row?.id || row?.store_id || "")))
+      .sort((a: any, b: any) =>
+        compareStoresForNewKickIn(a, b, { city, region, country }, lat, lng)
+      );
+
+    const ranked = [...freshRanked, ...fallbackRows];
+    console.info("[GET /api/stores/new-kick-in] ranked result", {
+      count: ranked.length,
+      freshCount: freshRanked.length,
+      fallbackCount: fallbackRows.length,
+      topIds: ranked.slice(0, 8).map((row: any) => row?.id || row?.store_id || null),
+      topCities: ranked.slice(0, 8).map((row: any) => row?.city || null),
+    });
+
     const pageItems = ranked.slice(offset, offset + limit);
+    console.info("[GET /api/stores/new-kick-in] page result", {
+      count: pageItems.length,
+      limit,
+      offset,
+      returnedIds: pageItems.map((row: any) => row?.id || row?.store_id || null),
+    });
 
     return res.json({
       items: pageItems,
