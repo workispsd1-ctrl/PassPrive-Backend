@@ -141,6 +141,40 @@ const FeedQuerySchema = z.object({
     .refine((n) => Number.isFinite(n) && n >= 0, "offset must be >= 0"),
 });
 
+const NewKickInQuerySchema = z.object({
+  search: z.string().trim().min(1).optional(),
+  city: z.string().trim().min(1).optional(),
+  region: z.string().trim().min(1).optional(),
+  country: z.string().trim().min(1).optional(),
+  category: z.string().trim().min(1).optional(),
+  subcategory: z.string().trim().min(1).optional(),
+  tag: z.string().trim().min(1).optional(),
+  includeInactive: z
+    .string()
+    .optional()
+    .transform((v) => v === "true"),
+  lat: z
+    .string()
+    .optional()
+    .transform((v) => (v ? Number(v) : null))
+    .refine((n) => n === null || Number.isFinite(n), "lat must be numeric"),
+  lng: z
+    .string()
+    .optional()
+    .transform((v) => (v ? Number(v) : null))
+    .refine((n) => n === null || Number.isFinite(n), "lng must be numeric"),
+  limit: z
+    .string()
+    .optional()
+    .transform((v) => (v ? Number(v) : 24))
+    .refine((n) => Number.isFinite(n) && n > 0 && n <= 100, "limit 1-100"),
+  offset: z
+    .string()
+    .optional()
+    .transform((v) => (v ? Number(v) : 0))
+    .refine((n) => Number.isFinite(n) && n >= 0, "offset must be >= 0"),
+});
+
 function summarizeStoreFeedRows(rows: any[]) {
   const summary = {
     total: Array.isArray(rows) ? rows.length : 0,
@@ -274,6 +308,74 @@ function compareStoresForSmartFeed(a: any, b: any, feedLocation: any, userLat: n
   const bFeatured = !!b?.is_featured;
   if (aFeatured !== bFeatured) {
     return aFeatured ? -1 : 1;
+  }
+
+  const aPremium = isStorePremiumActive(a);
+  const bPremium = isStorePremiumActive(b);
+  if (aPremium !== bPremium) {
+    return aPremium ? -1 : 1;
+  }
+
+  const aDistance = getStoreDistanceKm(a, userLat, userLng);
+  const bDistance = getStoreDistanceKm(b, userLat, userLng);
+  if (aDistance != null && bDistance != null && aDistance !== bDistance) {
+    return aDistance - bDistance;
+  }
+  if (aDistance != null && bDistance == null) return -1;
+  if (aDistance == null && bDistance != null) return 1;
+
+  const aRating = Number(a?.rating ?? 0);
+  const bRating = Number(b?.rating ?? 0);
+  if (aRating !== bRating) {
+    return bRating - aRating;
+  }
+
+  const aRatings = Number(a?.total_ratings ?? 0);
+  const bRatings = Number(b?.total_ratings ?? 0);
+  if (aRatings !== bRatings) {
+    return bRatings - aRatings;
+  }
+
+  const aSortOrder = Number.isFinite(Number(a?.sort_order)) ? Number(a.sort_order) : 9999;
+  const bSortOrder = Number.isFinite(Number(b?.sort_order)) ? Number(b.sort_order) : 9999;
+  if (aSortOrder !== bSortOrder) {
+    return aSortOrder - bSortOrder;
+  }
+
+  return String(a?.name || "").localeCompare(String(b?.name || ""));
+}
+
+function compareStoresForNewKickIn(
+  a: any,
+  b: any,
+  feedLocation: any,
+  userLat: number | null,
+  userLng: number | null
+) {
+  const aAd = isStoreAdvertisementActive(a);
+  const bAd = isStoreAdvertisementActive(b);
+  if (aAd !== bAd) {
+    return aAd ? -1 : 1;
+  }
+
+  const aLocation = isStoreLocationMatch(a, feedLocation);
+  const bLocation = isStoreLocationMatch(b, feedLocation);
+  if (aLocation !== bLocation) {
+    return bLocation - aLocation;
+  }
+
+  const aCreatedAt = a?.created_at ? new Date(a.created_at).getTime() : 0;
+  const bCreatedAt = b?.created_at ? new Date(b.created_at).getTime() : 0;
+  if (aCreatedAt !== bCreatedAt) {
+    return bCreatedAt - aCreatedAt;
+  }
+
+  if (aAd && bAd) {
+    const aPriority = typeof a.ad_priority === "number" ? a.ad_priority : 100;
+    const bPriority = typeof b.ad_priority === "number" ? b.ad_priority : 100;
+    if (aPriority !== bPriority) {
+      return aPriority - bPriority;
+    }
   }
 
   const aPremium = isStorePremiumActive(a);
@@ -595,6 +697,99 @@ router.get("/feed", async (req, res) => {
     const isTimeout = String(error?.message ?? "").includes("timed out");
     if (isTimeout) {
       console.error("[GET /api/stores/feed] Timed out", {
+        timeout_ms: LIST_QUERY_TIMEOUT_MS,
+        offset,
+        limit,
+        city,
+        region,
+        country,
+      });
+      return res.status(503).json({ error: "Request timed out. Please retry." });
+    }
+    return res.status(500).json({ error: error?.message ?? "Unexpected error" });
+  }
+});
+
+// GET /api/stores/new-kick-in
+// New Kick In stores sorted by ad first, then same city, then newest.
+router.get("/new-kick-in", async (req, res) => {
+  const parsed = NewKickInQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid query", details: parsed.error.flatten() });
+  }
+
+  const {
+    search,
+    city,
+    region,
+    country,
+    category,
+    subcategory,
+    tag,
+    includeInactive,
+    lat,
+    lng,
+    limit,
+    offset,
+  } = parsed.data;
+
+  let query = supabase.from("stores").select("*", { count: "exact" });
+
+  if (!includeInactive) {
+    query = query.eq("is_active", true);
+  }
+  if (city) query = query.ilike("city", `%${city}%`);
+  if (region) query = query.ilike("region", `%${region}%`);
+  if (country) query = query.ilike("country", `%${country}%`);
+  if (category) query = query.eq("category", category);
+  if (subcategory) query = query.eq("subcategory", subcategory);
+  if (tag) query = query.contains("tags", [tag]);
+
+  if (search) {
+    const s = search.replace(/"/g, '\\"');
+    query = query.or(
+      [
+        `name.ilike.%${s}%`,
+        `slug.ilike.%${s}%`,
+        `category.ilike.%${s}%`,
+        `subcategory.ilike.%${s}%`,
+        `city.ilike.%${s}%`,
+        `region.ilike.%${s}%`,
+        `location_name.ilike.%${s}%`,
+        `full_address.ilike.%${s}%`,
+      ].join(",")
+    );
+  }
+
+  const scanLimit = Math.min(Math.max(limit + offset + Math.max(limit, 1) * 4, 120), 500);
+
+  try {
+    const result = await withTimeout(
+      query.range(0, scanLimit - 1),
+      LIST_QUERY_TIMEOUT_MS,
+      "GET /api/stores/new-kick-in query"
+    );
+
+    const { data: rows, error, count: total } = result as any;
+    if (error) return res.status(500).json({ error: error.message });
+
+    const ranked = (rows ?? [])
+      .slice()
+      .sort((a: any, b: any) =>
+        compareStoresForNewKickIn(a, b, { city, region, country }, lat, lng)
+      );
+    const pageItems = ranked.slice(offset, offset + limit);
+
+    return res.json({
+      items: pageItems,
+      page: { limit, offset, total: total ?? ranked.length },
+    });
+  } catch (error: any) {
+    const isTimeout = String(error?.message ?? "").includes("timed out");
+    if (isTimeout) {
+      console.error("[GET /api/stores/new-kick-in] Timed out", {
         timeout_ms: LIST_QUERY_TIMEOUT_MS,
         offset,
         limit,
