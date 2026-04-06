@@ -211,6 +211,20 @@ function parseStoreIdList(value: string | undefined) {
   );
 }
 
+function logStoreFeedRows(label: string, rows: any[]) {
+  console.info(label, (rows || []).map((row: any) => ({
+    id: row?.id || row?.store_id || null,
+    name: row?.name || row?.store_name || null,
+    city: row?.city || null,
+    location_name: row?.location_name || null,
+    address_line1: row?.address_line1 || null,
+    created_at: row?.created_at || null,
+    is_advertised: !!row?.is_advertised,
+    pickup_premium_enabled: !!row?.pickup_premium_enabled,
+    distance_km: row?.distance_km ?? null,
+  })));
+}
+
 function isStoreAdvertisementActive(store: any, now = new Date()) {
   if (!store?.is_advertised) return false;
 
@@ -796,6 +810,7 @@ router.get("/new-kick-in", async (req, res) => {
       excludedCount: excludedStoreIds.size,
       sample: summarizeStoreFeedRows(rawRows),
     });
+    logStoreFeedRows("[GET /api/stores/new-kick-in] raw rows", rawRows);
 
     const freshRows = rawRows.filter((row: any) => {
       if (!row?.created_at) return false;
@@ -807,6 +822,7 @@ router.get("/new-kick-in", async (req, res) => {
       cutoff: freshnessCutoff.toISOString(),
       count: freshRows.length,
     });
+    logStoreFeedRows("[GET /api/stores/new-kick-in] fresh rows", freshRows);
 
     const freshRanked = freshRows
       .filter((row: any) => !excludedStoreIds.has(String(row?.id || row?.store_id || "")))
@@ -819,6 +835,7 @@ router.get("/new-kick-in", async (req, res) => {
       after: freshRanked.length,
       excludedCount: freshRows.length - freshRanked.length,
     });
+    logStoreFeedRows("[GET /api/stores/new-kick-in] fresh ranked rows", freshRanked);
 
     const fallbackRows = rawRows
       .filter((row: any) => {
@@ -839,6 +856,7 @@ router.get("/new-kick-in", async (req, res) => {
       topIds: ranked.slice(0, 8).map((row: any) => row?.id || row?.store_id || null),
       topCities: ranked.slice(0, 8).map((row: any) => row?.city || null),
     });
+    logStoreFeedRows("[GET /api/stores/new-kick-in] ranked rows", ranked);
 
     const pageItems = ranked.slice(offset, offset + limit);
     console.info("[GET /api/stores/new-kick-in] page result", {
@@ -847,6 +865,7 @@ router.get("/new-kick-in", async (req, res) => {
       offset,
       returnedIds: pageItems.map((row: any) => row?.id || row?.store_id || null),
     });
+    logStoreFeedRows("[GET /api/stores/new-kick-in] page rows", pageItems);
 
     return res.json({
       items: pageItems,
