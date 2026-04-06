@@ -1,4 +1,5 @@
 import type { NextFunction, Request, Response } from "express";
+import { redisGet, redisIncr, redisSet } from "../services/redisClient";
 
 interface CacheEntry {
   body: string;
@@ -11,15 +12,30 @@ interface CacheEntry {
 const defaultTtlMs = Number(process.env.RESPONSE_CACHE_TTL_MS ?? 15_000);
 const maxEntries = Number(process.env.RESPONSE_CACHE_MAX_ENTRIES ?? 1000);
 const enabled = String(process.env.RESPONSE_CACHE_ENABLED ?? "true").trim().toLowerCase() !== "false";
+const redisPrefix = String(process.env.RESPONSE_CACHE_REDIS_PREFIX ?? "passprive:response-cache:v1").trim();
 
 const store = new Map<string, CacheEntry>();
 const inflight = new Map<string, Promise<void>>();
+const localScopeVersions = new Map<string, number>();
 
-const excludedPrefixes = [
-  "/api/payments",
-  "/api/auth",
-  "/api/admin",
-  "/api/user",
+const excludedPrefixes = ["/api/payments", "/api/auth", "/api/admin", "/api/user"];
+const cacheScopes = [
+  "/api/offers",
+  "/api/restaurants",
+  "/api/stores",
+  "/api/store",
+  "/api/store-catalogue",
+  "/api/store-catalog",
+  "/api/homeherooffers",
+  "/api/dineinhomebanners",
+  "/api/inyourpassprive",
+  "/api/moodcategories",
+  "/api/storemoodcategories",
+  "/api/spotlight",
+  "/api/restaurant-bookings",
+  "/api/editorial-collections",
+  "/api/stores-home",
+  "/api/corporates",
 ];
 
 function normalizePath(value: string) {
@@ -50,8 +66,52 @@ function shouldHandle(req: Request) {
   return !excludedPrefixes.some((prefix) => req.path.startsWith(prefix));
 }
 
-function buildCacheKey(req: Request) {
-  return `${req.method}:${req.originalUrl}`;
+function buildScopeVersionKey(scope: string) {
+  return `${redisPrefix}:version:${encodeURIComponent(scope)}`;
+}
+
+function resolveCacheScope(path: string) {
+  const normalized = normalizePath(path);
+  const matchingScope = cacheScopes
+    .filter((scope) => normalized === scope || normalized.startsWith(`${scope}/`))
+    .sort((left, right) => right.length - left.length)[0];
+
+  if (matchingScope) return matchingScope;
+  if (!normalized.startsWith("/api/")) return normalized;
+
+  const parts = normalized.split("/").filter(Boolean);
+  if (parts.length >= 2) {
+    return `/${parts[0]}/${parts[1]}`;
+  }
+
+  return normalized;
+}
+
+async function getScopeVersion(scope: string) {
+  const redisKey = buildScopeVersionKey(scope);
+  const remoteVersion = await redisGet(redisKey);
+  if (remoteVersion !== null) {
+    const parsed = Number(remoteVersion);
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      localScopeVersions.set(scope, parsed);
+      return parsed;
+    }
+  }
+
+  return localScopeVersions.get(scope) ?? 0;
+}
+
+async function bumpScopeVersion(scope: string) {
+  const redisKey = buildScopeVersionKey(scope);
+  const next = await redisIncr(redisKey);
+  if (next > 0) {
+    localScopeVersions.set(scope, next);
+    return next;
+  }
+
+  const localNext = (localScopeVersions.get(scope) ?? 0) + 1;
+  localScopeVersions.set(scope, localNext);
+  return localNext;
 }
 
 function trimExpiredAndOverflow() {
@@ -105,54 +165,62 @@ function sendCachedResponse(req: Request, res: Response, cached: CacheEntry) {
   }
 
   res.status(cached.statusCode);
-  res.type(cached.contentType || "application/json");
+  res.setHeader("Content-Type", cached.contentType || "application/json");
   return res.send(cached.body);
 }
 
-function invalidateByPath(path: string) {
-  for (const key of store.keys()) {
-    const index = key.indexOf(":");
-    if (index < 0) continue;
-    const originalUrl = key.slice(index + 1);
-    if (path.startsWith("/api/offers") && originalUrl.startsWith("/api/offers")) {
-      store.delete(key);
-      continue;
+function parseCacheEntry(raw: string) {
+  try {
+    const parsed = JSON.parse(raw) as CacheEntry;
+    if (
+      typeof parsed?.body === "string" &&
+      typeof parsed?.contentType === "string" &&
+      typeof parsed?.statusCode === "number" &&
+      typeof parsed?.expiresAt === "number"
+    ) {
+      return parsed;
     }
-    if (path.startsWith("/api/restaurants") && originalUrl.startsWith("/api/restaurants")) {
-      store.delete(key);
-      continue;
-    }
-    if (path.startsWith("/api/stores") && originalUrl.startsWith("/api/stores")) {
-      store.delete(key);
-      continue;
-    }
-    if (path.startsWith("/api/store") && originalUrl.startsWith("/api/store")) {
-      store.delete(key);
-      continue;
-    }
-    if (path.startsWith("/api/store-catalogue") && originalUrl.startsWith("/api/store-catalogue")) {
-      store.delete(key);
-      continue;
-    }
-    if (path.startsWith("/api/store-catalog") && originalUrl.startsWith("/api/store-catalog")) {
-      store.delete(key);
-      continue;
-    }
-    if (path.startsWith("/api/homeherooffers") && originalUrl.startsWith("/api/homeherooffers")) {
-      store.delete(key);
-      continue;
-    }
+  } catch {
+    return null;
   }
+  return null;
 }
 
-export function cacheInvalidationMiddleware(req: Request, _res: Response, next: NextFunction) {
+async function readCachedEntry(key: string) {
+  const local = store.get(key);
+  if (local && local.expiresAt > Date.now()) {
+    return local;
+  }
+
+  const raw = await redisGet(key);
+  if (!raw) return null;
+  const parsed = parseCacheEntry(raw);
+  if (!parsed || parsed.expiresAt <= Date.now()) return null;
+  store.set(key, parsed);
+  return parsed;
+}
+
+async function writeCachedEntry(key: string, entry: CacheEntry) {
+  store.set(key, entry);
+  await redisSet(key, JSON.stringify(entry), Math.max(1, entry.expiresAt - Date.now()));
+}
+
+export async function cacheInvalidationMiddleware(req: Request, _res: Response, next: NextFunction) {
   if (req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS") {
-    invalidateByPath(req.path);
+    const scope = resolveCacheScope(req.path);
+    if (scope && scope.startsWith("/api/")) {
+      try {
+        await bumpScopeVersion(scope);
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn("[cache] Unable to bump scope version", { scope, message });
+      }
+    }
   }
   next();
 }
 
-export function responseCacheMiddleware(req: Request, res: Response, next: NextFunction) {
+export async function responseCacheMiddleware(req: Request, res: Response, next: NextFunction) {
   if (!shouldHandle(req)) {
     if (isPaymentRoute(req)) {
       res.setHeader("X-Cache", "BYPASS");
@@ -161,9 +229,12 @@ export function responseCacheMiddleware(req: Request, res: Response, next: NextF
   }
 
   trimExpiredAndOverflow();
-  const key = buildCacheKey(req);
+  const scope = resolveCacheScope(req.path);
+  const version = await getScopeVersion(scope);
+  localScopeVersions.set(scope, version);
+  const key = `${redisPrefix}:${encodeURIComponent(scope)}:${version}:${req.method}:${req.originalUrl}`;
   const now = Date.now();
-  const cached = store.get(key);
+  const cached = await readCachedEntry(key);
   if (cached && cached.expiresAt > now) {
     setCacheHeaders(res, "HIT");
     return sendCachedResponse(req, res, cached);
@@ -172,16 +243,12 @@ export function responseCacheMiddleware(req: Request, res: Response, next: NextF
   setCacheHeaders(res, "MISS");
   const running = inflight.get(key);
   if (running) {
-    running
-      .then(() => {
-        const replay = store.get(key);
-        if (replay && replay.expiresAt > Date.now()) {
-          return sendCachedResponse(req, res, replay);
-        }
-        return next();
-      })
-      .catch(() => next());
-    return;
+    await running.catch(() => undefined);
+    const replay = await readCachedEntry(key);
+    if (replay && replay.expiresAt > Date.now()) {
+      return sendCachedResponse(req, res, replay);
+    }
+    return next();
   }
 
   let resolved = false;
@@ -196,12 +263,17 @@ export function responseCacheMiddleware(req: Request, res: Response, next: NextF
     if (res.statusCode >= 200 && res.statusCode < 300 && bodyBuffer.length > 0) {
       const contentType = String(res.getHeader("content-type") ?? "application/json");
       const etag = headerToString(res.getHeader("etag") as string | string[] | undefined) || undefined;
-      store.set(key, {
+      const entry: CacheEntry = {
         statusCode: res.statusCode,
         contentType,
         body: bodyBuffer,
         etag,
         expiresAt: Date.now() + defaultTtlMs,
+      };
+      store.set(key, entry);
+      void writeCachedEntry(key, entry).catch((error) => {
+        const message = error instanceof Error ? error.message : String(error);
+        console.warn("[cache] Failed to write Redis cache entry", { key, message });
       });
       trimExpiredAndOverflow();
     }
