@@ -178,9 +178,7 @@ function getBackendBaseUrl(req: any) {
     return configured.replace(/\/+$/, "");
   }
 
-  const protocol = req.headers["x-forwarded-proto"] || req.protocol || "http";
-  const host = req.headers["x-forwarded-host"] || req.get("host");
-  return `${protocol}://${host}`;
+  return "https://api.passprive.com";
 }
 
 function escapeHtml(value: string) {
