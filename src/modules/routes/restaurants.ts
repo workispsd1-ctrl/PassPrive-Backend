@@ -382,15 +382,6 @@ function compareFoodieFrontrowRestaurants(
     return aAdvertised ? -1 : 1;
   }
 
-  if (aAdvertised && bAdvertised) {
-    const aPriority = typeof a.ad_priority === "number" ? a.ad_priority : 100;
-    const bPriority = typeof b.ad_priority === "number" ? b.ad_priority : 100;
-
-    if (aPriority !== bPriority) {
-      return aPriority - bPriority;
-    }
-  }
-
   const aLocationScore = getFoodieFrontrowLocationScore(a, normalizedArea, normalizedCity);
   const bLocationScore = getFoodieFrontrowLocationScore(b, normalizedArea, normalizedCity);
 
@@ -402,6 +393,15 @@ function compareFoodieFrontrowRestaurants(
   const bCreatedAt = b.created_at ? new Date(b.created_at).getTime() : 0;
   if (aCreatedAt !== bCreatedAt) {
     return bCreatedAt - aCreatedAt;
+  }
+
+  if (aAdvertised && bAdvertised) {
+    const aPriority = typeof a.ad_priority === "number" ? a.ad_priority : 100;
+    const bPriority = typeof b.ad_priority === "number" ? b.ad_priority : 100;
+
+    if (aPriority !== bPriority) {
+      return aPriority - bPriority;
+    }
   }
 
   const aRating = Number(a.rating ?? 0);
