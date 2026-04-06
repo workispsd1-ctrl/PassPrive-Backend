@@ -141,6 +141,25 @@ const FeedQuerySchema = z.object({
     .refine((n) => Number.isFinite(n) && n >= 0, "offset must be >= 0"),
 });
 
+function summarizeStoreFeedRows(rows: any[]) {
+  const summary = {
+    total: Array.isArray(rows) ? rows.length : 0,
+    advertised: 0,
+    premium: 0,
+    sameCity: 0,
+    hasDistance: 0,
+  };
+
+  for (const row of rows || []) {
+    if (isStoreAdvertisementActive(row)) summary.advertised += 1;
+    if (isStorePremiumActive(row)) summary.premium += 1;
+    if (String(row?.city || "").trim()) summary.sameCity += 1;
+    if (row?.lat != null && row?.lng != null) summary.hasDistance += 1;
+  }
+
+  return summary;
+}
+
 function isStoreAdvertisementActive(store: any, now = new Date()) {
   if (!store?.is_advertised) return false;
 
@@ -487,6 +506,21 @@ router.get("/feed", async (req, res) => {
     offset,
   } = parsed.data;
 
+  console.info("[GET /api/stores/feed] query", {
+    search: search || null,
+    city: city || null,
+    region: region || null,
+    country: country || null,
+    category: category || null,
+    subcategory: subcategory || null,
+    tag: tag || null,
+    includeInactive,
+    lat,
+    lng,
+    limit,
+    offset,
+  });
+
   let query = supabase.from("stores").select("*", { count: "exact" });
 
   if (!includeInactive) {
@@ -527,10 +561,31 @@ router.get("/feed", async (req, res) => {
     const { data: rows, error, count: total } = result as any;
     if (error) return res.status(500).json({ error: error.message });
 
-    const ranked = (rows ?? [])
+    const rawRows = rows ?? [];
+    console.info("[GET /api/stores/feed] raw result", {
+      count: rawRows.length,
+      total: total ?? null,
+      scanLimit,
+      sample: summarizeStoreFeedRows(rawRows),
+    });
+
+    const ranked = rawRows
       .slice()
       .sort((a: any, b: any) => compareStoresForSmartFeed(a, b, { city, region, country }, lat, lng));
+    console.info("[GET /api/stores/feed] ranked result", {
+      count: ranked.length,
+      topIds: ranked.slice(0, 8).map((row: any) => row?.id || row?.store_id || null),
+      topCities: ranked.slice(0, 8).map((row: any) => row?.city || null),
+    });
+
     const pageItems = ranked.slice(offset, offset + limit);
+
+    console.info("[GET /api/stores/feed] page result", {
+      count: pageItems.length,
+      limit,
+      offset,
+      returnedIds: pageItems.map((row: any) => row?.id || row?.store_id || null),
+    });
 
     return res.json({
       items: pageItems,
