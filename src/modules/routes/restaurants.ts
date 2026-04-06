@@ -350,6 +350,75 @@ function compareGrabYourDealRestaurants(a: any, b: any) {
   return bCreatedAt - aCreatedAt;
 }
 
+function getFoodieFrontrowLocationScore(
+  restaurant: any,
+  normalizedArea?: string | null,
+  normalizedCity?: string | null
+) {
+  const restaurantArea = String(restaurant?.area || "").trim().toLowerCase();
+  const restaurantCity = normalizeCanonicalCity(restaurant?.city);
+
+  if (normalizedArea && restaurantArea && restaurantArea === normalizedArea) {
+    return 2;
+  }
+
+  if (normalizedCity && restaurantCity && restaurantCity === normalizedCity) {
+    return 1;
+  }
+
+  return 0;
+}
+
+function compareFoodieFrontrowRestaurants(
+  a: any,
+  b: any,
+  normalizedArea?: string | null,
+  normalizedCity?: string | null
+) {
+  const aAdvertised = isAdvertisementActive(a);
+  const bAdvertised = isAdvertisementActive(b);
+
+  if (aAdvertised !== bAdvertised) {
+    return aAdvertised ? -1 : 1;
+  }
+
+  if (aAdvertised && bAdvertised) {
+    const aPriority = typeof a.ad_priority === "number" ? a.ad_priority : 100;
+    const bPriority = typeof b.ad_priority === "number" ? b.ad_priority : 100;
+
+    if (aPriority !== bPriority) {
+      return aPriority - bPriority;
+    }
+  }
+
+  const aLocationScore = getFoodieFrontrowLocationScore(a, normalizedArea, normalizedCity);
+  const bLocationScore = getFoodieFrontrowLocationScore(b, normalizedArea, normalizedCity);
+
+  if (aLocationScore !== bLocationScore) {
+    return bLocationScore - aLocationScore;
+  }
+
+  const aCreatedAt = a.created_at ? new Date(a.created_at).getTime() : 0;
+  const bCreatedAt = b.created_at ? new Date(b.created_at).getTime() : 0;
+  if (aCreatedAt !== bCreatedAt) {
+    return bCreatedAt - aCreatedAt;
+  }
+
+  const aRating = Number(a.rating ?? 0);
+  const bRating = Number(b.rating ?? 0);
+  if (aRating !== bRating) {
+    return bRating - aRating;
+  }
+
+  const aTotalRatings = Number(a.total_ratings ?? 0);
+  const bTotalRatings = Number(b.total_ratings ?? 0);
+  if (aTotalRatings !== bTotalRatings) {
+    return bTotalRatings - aTotalRatings;
+  }
+
+  return String(a?.id ?? "").localeCompare(String(b?.id ?? ""));
+}
+
 function normalizeCanonicalCity(value?: string | null) {
   const normalized = String(value || "").trim().toLowerCase();
 
@@ -976,35 +1045,10 @@ router.get("/foodie-frontrow", async (req, res) => {
     const normalizedArea = area?.trim().toLowerCase();
     const normalizedCity = normalizeCanonicalCity(city);
 
-    const areaMatchedRestaurants =
-      normalizedArea && normalizedArea.length > 0
-        ? eligibleRestaurants.filter(
-            (restaurant: any) =>
-              typeof restaurant.area === "string" &&
-              restaurant.area.trim().toLowerCase() === normalizedArea
-          )
-        : [];
-
-    const cityMatchedRestaurants =
-      normalizedCity && normalizedCity.length > 0
-        ? eligibleRestaurants.filter(
-            (restaurant: any) =>
-              normalizeCanonicalCity(restaurant.city) === normalizedCity
-          )
-        : [];
-
-    let sourceItems = eligibleRestaurants;
-
-    if (areaMatchedRestaurants.length >= limit) {
-      sourceItems = areaMatchedRestaurants;
-    } else if (cityMatchedRestaurants.length > 0) {
-      sourceItems = cityMatchedRestaurants;
-    } else if (areaMatchedRestaurants.length > 0) {
-      sourceItems = areaMatchedRestaurants;
-    }
-
-    const items = dedupeRestaurantsById(sourceItems)
-      .sort(compareGrabYourDealRestaurants)
+    const items = eligibleRestaurants
+      .sort((a: any, b: any) =>
+        compareFoodieFrontrowRestaurants(a, b, normalizedArea, normalizedCity)
+      )
       .slice(0, limit);
 
     return res.json({ items: mapRestaurantsForResponse(items) });
