@@ -200,6 +200,64 @@ function summarizeStoreFeedRows(rows: any[]) {
   return summary;
 }
 
+function normalizeCanonicalCity(value?: string | null) {
+  const normalized = String(value || "").trim().toLowerCase();
+
+  const aliases: Record<string, string> = {
+    hyderabad: "hyderabad",
+    secunderabad: "hyderabad",
+    "secunderabad, hyderabad": "hyderabad",
+    "hyderabad, secunderabad": "hyderabad",
+    mumbai: "mumbai",
+    bombay: "mumbai",
+    bengaluru: "bengaluru",
+    bangalore: "bengaluru",
+  };
+
+  return aliases[normalized] || normalized;
+}
+
+function normalizeLocationValue(value?: string | null) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, " ");
+}
+
+function resolveStoreCity(store: any) {
+  const directCity = normalizeCanonicalCity(store?.city);
+  if (directCity) return directCity;
+
+  const candidateFields = [
+    store?.location_name,
+    store?.address_line1,
+    store?.address_line2,
+    store?.full_address,
+    store?.region,
+  ];
+
+  for (const field of candidateFields) {
+    const normalized = normalizeLocationValue(field);
+    if (!normalized) continue;
+
+    if (normalized.includes("hyderabad") || normalized.includes("secunderabad")) {
+      return "hyderabad";
+    }
+    if (normalized.includes("mumbai") || normalized.includes("bombay")) {
+      return "mumbai";
+    }
+    if (normalized.includes("bengaluru") || normalized.includes("bangalore")) {
+      return "bengaluru";
+    }
+  }
+
+  return directCity || "";
+}
+
+function getStoreResolvedCity(store: any) {
+  return resolveStoreCity(store) || null;
+}
+
 function parseStoreIdList(value: string | undefined) {
   if (!value) return new Set<string>();
 
@@ -216,11 +274,16 @@ function logStoreFeedRows(label: string, rows: any[]) {
     id: row?.id || row?.store_id || null,
     name: row?.name || row?.store_name || null,
     city: row?.city || null,
+    region: row?.region || null,
+    country: row?.country || null,
     location_name: row?.location_name || null,
     address_line1: row?.address_line1 || null,
+    lat: row?.lat ?? null,
+    lng: row?.lng ?? null,
     created_at: row?.created_at || null,
     is_advertised: !!row?.is_advertised,
     pickup_premium_enabled: !!row?.pickup_premium_enabled,
+    resolved_city: row?.resolved_city || null,
     distance_km: row?.distance_km ?? null,
   })));
 }
@@ -376,10 +439,9 @@ function compareStoresForSmartFeed(a: any, b: any, feedLocation: any, userLat: n
   return String(a?.name || "").localeCompare(String(b?.name || ""));
 }
 
-function compareStoresForNewKickIn(
+function compareStoresForNewKickInPrimary(
   a: any,
   b: any,
-  feedLocation: any,
   userLat: number | null,
   userLng: number | null
 ) {
@@ -393,20 +455,6 @@ function compareStoresForNewKickIn(
   const bCreatedAt = b?.created_at ? new Date(b.created_at).getTime() : 0;
   if (aCreatedAt !== bCreatedAt) {
     return bCreatedAt - aCreatedAt;
-  }
-
-  const aLocation = isStoreLocationMatch(a, feedLocation);
-  const bLocation = isStoreLocationMatch(b, feedLocation);
-  if (aLocation !== bLocation) {
-    return bLocation - aLocation;
-  }
-
-  if (aAd && bAd) {
-    const aPriority = typeof a.ad_priority === "number" ? a.ad_priority : 100;
-    const bPriority = typeof b.ad_priority === "number" ? b.ad_priority : 100;
-    if (aPriority !== bPriority) {
-      return aPriority - bPriority;
-    }
   }
 
   const aPremium = isStorePremiumActive(a);
@@ -442,6 +490,86 @@ function compareStoresForNewKickIn(
   }
 
   return String(a?.name || "").localeCompare(String(b?.name || ""));
+}
+
+function compareStoresForNewKickInFallback(
+  a: any,
+  b: any,
+  userLat: number | null,
+  userLng: number | null
+) {
+  const aDistance = getStoreDistanceKm(a, userLat, userLng);
+  const bDistance = getStoreDistanceKm(b, userLat, userLng);
+  if (aDistance != null && bDistance != null && aDistance !== bDistance) {
+    return aDistance - bDistance;
+  }
+  if (aDistance != null && bDistance == null) return -1;
+  if (aDistance == null && bDistance != null) return 1;
+
+  return compareStoresForNewKickInPrimary(a, b, userLat, userLng);
+}
+
+function inferFeedCity(rows: any[], userLat: number | null, userLng: number | null, requestedCity?: string | null) {
+  const normalizedRequestedCity = normalizeCanonicalCity(requestedCity);
+  if (normalizedRequestedCity) return normalizedRequestedCity;
+
+  const scored = new Map<string, number>();
+  const candidates = (rows || [])
+    .map((row) => ({
+      row,
+      city: resolveStoreCity(row),
+      distanceKm: getStoreDistanceKm(row, userLat, userLng),
+    }))
+    .filter((item) => Boolean(item.city));
+
+  if (!candidates.length) return "";
+
+  const ordered = candidates
+    .slice()
+    .sort((a, b) => {
+      const aDistance = a.distanceKm ?? Number.POSITIVE_INFINITY;
+      const bDistance = b.distanceKm ?? Number.POSITIVE_INFINITY;
+      if (aDistance !== bDistance) return aDistance - bDistance;
+
+      const aCreatedAt = a.row?.created_at ? new Date(a.row.created_at).getTime() : 0;
+      const bCreatedAt = b.row?.created_at ? new Date(b.row.created_at).getTime() : 0;
+      return bCreatedAt - aCreatedAt;
+    })
+    .slice(0, Math.min(Math.max(rows.length, 1), 40));
+
+  for (const item of ordered) {
+    const distanceKm = item.distanceKm;
+    const createdAt = item.row?.created_at ? new Date(item.row.created_at).getTime() : 0;
+    const ageDays = createdAt > 0 ? Math.max(0, (Date.now() - createdAt) / (24 * 60 * 60 * 1000)) : 30;
+
+    let score = 1;
+    if (Number.isFinite(distanceKm)) {
+      const safeDistanceKm = Number(distanceKm);
+      score += Math.max(0, 20 - Math.min(safeDistanceKm, 20)) / 20;
+    }
+    score += Math.max(0, 30 - Math.min(ageDays, 30)) / 60;
+    if (isStoreAdvertisementActive(item.row)) score += 0.2;
+    if (isStorePremiumActive(item.row)) score += 0.1;
+
+    scored.set(item.city, (scored.get(item.city) ?? 0) + score);
+  }
+
+  let bestCity = "";
+  let bestScore = 0;
+  for (const [cityKey, cityScore] of scored.entries()) {
+    if (cityScore > bestScore) {
+      bestCity = cityKey;
+      bestScore = cityScore;
+    }
+  }
+
+  return bestCity;
+}
+
+function isSameCityStore(store: any, feedCity: string) {
+  const normalizedFeedCity = normalizeCanonicalCity(feedCity);
+  if (!normalizedFeedCity) return false;
+  return resolveStoreCity(store) === normalizedFeedCity;
 }
 
 function compareStoresForFeed(a: any, b: any, sort: string, order: "asc" | "desc") {
@@ -735,7 +863,7 @@ router.get("/feed", async (req, res) => {
 });
 
 // GET /api/stores/new-kick-in
-// New Kick In stores sorted by ad first, then same city, then newest.
+// New Kick In stores sorted by local same-city relevance first, then nearest fallback.
 router.get("/new-kick-in", async (req, res) => {
   const parsed = NewKickInQuerySchema.safeParse(req.query);
   if (!parsed.success) {
@@ -801,7 +929,11 @@ router.get("/new-kick-in", async (req, res) => {
     const { data: rows, error, count: total } = result as any;
     if (error) return res.status(500).json({ error: error.message });
 
-    const rawRows = rows ?? [];
+    const rawRows = (rows ?? []).map((row: any) => ({
+      ...row,
+      resolved_city: getStoreResolvedCity(row),
+      distance_km: getStoreDistanceKm(row, lat, lng),
+    }));
     console.info("[GET /api/stores/new-kick-in] raw result", {
       count: rawRows.length,
       total: total ?? null,
@@ -824,34 +956,72 @@ router.get("/new-kick-in", async (req, res) => {
     });
     logStoreFeedRows("[GET /api/stores/new-kick-in] fresh rows", freshRows);
 
-    const freshRanked = freshRows
-      .filter((row: any) => !excludedStoreIds.has(String(row?.id || row?.store_id || "")))
-      .sort((a: any, b: any) =>
-        compareStoresForNewKickIn(a, b, { city, region, country }, lat, lng)
-      );
-    console.info("[GET /api/stores/new-kick-in] overlap exclusion", {
-      hard: true,
-      before: freshRows.length,
-      after: freshRanked.length,
-      excludedCount: freshRows.length - freshRanked.length,
+    const inferredCity = inferFeedCity(freshRows.length ? freshRows : rawRows, lat, lng, city);
+    const requestedCity = normalizeCanonicalCity(city);
+    const feedCity = requestedCity || inferredCity;
+
+    const excludedRows = rawRows.filter((row: any) =>
+      excludedStoreIds.has(String(row?.id || row?.store_id || ""))
+    );
+    const usableRows = rawRows.filter(
+      (row: any) => !excludedStoreIds.has(String(row?.id || row?.store_id || ""))
+    );
+
+    const freshUsableRows = freshRows.filter(
+      (row: any) => !excludedStoreIds.has(String(row?.id || row?.store_id || ""))
+    );
+    const olderUsableRows = usableRows.filter((row: any) => {
+      if (!row?.created_at) return true;
+      const createdAt = new Date(row.created_at);
+      return !Number.isFinite(createdAt.getTime()) || createdAt < freshnessCutoff;
     });
-    logStoreFeedRows("[GET /api/stores/new-kick-in] fresh ranked rows", freshRanked);
 
-    const fallbackRows = rawRows
-      .filter((row: any) => {
-        if (!row?.created_at) return true;
-        const createdAt = new Date(row.created_at);
-        return !Number.isFinite(createdAt.getTime()) || createdAt < freshnessCutoff;
-      })
-      .filter((row: any) => !excludedStoreIds.has(String(row?.id || row?.store_id || "")))
+    const sameCityFreshRows = feedCity
+      ? freshUsableRows.filter((row: any) => isSameCityStore(row, feedCity))
+      : [];
+    const sameCityOlderRows = feedCity
+      ? olderUsableRows.filter((row: any) => isSameCityStore(row, feedCity))
+      : [];
+
+    const sameCityRows = [...sameCityFreshRows, ...sameCityOlderRows]
+      .slice()
+      .sort((a: any, b: any) => compareStoresForNewKickInPrimary(a, b, lat, lng));
+
+    const fallbackFreshRows = freshUsableRows.filter(
+      (row: any) => !sameCityRows.some((sameCityRow) => sameCityRow.id === row.id)
+    );
+    const fallbackOlderRows = olderUsableRows.filter(
+      (row: any) => !sameCityRows.some((sameCityRow) => sameCityRow.id === row.id)
+    );
+
+    const fallbackRows = [...fallbackFreshRows, ...fallbackOlderRows]
+      .slice()
       .sort((a: any, b: any) =>
-        compareStoresForNewKickIn(a, b, { city, region, country }, lat, lng)
+        compareStoresForNewKickInFallback(a, b, lat, lng)
       );
 
-    const ranked = [...freshRanked, ...fallbackRows];
+    console.info("[GET /api/stores/new-kick-in] location resolution", {
+      requestedCity: city || null,
+      inferredCity: inferredCity || null,
+      resolvedFeedCity: feedCity || null,
+      sameCityFreshCount: sameCityFreshRows.length,
+      sameCityOlderCount: sameCityOlderRows.length,
+      fallbackFreshCount: fallbackFreshRows.length,
+      fallbackOlderCount: fallbackOlderRows.length,
+      excludedCount: excludedRows.length,
+    });
+
+    logStoreFeedRows("[GET /api/stores/new-kick-in] same city rows", sameCityRows);
+    logStoreFeedRows("[GET /api/stores/new-kick-in] fallback rows", fallbackRows);
+
+    const ranked =
+      sameCityRows.length >= limit
+        ? sameCityRows
+        : [...sameCityRows, ...fallbackRows];
+
     console.info("[GET /api/stores/new-kick-in] ranked result", {
       count: ranked.length,
-      freshCount: freshRanked.length,
+      sameCityCount: sameCityRows.length,
       fallbackCount: fallbackRows.length,
       topIds: ranked.slice(0, 8).map((row: any) => row?.id || row?.store_id || null),
       topCities: ranked.slice(0, 8).map((row: any) => row?.city || null),
