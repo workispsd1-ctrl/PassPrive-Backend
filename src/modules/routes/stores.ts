@@ -976,53 +976,58 @@ router.get("/new-kick-in", async (req, res) => {
       return !Number.isFinite(createdAt.getTime()) || createdAt < freshnessCutoff;
     });
 
-    const sameCityFreshRows = feedCity
+    const sameCityRecentRows = feedCity
       ? freshUsableRows.filter((row: any) => isSameCityStore(row, feedCity))
       : [];
     const sameCityOlderRows = feedCity
       ? olderUsableRows.filter((row: any) => isSameCityStore(row, feedCity))
       : [];
+    const outsideCityRows = usableRows.filter((row: any) =>
+      feedCity ? !isSameCityStore(row, feedCity) : true
+    );
 
-    const sameCityRows = [...sameCityFreshRows, ...sameCityOlderRows]
+    const sameCityRecentSorted = sameCityRecentRows
       .slice()
       .sort((a: any, b: any) => compareStoresForNewKickInPrimary(a, b, lat, lng));
-
-    const fallbackFreshRows = freshUsableRows.filter(
-      (row: any) => !sameCityRows.some((sameCityRow) => sameCityRow.id === row.id)
-    );
-    const fallbackOlderRows = olderUsableRows.filter(
-      (row: any) => !sameCityRows.some((sameCityRow) => sameCityRow.id === row.id)
-    );
-
-    const fallbackRows = [...fallbackFreshRows, ...fallbackOlderRows]
+    const sameCityOlderSorted = sameCityOlderRows
       .slice()
-      .sort((a: any, b: any) =>
-        compareStoresForNewKickInFallback(a, b, lat, lng)
-      );
+      .sort((a: any, b: any) => compareStoresForNewKickInPrimary(a, b, lat, lng));
+    const outsideCitySorted = outsideCityRows
+      .slice()
+      .sort((a: any, b: any) => compareStoresForNewKickInFallback(a, b, lat, lng));
+
+    const sameCityRecentCount = sameCityRecentSorted.length;
+    const sameCityOlderCount = sameCityOlderSorted.length;
+    const outsideCityFallbackCount = outsideCitySorted.length;
+
+    let ranked: any[] = sameCityRecentSorted;
+    if (ranked.length < limit) {
+      ranked = [...ranked, ...sameCityOlderSorted];
+    }
+    if (ranked.length < limit) {
+      ranked = [...ranked, ...outsideCitySorted];
+    }
 
     console.info("[GET /api/stores/new-kick-in] location resolution", {
       requestedCity: city || null,
       inferredCity: inferredCity || null,
       resolvedFeedCity: feedCity || null,
-      sameCityFreshCount: sameCityFreshRows.length,
-      sameCityOlderCount: sameCityOlderRows.length,
-      fallbackFreshCount: fallbackFreshRows.length,
-      fallbackOlderCount: fallbackOlderRows.length,
+      sameCityRecentCount,
+      sameCityOlderCount,
+      outsideCityFallbackCount,
       excludedCount: excludedRows.length,
     });
 
-    logStoreFeedRows("[GET /api/stores/new-kick-in] same city rows", sameCityRows);
-    logStoreFeedRows("[GET /api/stores/new-kick-in] fallback rows", fallbackRows);
-
-    const ranked =
-      sameCityRows.length >= limit
-        ? sameCityRows
-        : [...sameCityRows, ...fallbackRows];
+    logStoreFeedRows("[GET /api/stores/new-kick-in] same city recent rows", sameCityRecentSorted);
+    logStoreFeedRows("[GET /api/stores/new-kick-in] same city older rows", sameCityOlderSorted);
+    logStoreFeedRows("[GET /api/stores/new-kick-in] outside city rows", outsideCitySorted);
 
     console.info("[GET /api/stores/new-kick-in] ranked result", {
       count: ranked.length,
-      sameCityCount: sameCityRows.length,
-      fallbackCount: fallbackRows.length,
+      sameCityCount: sameCityRecentSorted.length + sameCityOlderSorted.length,
+      recentCount: sameCityRecentSorted.length,
+      olderCount: sameCityOlderSorted.length,
+      fallbackCount: outsideCitySorted.length,
       topIds: ranked.slice(0, 8).map((row: any) => row?.id || row?.store_id || null),
       topCities: ranked.slice(0, 8).map((row: any) => row?.city || null),
     });
