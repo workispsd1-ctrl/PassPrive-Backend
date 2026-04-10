@@ -5,6 +5,11 @@ const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_KEY =
   process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
+function getProjectRef(url: string | undefined) {
+  const match = String(url ?? "").match(/^https:\/\/([^.]+)\.supabase\.co$/i);
+  return match?.[1] ?? "unknown";
+}
+
 function supabaseAuthed(req: any) {
   const h = req.headers.authorization || "";
   const [type, token] = h.split(" ");
@@ -30,13 +35,36 @@ function normalizeAdminRole(value: any) {
 }
 
 async function requireAdmin(req: any, res: any) {
+  const authHeader = req.headers.authorization || "";
+  const [authType, authToken] = authHeader.split(" ");
+  console.log("[auth/create-user] auth check start", {
+    path: req.originalUrl,
+    method: req.method,
+    hasAuthorizationHeader: Boolean(authHeader),
+    authorizationType: authType || null,
+    bearerTokenExtracted: Boolean(authType === "Bearer" && authToken),
+    backendSupabaseUrl: SUPABASE_URL,
+    backendSupabaseProjectRef: getProjectRef(SUPABASE_URL),
+  });
+
   const sb = supabaseAuthed(req);
   if (!sb) {
+    console.warn("[auth/create-user] missing or malformed authorization header", {
+      hasAuthorizationHeader: Boolean(authHeader),
+      authorizationPreview: authHeader ? `${String(authHeader).slice(0, 24)}...` : null,
+    });
     res.status(401).json({ error: "Missing token" });
     return null;
   }
 
   const { data: { user }, error: userErr } = await sb.auth.getUser();
+  console.log("[auth/create-user] auth.getUser result", {
+    hasUser: Boolean(user),
+    userId: user?.id ?? null,
+    authErrorMessage: userErr?.message ?? null,
+    authErrorStatus: (userErr as any)?.status ?? null,
+    authErrorCode: (userErr as any)?.code ?? null,
+  });
   if (userErr || !user) {
     res.status(401).json({ error: "Invalid session" });
     return null;
