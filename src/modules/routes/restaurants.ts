@@ -1035,6 +1035,14 @@ function normalizeRestaurantOfferForResponse(offer: any) {
   return null;
 }
 
+function getOfferRowsFromBody(body: { offer?: any[] | null; offers?: any[] | null }) {
+  if (Array.isArray(body.offers)) return body.offers;
+  if (Array.isArray(body.offer)) return body.offer;
+  if (body.offers === null) return null;
+  if (body.offer === null) return null;
+  return undefined;
+}
+
 
 function mapRestaurantForResponse(restaurant: any) {
   if (!restaurant || typeof restaurant !== "object") return restaurant;
@@ -1059,10 +1067,11 @@ const CreateRestaurantSchema = z.object({
   area: z.string().trim().optional().nullable(),
   full_address: z.string().trim().optional().nullable(),
 
-  cuisines: z.array(z.string()).optional().default([]),
+ cuisines: z.array(z.string()).optional().default([]),
   cost_for_two: z.coerce.number().int().optional().nullable(),
   distance: z.coerce.number().optional().nullable(),
- offer: z.array(z.any()).optional().nullable(),
+  offer: z.array(z.any()).optional().nullable(),
+  offers: z.array(z.any()).optional().nullable(),
 
   facilities: z.array(z.string()).optional().default([]),
   highlights: z.array(z.string()).optional().default([]),
@@ -1109,7 +1118,8 @@ const UpdateRestaurantSchema = z.object({
   cuisines: z.array(z.string()).optional(),
   cost_for_two: z.coerce.number().int().nullable().optional(),
   distance: z.coerce.number().nullable().optional(),
- offer: z.array(z.any()).optional().nullable(),
+  offer: z.array(z.any()).optional().nullable(),
+  offers: z.array(z.any()).optional().nullable(),
 
   facilities: z.array(z.string()).optional(),
   highlights: z.array(z.string()).optional(),
@@ -1557,7 +1567,7 @@ router.post("/", async (req, res) => {
       ambience_images: body.ambience_images ?? [],
     });
     await replaceRestaurantOpeningHours(sb, data.id, body.opening_hours ?? {});
-    await replaceRestaurantOffers(sb, data.id, body.offer ?? []);
+    await replaceRestaurantOffers(sb, data.id, getOfferRowsFromBody(body) ?? []);
   } catch (relationError: any) {
     return res.status(500).json({ error: relationError.message });
   }
@@ -1609,6 +1619,7 @@ router.put("/:id", async (req, res) => {
   delete payload.ambience_images;
   delete payload.opening_hours;
   delete payload.offer;
+  delete payload.offers;
   delete payload.distance;
 
   // 🛡️ SECURITY: Only allow admins to change owner_user_id
@@ -1644,7 +1655,7 @@ router.put("/:id", async (req, res) => {
       ambience_images: bodyParsed.data.ambience_images,
     });
     await replaceRestaurantOpeningHours(access.sb, id, bodyParsed.data.opening_hours);
-    await replaceRestaurantOffers(access.sb, id, bodyParsed.data.offer);
+    await replaceRestaurantOffers(access.sb, id, getOfferRowsFromBody(bodyParsed.data));
   } catch (relationError: any) {
     return res.status(500).json({ error: relationError.message });
   }
