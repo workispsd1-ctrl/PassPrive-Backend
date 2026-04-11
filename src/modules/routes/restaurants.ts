@@ -522,6 +522,24 @@ function getDayKey(dayOfWeek: number) {
   return String(dayOfWeek);
 }
 
+function extractRestaurantStoragePath(value: unknown) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+
+  if (!/^https?:\/\//i.test(raw)) {
+    const normalized = raw.replace(/^\/+/, "");
+    const marker = "restaurant/";
+    const markerIndex = normalized.indexOf(marker);
+    return markerIndex >= 0 ? normalized.slice(markerIndex + marker.length) : normalized;
+  }
+
+  const objectPublicMatch = raw.match(/\/object\/public\/restaurant\/(.+)$/i);
+  if (objectPublicMatch?.[1]) return objectPublicMatch[1];
+
+  const fallbackMatch = raw.match(/\/restaurant\/(.+)$/i);
+  return fallbackMatch?.[1] ?? null;
+}
+
 function normalizeLegacyOfferTitle(item: any) {
   if (typeof item === "string") return item.trim();
   if (!item || typeof item !== "object") return "";
@@ -1661,7 +1679,7 @@ router.delete("/:id", async (req, res) => {
 
   const exists = await access.sb
     .from("restaurants")
-    .select("id,is_active")
+    .select("id,is_active,cover_image")
     .eq("id", id)
     .maybeSingle();
 
@@ -1669,45 +1687,153 @@ router.delete("/:id", async (req, res) => {
   if (!exists.data) return res.status(404).json({ error: "Restaurant not found" });
 
   if (hard) {
-    const { data, error } = await access.sb.rpc("hard_delete_restaurant_with_dependencies", {
-      p_restaurant_id: id,
+    console.log("[DELETE /restaurants/:id] hard delete start", {
+      restaurantId: id,
+      callerId: access.callerId,
+      callerRole: access.role,
     });
 
-    if (error) {
-      const msg = String(error.message || "").toLowerCase();
-      const isMissingRpc =
-        msg.includes("hard_delete_restaurant_with_dependencies") &&
-        (msg.includes("does not exist") || msg.includes("not find") || msg.includes("no function"));
+    const relationTables = [
+      "restaurant_reviews",
+      "restaurant_subscriptions",
+      "restaurant_offers",
+      "restaurant_opening_hours",
+      "restaurant_media_assets",
+      "restaurant_tags",
+    ] as const;
 
-      // Backend-only fallback when DB migration/RPC is not yet applied.
-      // This keeps admin delete working safely without hard-deleting historical records.
-      if (isMissingRpc) {
-        const { error: fallbackError } = await access.sb
-          .from("restaurants")
-          .update({ is_active: false })
-          .eq("id", id);
+    const relationCounts = await Promise.all(
+      relationTables.map(async (table) => {
+        const { count, error } = await supabase
+          .from(table)
+          .select("*", { count: "exact", head: true })
+          .eq("restaurant_id", id);
 
-        if (fallbackError) return res.status(500).json({ error: fallbackError.message });
+        if (error) {
+          throw new Error(`count ${table}: ${error.message}`);
+        }
 
-        return res.status(200).json({
-          ok: true,
-          deleted: "soft",
-          id,
-          note: "Hard-delete migration not applied. Restaurant was soft-deleted instead.",
+        return { table, count: count ?? 0 };
+      })
+    ).catch((error: any) => {
+      console.error("[DELETE /restaurants/:id] relation count failed", {
+        restaurantId: id,
+        error: error?.message ?? String(error),
+      });
+      return null;
+    });
+
+    if (!relationCounts) {
+      return res.status(500).json({ error: "Failed to inspect dependent restaurant data" });
+    }
+
+    const { data: storageRows, error: storageRowsError } = await supabase
+      .from("restaurant_media_assets")
+      .select("file_path,file_url")
+      .eq("restaurant_id", id);
+
+    if (storageRowsError) {
+      console.error("[DELETE /restaurants/:id] media lookup failed", {
+        restaurantId: id,
+        error: storageRowsError.message,
+      });
+      return res.status(500).json({ error: `Failed to inspect restaurant media: ${storageRowsError.message}` });
+    }
+
+    const storagePaths = new Set<string>();
+    for (const row of storageRows ?? []) {
+      const fromPath = extractRestaurantStoragePath((row as any).file_path);
+      const fromUrl = extractRestaurantStoragePath((row as any).file_url);
+      if (fromPath) storagePaths.add(fromPath);
+      if (fromUrl) storagePaths.add(fromUrl);
+    }
+
+    const coverPath = extractRestaurantStoragePath(exists.data.cover_image);
+    if (coverPath) storagePaths.add(coverPath);
+
+    console.log("[DELETE /restaurants/:id] related rows found", {
+      restaurantId: id,
+      relationCounts,
+      storagePathCount: storagePaths.size,
+    });
+
+    if (storagePaths.size > 0) {
+      const { error: storageDeleteError } = await supabase.storage
+        .from("restaurant")
+        .remove([...storagePaths]);
+
+      if (storageDeleteError) {
+        console.error("[DELETE /restaurants/:id] storage delete failed", {
+          restaurantId: id,
+          bucket: "restaurant",
+          paths: [...storagePaths],
+          error: storageDeleteError.message,
+        });
+        return res.status(500).json({
+          error: `Failed to delete restaurant files from storage: ${storageDeleteError.message}`,
+          failed_table: "storage.objects",
         });
       }
 
-      return res.status(500).json({ error: error.message });
-    }
-
-    if (!data?.ok) {
-      return res.status(409).json({
-        error: data?.error || "Hard delete failed",
-        code: data?.code || null,
+      console.log("[DELETE /restaurants/:id] storage delete succeeded", {
+        restaurantId: id,
+        bucket: "restaurant",
+        deletedPaths: [...storagePaths],
       });
     }
 
-    return res.json({ ok: true, deleted: "hard", id });
+    for (const table of relationTables) {
+      const { error: relationDeleteError } = await supabase
+        .from(table)
+        .delete()
+        .eq("restaurant_id", id);
+
+      if (relationDeleteError) {
+        console.error("[DELETE /restaurants/:id] relation delete failed", {
+          restaurantId: id,
+          failedTable: table,
+          error: relationDeleteError.message,
+        });
+        return res.status(500).json({
+          error: `Failed to delete ${table}: ${relationDeleteError.message}`,
+          failed_table: table,
+        });
+      }
+
+      console.log("[DELETE /restaurants/:id] relation delete succeeded", {
+        restaurantId: id,
+        table,
+      });
+    }
+
+    const { error: restaurantDeleteError } = await supabase
+      .from("restaurants")
+      .delete()
+      .eq("id", id);
+
+    if (restaurantDeleteError) {
+      console.error("[DELETE /restaurants/:id] restaurants delete failed", {
+        restaurantId: id,
+        failedTable: "restaurants",
+        error: restaurantDeleteError.message,
+      });
+      return res.status(500).json({
+        error: `Failed to delete restaurants row: ${restaurantDeleteError.message}`,
+        failed_table: "restaurants",
+      });
+    }
+
+    console.log("[DELETE /restaurants/:id] hard delete succeeded", {
+      restaurantId: id,
+      deleteOrder: ["storage.objects", ...relationTables, "restaurants"],
+    });
+
+    return res.json({
+      ok: true,
+      deleted: "hard",
+      id,
+      delete_order: ["storage.objects", ...relationTables, "restaurants"],
+    });
   }
 
   const { error } = await access.sb
