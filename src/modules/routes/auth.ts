@@ -163,7 +163,7 @@ async function createOneUser(input: CreateUserBody, sb: any) {
 
   if (!userId) return { ok: false, error: "User not returned from admin.createUser" };
 
-  const { data: user, error: insertError } = await sb
+  const { data: user, error: insertError } = await supabaseService
     .from("users")
     .insert({
       id: userId,

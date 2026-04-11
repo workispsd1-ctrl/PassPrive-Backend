@@ -1,9 +1,5 @@
-import dotenv from "dotenv";
-import path from "path";
+import "./env";
 import { ensureRedisReady, getRedisStatus } from "./modules/services/redisClient";
-
-// ✅ load backend/.env explicitly
-dotenv.config({ path: path.resolve(process.cwd(), ".env") });
 
 import app from "./app";
 
