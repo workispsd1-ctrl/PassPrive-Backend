@@ -7,6 +7,7 @@ import {
   getProductCataloguePayload,
   getServiceCataloguePayload,
 } from "./storeCatalogue";
+import { hydrateStoreRow, hydrateStoreRows, STORE_BASE_SELECT } from "../services/storeShape";
 
 const router = Router();
 
@@ -267,6 +268,19 @@ function parseStoreIdList(value: string | undefined) {
       .map((item) => item.trim())
       .filter(Boolean)
   );
+}
+
+async function getStoreIdsByTag(tag: string) {
+  const normalizedTag = String(tag || "").trim();
+  if (!normalizedTag) return [];
+
+  const { data, error } = await supabase
+    .from("store_tags")
+    .select("store_id")
+    .eq("tag_value", normalizedTag);
+
+  if (error) throw error;
+  return Array.from(new Set((data ?? []).map((row: any) => row.store_id).filter(Boolean)));
 }
 
 function logStoreFeedRows(label: string, rows: any[]) {
@@ -647,7 +661,7 @@ router.get("/", async (req, res) => {
     order,
   } = parsed.data;
 
-  let query = supabase.from("stores").select("*", { count: "exact" });
+  let query = supabase.from("stores").select(STORE_BASE_SELECT, { count: "exact" });
 
   // default: only active stores
   if (!includeInactive && !status) {
@@ -665,10 +679,16 @@ router.get("/", async (req, res) => {
     query = query.eq("is_featured", is_featured);
   }
 
-  // tag filter (array contains)
+  let tagStoreIds: string[] | null = null;
   if (tag) {
-    // tags is text[]
-    query = query.contains("tags", [tag]);
+    tagStoreIds = await getStoreIdsByTag(tag);
+    if (!tagStoreIds.length) {
+      return res.json({
+        items: [],
+        page: { limit, offset, total: 0 },
+      });
+    }
+    query = query.in("id", tagStoreIds);
   }
 
   // search (OR)
@@ -715,7 +735,7 @@ router.get("/", async (req, res) => {
 
     const { data: rows, error, count: total } = result as any;
     if (error) return res.status(500).json({ error: error.message });
-    data = rows ?? [];
+    data = await hydrateStoreRows(rows ?? []);
     count = total ?? 0;
   } catch (error: any) {
     const isTimeout = String(error?.message ?? "").includes("timed out");
@@ -778,14 +798,23 @@ router.get("/feed", async (req, res) => {
     offset,
   });
 
-  let query = supabase.from("stores").select("*", { count: "exact" });
+  let query = supabase.from("stores").select(STORE_BASE_SELECT, { count: "exact" });
 
   if (!includeInactive) {
     query = query.eq("is_active", true);
   }
   if (category) query = query.eq("category", category);
   if (subcategory) query = query.eq("subcategory", subcategory);
-  if (tag) query = query.contains("tags", [tag]);
+  if (tag) {
+    const tagStoreIds = await getStoreIdsByTag(tag);
+    if (!tagStoreIds.length) {
+      return res.json({
+        items: [],
+        page: { limit, offset, total: 0 },
+      });
+    }
+    query = query.in("id", tagStoreIds);
+  }
 
   if (search) {
     const s = search.replace(/"/g, '\\"');
@@ -815,7 +844,7 @@ router.get("/feed", async (req, res) => {
     const { data: rows, error, count: total } = result as any;
     if (error) return res.status(500).json({ error: error.message });
 
-    const rawRows = rows ?? [];
+    const rawRows = await hydrateStoreRows(rows ?? []);
     console.info("[GET /api/stores/feed] raw result", {
       count: rawRows.length,
       total: total ?? null,
@@ -892,14 +921,23 @@ router.get("/new-kick-in", async (req, res) => {
   const excludedStoreIds = parseStoreIdList(excludeStoreIds);
   const freshnessCutoff = new Date(Date.now() - freshnessDays * 24 * 60 * 60 * 1000);
 
-  let query = supabase.from("stores").select("*", { count: "exact" });
+  let query = supabase.from("stores").select(STORE_BASE_SELECT, { count: "exact" });
 
   if (!includeInactive) {
     query = query.eq("is_active", true);
   }
   if (category) query = query.eq("category", category);
   if (subcategory) query = query.eq("subcategory", subcategory);
-  if (tag) query = query.contains("tags", [tag]);
+  if (tag) {
+    const tagStoreIds = await getStoreIdsByTag(tag);
+    if (!tagStoreIds.length) {
+      return res.json({
+        items: [],
+        page: { limit, offset, total: 0 },
+      });
+    }
+    query = query.in("id", tagStoreIds);
+  }
 
   if (search) {
     const s = search.replace(/"/g, '\\"');
@@ -929,7 +967,8 @@ router.get("/new-kick-in", async (req, res) => {
     const { data: rows, error, count: total } = result as any;
     if (error) return res.status(500).json({ error: error.message });
 
-    const rawRows = (rows ?? []).map((row: any) => ({
+    const hydratedRows = await hydrateStoreRows(rows ?? []);
+    const rawRows = hydratedRows.map((row: any) => ({
       ...row,
       resolved_city: getStoreResolvedCity(row),
       distance_km: getStoreDistanceKm(row, lat, lng),
@@ -1082,12 +1121,13 @@ router.get("/:id", async (req, res) => {
   // main store
   const { data: store, error } = await supabase
     .from("stores")
-    .select("*")
+    .select(STORE_BASE_SELECT)
     .eq("id", idParsed.data)
     .maybeSingle();
 
   if (error) return res.status(500).json({ error: error.message });
   if (!store) return res.status(404).json({ error: "Store not found" });
+  const hydratedStore = await hydrateStoreRow(store);
 
   // related (optional)
   let payment: any = null;
@@ -1099,7 +1139,7 @@ router.get("/:id", async (req, res) => {
     const resp = await supabase
       .from("store_payment_details")
       .select("*")
-      .eq("store_id", store.id)
+      .eq("store_id", hydratedStore.id)
       .maybeSingle();
 
     if (resp.error) return res.status(500).json({ error: resp.error.message });
@@ -1108,7 +1148,7 @@ router.get("/:id", async (req, res) => {
 
   if (includeCatalogue) {
     try {
-      catalogue = await getProductCataloguePayload(store.id);
+      catalogue = await getProductCataloguePayload(hydratedStore.id);
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
     }
@@ -1116,18 +1156,18 @@ router.get("/:id", async (req, res) => {
 
   if (includeServices) {
     try {
-      services = await getServiceCataloguePayload(store.id);
+      services = await getServiceCataloguePayload(hydratedStore.id);
     } catch (err: any) {
       return res.status(500).json({ error: err.message });
     }
   }
 
   if (includeSlots) {
-    slots = buildStoreSlotConfig(store);
+    slots = buildStoreSlotConfig(hydratedStore);
   }
 
   return res.json({
-    item: store,
+    item: hydratedStore,
     ...(includePayment ? { payment } : {}),
     ...(includeCatalogue ? { catalogue } : {}),
     ...(includeServices ? { services } : {}),

@@ -2,6 +2,7 @@ import { Router } from "express";
 import multer from "multer";
 import { z } from "zod";
 import supabase from "../../database/supabase";
+import { hydrateStoreRows, STORE_BASE_SELECT } from "../services/storeShape";
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -263,28 +264,12 @@ export async function syncStoresHomeSectionItems(sectionId: string) {
 
   const { data: stores, error: storesError } = await supabase
     .from("stores")
-    .select(
-      [
-        "id",
-        "is_active",
-        "offers",
-        "is_advertised",
-        "ad_priority",
-        "ad_starts_at",
-        "ad_ends_at",
-        "pickup_premium_enabled",
-        "pickup_premium_started_at",
-        "pickup_premium_expires_at",
-        "sort_order",
-        "metadata",
-        "created_at",
-      ].join(",")
-    )
+    .select(STORE_BASE_SELECT)
     .eq("is_active", true);
 
   if (storesError) throw storesError;
 
-  const storeRows = (stores ?? []) as any[];
+  const storeRows = await hydrateStoreRows((stores ?? []) as any[]);
   const qualifyingStores = storeRows
     .filter((store: any) => hasUsableStoreOffers(store.offers))
     .sort(compareQualifiedStores);
@@ -560,43 +545,14 @@ router.get("/sections/:id/items", async (req, res) => {
     if (storeIds.length > 0) {
       const { data: stores, error: storesError } = await supabase
         .from("stores")
-        .select(
-          [
-            "id",
-            "name",
-            "description",
-            "city",
-            "location_name",
-            "address_line1",
-            "category",
-            "subcategory",
-            "tags",
-            "cover_image_url",
-            "cover_media_url",
-            "logo_url",
-            "offers",
-            "is_featured",
-            "is_active",
-            "pickup_premium_enabled",
-            "pickup_premium_started_at",
-            "pickup_premium_expires_at",
-            "is_advertised",
-            "ad_badge_text",
-            "ad_priority",
-            "ad_starts_at",
-            "ad_ends_at",
-            "lat",
-            "lng",
-            "sort_order",
-            "created_at",
-          ].join(",")
-        )
+        .select(STORE_BASE_SELECT)
         .in("id", storeIds);
 
       if (storesError) throw storesError;
 
+      const hydratedStores = await hydrateStoreRows((stores ?? []) as any[]);
       storesById = new Map<string, any>(
-        ((stores ?? []) as any[]).map((store: any) => [store.id, store])
+        hydratedStores.map((store: any) => [store.id, store])
       );
     }
 
@@ -815,36 +771,7 @@ router.get("/sections/:slug", async (req, res) => {
 
     const { data: stores, error: storesError } = await supabase
       .from("stores")
-      .select(
-        [
-          "id",
-          "name",
-          "description",
-          "city",
-          "location_name",
-          "address_line1",
-          "category",
-          "subcategory",
-          "tags",
-          "cover_image_url",
-          "cover_media_url",
-          "logo_url",
-          "offers",
-          "is_featured",
-          "pickup_premium_enabled",
-          "pickup_premium_started_at",
-          "pickup_premium_expires_at",
-          "is_advertised",
-          "ad_badge_text",
-          "ad_priority",
-          "ad_starts_at",
-          "ad_ends_at",
-          "lat",
-          "lng",
-          "sort_order",
-          "created_at",
-        ].join(",")
-      )
+      .select(STORE_BASE_SELECT)
       .in("id", storeIds)
       .eq("is_active", true);
 
@@ -852,8 +779,9 @@ router.get("/sections/:slug", async (req, res) => {
       return res.status(500).json({ error: storesError.message });
     }
 
+    const hydratedStores = await hydrateStoreRows((stores ?? []) as any[]);
     const storesById = new Map<string, any>(
-      ((stores ?? []) as any[]).map((store: any) => [store.id, store])
+      hydratedStores.map((store: any) => [store.id, store])
     );
 
     const joinedItems = (sectionItems ?? [])

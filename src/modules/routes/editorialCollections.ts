@@ -1,6 +1,7 @@
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import supabase from "../../database/supabase";
+import { hydrateStoreRows, STORE_BASE_SELECT } from "../services/storeShape";
 
 const router = Router();
 
@@ -147,7 +148,7 @@ async function getItemsByCollectionId(collectionId: string, onlyActive = false) 
   let restaurantsById = new Map<string, unknown>();
 
   if (storeIds.length > 0) {
-    let storeQuery = supabase.from("stores").select("*").in("id", storeIds);
+    let storeQuery = supabase.from("stores").select(STORE_BASE_SELECT).in("id", storeIds);
     if (onlyActive) {
       storeQuery = storeQuery.eq("is_active", true);
     }
@@ -155,7 +156,8 @@ async function getItemsByCollectionId(collectionId: string, onlyActive = false) 
     const { data: stores, error: storesError } = await storeQuery;
     if (storesError) throw storesError;
 
-    storesById = new Map((stores ?? []).map((store) => [store.id, store]));
+    const hydratedStores = await hydrateStoreRows(stores ?? []);
+    storesById = new Map((hydratedStores ?? []).map((store) => [store.id, store]));
   }
 
   if (restaurantIds.length > 0) {

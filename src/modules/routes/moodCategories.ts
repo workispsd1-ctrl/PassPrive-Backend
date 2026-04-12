@@ -11,6 +11,12 @@ const upload = multer({
 const BUCKET_NAME = "mood-category-images";
 const TABLE_NAME = "restaurant_mood_categories";
 
+const normalizeText = (value: any) => {
+  if (value === undefined || value === null) return undefined;
+  const text = String(value).trim();
+  return text.length ? text : undefined;
+};
+
 const parseBoolean = (value: any) => {
   if (value === undefined) return undefined;
   if (typeof value === "boolean") return value;
@@ -31,6 +37,8 @@ const parseMetadata = (value: any) => {
   }
   return {};
 };
+
+const logPrefix = "[restaurant-mood-categories]";
 
 const uploadImage = async (file: Express.Multer.File) => {
   const fileExt = file.originalname.split(".").pop();
@@ -56,6 +64,8 @@ const uploadImage = async (file: Express.Multer.File) => {
 
 router.get("/", async (req: Request, res: Response) => {
   try {
+    console.log(`${logPrefix} list start`);
+
     const { data, error } = await supabase
       .from(TABLE_NAME)
       .select("*")
@@ -64,8 +74,12 @@ router.get("/", async (req: Request, res: Response) => {
 
     if (error) throw error;
 
+    console.log(`${logPrefix} list success`, { count: data?.length ?? 0 });
     return res.json({ categories: data || [] });
   } catch (err: any) {
+    console.error(`${logPrefix} list failed`, {
+      message: err?.message ?? String(err),
+    });
     return res.status(500).json({ error: err.message });
   }
 });
@@ -73,6 +87,7 @@ router.get("/", async (req: Request, res: Response) => {
 router.get("/:id", async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    console.log(`${logPrefix} get start`, { id });
 
     const { data, error } = await supabase
       .from(TABLE_NAME)
@@ -81,11 +96,17 @@ router.get("/:id", async (req: Request, res: Response) => {
       .single();
 
     if (error) {
+      console.warn(`${logPrefix} get not found`, { id, message: error.message });
       return res.status(404).json({ error: "Category not found" });
     }
 
+    console.log(`${logPrefix} get success`, { id });
     return res.json({ category: data });
   } catch (err: any) {
+    console.error(`${logPrefix} get failed`, {
+      id: req.params.id,
+      message: err?.message ?? String(err),
+    });
     return res.status(500).json({ error: err.message });
   }
 });
@@ -94,14 +115,30 @@ router.post("/", upload.single("image"), async (req: Request, res: Response) => 
   try {
     const file = req.file;
     const body = req.body;
+    const key = normalizeText(body.key);
+    const slug = normalizeText(body.slug);
+    const title = normalizeText(body.title);
+
+    console.log(`${logPrefix} create start`, {
+      hasFile: Boolean(file),
+      key,
+      slug,
+      title,
+    });
+
+    if (!key || !slug || !title) {
+      return res.status(400).json({
+        error: "key, slug, and title are required",
+      });
+    }
 
     const payload: any = {
-      key: body.key,
-      slug: body.slug,
-      title: body.title,
-      subtitle: body.subtitle || null,
-      description: body.description || null,
-      badge_text: body.badge_text || null,
+      key,
+      slug,
+      title,
+      subtitle: normalizeText(body.subtitle) ?? null,
+      description: normalizeText(body.description) ?? null,
+      badge_text: normalizeText(body.badge_text) ?? null,
       selection_type: body.selection_type || "MULTI",
       sort_order: parseNumber(body.sort_order) ?? 100,
       is_active: parseBoolean(body.is_active) ?? true,
@@ -111,8 +148,8 @@ router.post("/", upload.single("image"), async (req: Request, res: Response) => 
     if (file) {
       Object.assign(payload, await uploadImage(file));
     } else {
-      payload.image_url = body.image_url || null;
-      payload.image_path = body.image_path || null;
+      payload.image_url = normalizeText(body.image_url) ?? null;
+      payload.image_path = normalizeText(body.image_path) ?? null;
     }
 
     const { data, error } = await supabase
@@ -123,11 +160,18 @@ router.post("/", upload.single("image"), async (req: Request, res: Response) => 
 
     if (error) throw error;
 
-    return res.json({
+    console.log(`${logPrefix} create success`, { id: data?.id ?? null });
+    return res.status(201).json({
       message: "Category created successfully",
       category: data,
     });
   } catch (err: any) {
+    console.error(`${logPrefix} create failed`, {
+      message: err?.message ?? String(err),
+      details: err?.details ?? null,
+      hint: err?.hint ?? null,
+      code: err?.code ?? null,
+    });
     return res.status(500).json({ error: err.message });
   }
 });
@@ -137,15 +181,16 @@ router.put("/:id", upload.single("image"), async (req: Request, res: Response) =
     const { id } = req.params;
     const file = req.file;
     const body = req.body;
+    console.log(`${logPrefix} update start`, { id, hasFile: Boolean(file) });
 
     const payload: any = {};
 
-    if (body.key !== undefined) payload.key = body.key;
-    if (body.slug !== undefined) payload.slug = body.slug;
-    if (body.title !== undefined) payload.title = body.title;
-    if (body.subtitle !== undefined) payload.subtitle = body.subtitle || null;
-    if (body.description !== undefined) payload.description = body.description || null;
-    if (body.badge_text !== undefined) payload.badge_text = body.badge_text || null;
+    if (body.key !== undefined) payload.key = normalizeText(body.key) ?? null;
+    if (body.slug !== undefined) payload.slug = normalizeText(body.slug) ?? null;
+    if (body.title !== undefined) payload.title = normalizeText(body.title) ?? null;
+    if (body.subtitle !== undefined) payload.subtitle = normalizeText(body.subtitle) ?? null;
+    if (body.description !== undefined) payload.description = normalizeText(body.description) ?? null;
+    if (body.badge_text !== undefined) payload.badge_text = normalizeText(body.badge_text) ?? null;
     if (body.selection_type !== undefined) payload.selection_type = body.selection_type;
 
     const parsedSortOrder = parseNumber(body.sort_order);
@@ -168,14 +213,21 @@ router.put("/:id", upload.single("image"), async (req: Request, res: Response) =
       Object.assign(payload, await uploadImage(file));
 
       if (existingCategory?.image_path) {
-        await supabase.storage
+        const { error: removeError } = await supabase.storage
           .from(BUCKET_NAME)
-          .remove([existingCategory.image_path])
-          .catch(() => undefined);
+          .remove([existingCategory.image_path]);
+
+        if (removeError) {
+          console.warn(`${logPrefix} update old image cleanup failed`, {
+            id,
+            image_path: existingCategory.image_path,
+            message: removeError.message,
+          });
+        }
       }
     } else {
-      if (body.image_url !== undefined) payload.image_url = body.image_url || null;
-      if (body.image_path !== undefined) payload.image_path = body.image_path || null;
+      if (body.image_url !== undefined) payload.image_url = normalizeText(body.image_url) ?? null;
+      if (body.image_path !== undefined) payload.image_path = normalizeText(body.image_path) ?? null;
     }
 
     if (Object.keys(payload).length === 0) {
@@ -190,14 +242,23 @@ router.put("/:id", upload.single("image"), async (req: Request, res: Response) =
       .single();
 
     if (error) {
+      console.warn(`${logPrefix} update not found`, { id, message: error.message });
       return res.status(404).json({ error: "Category not found" });
     }
 
+    console.log(`${logPrefix} update success`, { id });
     return res.json({
       message: "Category updated successfully",
       category: data,
     });
   } catch (err: any) {
+    console.error(`${logPrefix} update failed`, {
+      id: req.params.id,
+      message: err?.message ?? String(err),
+      details: err?.details ?? null,
+      hint: err?.hint ?? null,
+      code: err?.code ?? null,
+    });
     return res.status(500).json({ error: err.message });
   }
 });
@@ -205,6 +266,7 @@ router.put("/:id", upload.single("image"), async (req: Request, res: Response) =
 router.delete("/:id", async (req: Request, res: Response) => {
   try {
     const { id } = req.params;
+    console.log(`${logPrefix} delete start`, { id });
 
     const { data: existingCategory } = await supabase
       .from(TABLE_NAME)
@@ -213,10 +275,17 @@ router.delete("/:id", async (req: Request, res: Response) => {
       .single();
 
     if (existingCategory?.image_path) {
-      await supabase.storage
+      const { error: removeError } = await supabase.storage
         .from(BUCKET_NAME)
-        .remove([existingCategory.image_path])
-        .catch(() => undefined);
+        .remove([existingCategory.image_path]);
+
+      if (removeError) {
+        console.warn(`${logPrefix} delete image cleanup failed`, {
+          id,
+          image_path: existingCategory.image_path,
+          message: removeError.message,
+        });
+      }
     }
 
     const { error } = await supabase
@@ -226,8 +295,16 @@ router.delete("/:id", async (req: Request, res: Response) => {
 
     if (error) throw error;
 
+    console.log(`${logPrefix} delete success`, { id });
     return res.json({ message: "Category deleted successfully" });
   } catch (err: any) {
+    console.error(`${logPrefix} delete failed`, {
+      id: req.params.id,
+      message: err?.message ?? String(err),
+      details: err?.details ?? null,
+      hint: err?.hint ?? null,
+      code: err?.code ?? null,
+    });
     return res.status(500).json({ error: err.message });
   }
 });
