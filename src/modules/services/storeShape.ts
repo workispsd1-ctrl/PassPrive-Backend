@@ -58,6 +58,31 @@ export const STORE_BASE_SELECT = [
   "updated_at",
 ].join(",");
 
+export const STORE_PREVIEW_SELECT = [
+  "id",
+  "name",
+  "slug",
+  "description",
+  "category",
+  "subcategory",
+  "location_name",
+  "address_line1",
+  "city",
+  "lat",
+  "lng",
+  "logo_url",
+  "cover_image",
+  "is_featured",
+  "is_active",
+  "sort_order",
+  "is_advertised",
+  "ad_priority",
+  "ad_starts_at",
+  "ad_ends_at",
+  "ad_badge_text",
+  "created_at",
+].join(",");
+
 function sortByOrderAndCreatedAt<T extends { sort_order?: number | null; created_at?: string | null }>(
   rows: T[]
 ) {
@@ -288,3 +313,81 @@ export async function hydrateStoreRow(baseStore: any) {
   return rows[0] ?? null;
 }
 
+export async function hydrateStorePreviewRows(baseStores: any[]) {
+  const stores = Array.isArray(baseStores) ? baseStores : [];
+  const storeIds = Array.from(new Set(stores.map((store) => store?.id).filter(Boolean)));
+  if (!storeIds.length) return stores;
+
+  const [tagsResult, mediaResult, offersResult, subscriptionsResult, reviewsResult] =
+    await Promise.all([
+      supabase
+        .from("store_tags")
+        .select("store_id,tag_type,tag_value,sort_order,created_at")
+        .in("store_id", storeIds)
+        .in("tag_type", ["tag", "facility", "highlight", "worth_visit", "mood"]),
+      supabase
+        .from("store_media_assets")
+        .select("store_id,asset_type,file_url,sort_order,created_at,is_active")
+        .in("store_id", storeIds)
+        .eq("is_active", true)
+        .in("asset_type", ["logo", "cover_image", "cover_video", "gallery"]),
+      supabase
+        .from("store_offers")
+        .select("id,store_id,title,description,badge_text,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata,created_at")
+        .in("store_id", storeIds),
+      supabase
+        .from("store_subscriptions")
+        .select("store_id,plan_code,status,pickup_premium_enabled,starts_at,expires_at,created_at")
+        .in("store_id", storeIds),
+      supabase
+        .from("store_reviews")
+        .select("store_id,rating,food_rating,service_rating,ambience_rating,drinks_rating,crowd_rating,is_approved")
+        .in("store_id", storeIds)
+        .eq("is_approved", true),
+    ]);
+
+  for (const result of [tagsResult, mediaResult, offersResult, subscriptionsResult, reviewsResult]) {
+    if (result.error) throw result.error;
+  }
+
+  const tagsByStoreId = toMapByStoreId(tagsResult.data ?? []);
+  const mediaByStoreId = toMapByStoreId(mediaResult.data ?? []);
+  const offersByStoreId = toMapByStoreId(offersResult.data ?? []);
+  const subscriptionsByStoreId = toMapByStoreId(subscriptionsResult.data ?? []);
+  const reviewsByStoreId = toMapByStoreId(reviewsResult.data ?? []);
+
+  return stores.map((store) => {
+    const tagRows = sortByOrderAndCreatedAt(tagsByStoreId.get(store.id) ?? []);
+    const mediaRows = sortByOrderAndCreatedAt(mediaByStoreId.get(store.id) ?? []).filter(
+      (row) => row?.is_active !== false
+    );
+    const subscription = getActiveSubscription(subscriptionsByStoreId.get(store.id) ?? []);
+    const ratingSummary = buildReviewAggregate(reviewsByStoreId.get(store.id) ?? []);
+    const offers = buildOfferPayload(offersByStoreId.get(store.id) ?? []);
+
+    const tags = tagRows.filter((row) => row.tag_type === "tag").map((row) => row.tag_value);
+    const coverImageAsset = mediaRows.find((row) => row.asset_type === "cover_image");
+    const coverVideoAsset = mediaRows.find((row) => row.asset_type === "cover_video");
+    const logoAsset = mediaRows.find((row) => row.asset_type === "logo");
+
+    return {
+      ...store,
+      tags,
+      cover_image_url: store.cover_image ?? coverImageAsset?.file_url ?? null,
+      cover_media_url: coverVideoAsset?.file_url ?? coverImageAsset?.file_url ?? store.cover_image ?? null,
+      logo_url: store.logo_url ?? logoAsset?.file_url ?? null,
+      offers,
+      offer: offers[0] ?? null,
+      pickup_premium_enabled: subscription?.pickup_premium_enabled ?? false,
+      pickup_premium_plan: subscription?.plan_code ?? null,
+      pickup_premium_started_at: subscription?.starts_at ?? null,
+      pickup_premium_expires_at: subscription?.expires_at ?? null,
+      metadata: {
+        ...(store.metadata ?? {}),
+        rating: ratingSummary.rating,
+        total_ratings: ratingSummary.total_ratings,
+      },
+      ...ratingSummary,
+    };
+  });
+}

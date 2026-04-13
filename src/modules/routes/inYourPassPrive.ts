@@ -1,6 +1,10 @@
 import { Router, Request, Response } from "express";
 import { z } from "zod";
 import supabase from "../../database/supabase";
+import {
+  hydrateRestaurantPreviewRows,
+  RESTAURANT_PREVIEW_SELECT,
+} from "../services/restaurantShape";
 
 const router = Router();
 
@@ -112,7 +116,7 @@ async function getNestedCards(options?: {
   if (restaurantIds.length > 0) {
     let restaurantsQuery = supabase
       .from("restaurants")
-      .select("*")
+      .select(RESTAURANT_PREVIEW_SELECT)
       .in("id", restaurantIds);
 
     if (onlyActive) {
@@ -122,8 +126,9 @@ async function getNestedCards(options?: {
     const { data: restaurants, error: restaurantsError } = await restaurantsQuery;
     if (restaurantsError) throw restaurantsError;
 
+    const hydratedRestaurants = await hydrateRestaurantPreviewRows(restaurants ?? []);
     restaurantsById = new Map(
-      (restaurants ?? []).map((restaurant) => [restaurant.id, restaurant])
+      (hydratedRestaurants ?? []).map((restaurant) => [restaurant.id, restaurant])
     );
   }
 

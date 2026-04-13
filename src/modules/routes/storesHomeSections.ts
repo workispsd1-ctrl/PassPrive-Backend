@@ -2,7 +2,7 @@ import { Router } from "express";
 import multer from "multer";
 import { z } from "zod";
 import supabase from "../../database/supabase";
-import { hydrateStoreRows, STORE_BASE_SELECT } from "../services/storeShape";
+import { hydrateStorePreviewRows, STORE_PREVIEW_SELECT } from "../services/storeShape";
 
 const router = Router();
 const upload = multer({ storage: multer.memoryStorage() });
@@ -264,12 +264,12 @@ export async function syncStoresHomeSectionItems(sectionId: string) {
 
   const { data: stores, error: storesError } = await supabase
     .from("stores")
-    .select(STORE_BASE_SELECT)
+    .select(STORE_PREVIEW_SELECT)
     .eq("is_active", true);
 
   if (storesError) throw storesError;
 
-  const storeRows = await hydrateStoreRows((stores ?? []) as any[]);
+  const storeRows = await hydrateStorePreviewRows((stores ?? []) as any[]);
   const qualifyingStores = storeRows
     .filter((store: any) => hasUsableStoreOffers(store.offers))
     .sort(compareQualifiedStores);
@@ -545,12 +545,12 @@ router.get("/sections/:id/items", async (req, res) => {
     if (storeIds.length > 0) {
       const { data: stores, error: storesError } = await supabase
         .from("stores")
-        .select(STORE_BASE_SELECT)
+        .select(STORE_PREVIEW_SELECT)
         .in("id", storeIds);
 
       if (storesError) throw storesError;
 
-      const hydratedStores = await hydrateStoreRows((stores ?? []) as any[]);
+      const hydratedStores = await hydrateStorePreviewRows((stores ?? []) as any[]);
       storesById = new Map<string, any>(
         hydratedStores.map((store: any) => [store.id, store])
       );
@@ -771,7 +771,7 @@ router.get("/sections/:slug", async (req, res) => {
 
     const { data: stores, error: storesError } = await supabase
       .from("stores")
-      .select(STORE_BASE_SELECT)
+      .select(STORE_PREVIEW_SELECT)
       .in("id", storeIds)
       .eq("is_active", true);
 
@@ -779,7 +779,7 @@ router.get("/sections/:slug", async (req, res) => {
       return res.status(500).json({ error: storesError.message });
     }
 
-    const hydratedStores = await hydrateStoreRows((stores ?? []) as any[]);
+    const hydratedStores = await hydrateStorePreviewRows((stores ?? []) as any[]);
     const storesById = new Map<string, any>(
       hydratedStores.map((store: any) => [store.id, store])
     );
