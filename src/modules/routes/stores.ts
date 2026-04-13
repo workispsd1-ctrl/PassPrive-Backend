@@ -7,13 +7,19 @@ import {
   getProductCataloguePayload,
   getServiceCataloguePayload,
 } from "./storeCatalogue";
-import { hydrateStoreRow, hydrateStoreRows, STORE_BASE_SELECT } from "../services/storeShape";
+import { fetchHydratedStoreRowById, hydrateStoreRow, hydrateStoreRows, STORE_BASE_SELECT } from "../services/storeShape";
 
 const router = Router();
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
 const LIST_QUERY_TIMEOUT_MS = Number(process.env.LIST_QUERY_TIMEOUT_MS ?? 5000);
+const STORE_ROUTE_DEBUG = String(process.env.STORE_ROUTE_DEBUG ?? "false").trim().toLowerCase() === "true";
+const STORE_STORAGE_BUCKET = "stores";
+
+const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+  auth: { persistSession: false, autoRefreshToken: false },
+});
 
 function supabaseAuthed(req: any) {
   const h = req.headers.authorization || "";
@@ -105,7 +111,7 @@ const DeleteQuerySchema = z.object({
   hard: z
     .string()
     .optional()
-    .transform((v) => v === "true"),
+    .transform((v) => v === undefined ? true : v !== "false"),
 });
 
 const FeedQuerySchema = z.object({
@@ -181,6 +187,720 @@ const NewKickInQuerySchema = z.object({
     .refine((n) => Number.isFinite(n) && n > 0 && n <= 90, "freshnessDays 1-90"),
   excludeStoreIds: z.string().optional(),
 });
+
+const NullableTrimmedString = z.string().trim().nullable().optional();
+const NullableNumber = z.coerce.number().nullable().optional();
+const NullableInteger = z.coerce.number().int().nullable().optional();
+
+const OpeningHoursValueSchema = z.object({
+  open: z.string().optional().default(""),
+  close: z.string().optional().default(""),
+  is_closed: z.boolean().optional(),
+});
+
+const OpeningHoursSchema = z.record(z.string(), OpeningHoursValueSchema);
+
+const LegacyHoursRowSchema = z.object({
+  day_of_week: z.coerce.number().int().min(0).max(6),
+  open_time: z.string().nullable().optional(),
+  close_time: z.string().nullable().optional(),
+  is_closed: z.boolean().optional(),
+});
+
+function normalizeBookingTerms(value: unknown, preserveUndefined = false) {
+  if (value === undefined) return preserveUndefined ? undefined : [];
+  if (value === null) return null;
+
+  const terms = Array.isArray(value) ? value : [value];
+  return terms
+    .filter((item): item is string => typeof item === "string")
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+}
+
+const CreateBookingTermsSchema = z.preprocess(
+  (value) => normalizeBookingTerms(value, false),
+  z.array(z.string()).nullable()
+);
+
+const UpdateBookingTermsSchema = z.preprocess(
+  (value) => normalizeBookingTerms(value, true),
+  z.union([z.array(z.string()), z.null(), z.undefined()])
+);
+
+const StoreSubscriptionSchema = z
+  .object({
+    id: z.string().uuid().optional(),
+    plan_code: NullableTrimmedString,
+    status: NullableTrimmedString,
+    pickup_premium_enabled: z.boolean().optional(),
+    starts_at: z.string().datetime().nullable().optional(),
+    expires_at: z.string().datetime().nullable().optional(),
+    metadata: z.record(z.string(), z.any()).optional(),
+  })
+  .passthrough();
+
+const UpdateStoreSchema = z
+  .object({
+    name: z.string().trim().min(1).optional(),
+    slug: z.string().trim().min(1).optional(),
+    description: NullableTrimmedString,
+    category: NullableTrimmedString,
+    subcategory: NullableTrimmedString,
+    phone: NullableTrimmedString,
+    whatsapp: NullableTrimmedString,
+    email: NullableTrimmedString,
+    website: NullableTrimmedString,
+    location_name: NullableTrimmedString,
+    address_line1: NullableTrimmedString,
+    address_line2: NullableTrimmedString,
+    city: NullableTrimmedString,
+    region: NullableTrimmedString,
+    country: NullableTrimmedString,
+    postal_code: NullableTrimmedString,
+    full_address: NullableTrimmedString,
+    lat: NullableNumber,
+    lng: NullableNumber,
+    google_place_id: NullableTrimmedString,
+    logo_url: NullableTrimmedString,
+    cover_image: NullableTrimmedString,
+    owner_user_id: z.string().uuid().nullable().optional(),
+    created_by: z.string().uuid().nullable().optional(),
+    is_featured: z.boolean().optional(),
+    is_active: z.boolean().optional(),
+    is_top_brand: z.boolean().optional(),
+    sort_order: NullableInteger,
+    store_type: NullableTrimmedString,
+    booking_enabled: z.boolean().optional(),
+    avg_duration_minutes: NullableInteger,
+    max_bookings_per_slot: NullableInteger,
+    advance_booking_days: NullableInteger,
+    modification_available: z.boolean().optional(),
+    modification_cutoff_minutes: NullableInteger,
+    cancellation_available: z.boolean().optional(),
+    cancellation_cutoff_minutes: NullableInteger,
+    cover_charge_enabled: z.boolean().optional(),
+    cover_charge_amount: NullableNumber,
+    booking_terms: UpdateBookingTermsSchema,
+    pickup_basic_enabled: z.boolean().optional(),
+    pickup_mode: NullableTrimmedString,
+    supports_time_slots: z.boolean().optional(),
+    slot_duration_minutes: NullableInteger,
+    slot_buffer_minutes: NullableInteger,
+    slot_advance_days: NullableInteger,
+    slot_max_per_window: NullableInteger,
+    is_advertised: z.boolean().optional(),
+    ad_priority: NullableInteger,
+    ad_starts_at: z.string().datetime().nullable().optional(),
+    ad_ends_at: z.string().datetime().nullable().optional(),
+    ad_badge_text: NullableTrimmedString,
+    tags: z.array(z.string()).optional(),
+    facilities: z.array(z.string()).optional(),
+    highlights: z.array(z.string()).optional(),
+    worth_visit: z.array(z.string()).optional(),
+    mood_tags: z.array(z.string()).optional(),
+    social_links: z.record(z.string(), z.string()).optional(),
+    instagram: NullableTrimmedString,
+    facebook: NullableTrimmedString,
+    tiktok: NullableTrimmedString,
+    maps: NullableTrimmedString,
+    opening_hours: OpeningHoursSchema.nullable().optional(),
+    hours: z.array(LegacyHoursRowSchema).nullable().optional(),
+    offers: z.array(z.any()).nullable().optional(),
+    offer: z.array(z.any()).nullable().optional(),
+    subscription: StoreSubscriptionSchema.nullable().optional(),
+    gallery_urls: z.array(z.string()).optional(),
+    cover_video_url: NullableTrimmedString,
+  })
+  .passthrough();
+
+function normalizeStoreStoragePath(value: unknown) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+
+  if (!/^https?:\/\//i.test(raw)) {
+    const normalized = raw.replace(/^\/+/, "");
+    const marker = "store/";
+    const markerIndex = normalized.indexOf(marker);
+    return markerIndex >= 0 ? normalized.slice(markerIndex + marker.length) : normalized;
+  }
+
+  const objectPublicMatch = raw.match(new RegExp(`/object/public/${STORE_STORAGE_BUCKET}/(.+)$`, "i"));
+  if (objectPublicMatch?.[1]) return objectPublicMatch[1];
+
+  const fallbackMatch = raw.match(new RegExp(`/${STORE_STORAGE_BUCKET}/(.+)$`, "i"));
+  return fallbackMatch?.[1] ?? null;
+}
+
+function normalizeMediaReferenceForStorage(value: unknown) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+
+  const filePath = normalizeStoreStoragePath(raw);
+  if (/^https?:\/\//i.test(raw)) {
+    return { file_url: raw, file_path: filePath };
+  }
+
+  const { data } = supabase.storage.from(STORE_STORAGE_BUCKET).getPublicUrl(filePath ?? raw);
+  return {
+    file_url: data?.publicUrl ?? raw,
+    file_path: filePath ?? raw,
+  };
+}
+
+function normalizeLegacyOfferTitle(item: any) {
+  if (typeof item === "string") return item.trim();
+  if (!item || typeof item !== "object") return "";
+  return String(item.title ?? item.text ?? item.label ?? item.name ?? "").trim();
+}
+
+function normalizeOfferNumericValue(value: any) {
+  if (value === "" || value === undefined || value === null) return null;
+  const amount = Number(value);
+  if (!Number.isFinite(amount) || amount < 0) return null;
+  return amount;
+}
+
+function normalizeStoreOfferForStorage(item: any) {
+  if (item === null || item === undefined) return null;
+
+  if (typeof item === "string") {
+    const title = item.trim();
+    if (!title) return null;
+
+    return {
+      title,
+      description: null,
+      badge_text: null,
+      offer_type: "custom",
+      discount_value: null,
+      min_spend: null,
+      start_at: null,
+      end_at: null,
+      is_active: true,
+      metadata: {},
+    };
+  }
+
+  if (typeof item === "object" && !Array.isArray(item)) {
+    const title = normalizeLegacyOfferTitle(item);
+    if (!title) return null;
+
+    const normalizedType = String(item.offer_type ?? item.type ?? "custom").trim().toLowerCase();
+    const offerType = ["flat", "percentage", "bogo", "free_item", "cover_discount", "custom"].includes(
+      normalizedType
+    )
+      ? normalizedType
+      : "custom";
+
+    const {
+      id: _id,
+      title: _title,
+      text: _text,
+      label: _label,
+      name: _name,
+      offer_type: _offerType,
+      type: _type,
+      ...rest
+    } = item;
+
+    return {
+      title,
+      description: typeof item.description === "string" ? item.description : null,
+      badge_text: typeof item.badge_text === "string" ? item.badge_text : null,
+      offer_type: offerType,
+      discount_value: normalizeOfferNumericValue(item.discount_value),
+      min_spend: normalizeOfferNumericValue(item.minimum_bill_amount ?? item.min_spend),
+      start_at: item.start_at ?? null,
+      end_at: item.end_at ?? null,
+      is_active: item.is_active !== false,
+      metadata: rest,
+    };
+  }
+
+  return null;
+}
+
+function getStoreOfferRowsFromBody(body: { offer?: any[] | null; offers?: any[] | null }) {
+  if (Array.isArray(body.offers)) return body.offers;
+  if (Array.isArray(body.offer)) return body.offer;
+  if (body.offers === null) return null;
+  if (body.offer === null) return null;
+  return undefined;
+}
+
+function normalizeOpeningHoursForStorage(
+  openingHours: Record<string, { open?: string; close?: string; is_closed?: boolean }> | null | undefined,
+  legacyHours: Array<{ day_of_week: number; open_time?: string | null; close_time?: string | null; is_closed?: boolean }> | null | undefined
+) {
+  if (openingHours === undefined && legacyHours === undefined) return undefined;
+  if (openingHours === null || legacyHours === null) return [];
+
+  if (openingHours) {
+    return Object.entries(openingHours)
+      .map(([day, value]) => {
+        const dayOfWeek = Number(day);
+        if (!Number.isInteger(dayOfWeek) || dayOfWeek < 0 || dayOfWeek > 6) return null;
+        const open = typeof value?.open === "string" ? value.open : "";
+        const close = typeof value?.close === "string" ? value.close : "";
+        const isClosed = value?.is_closed === true || !open || !close;
+        return {
+          day_of_week: dayOfWeek,
+          open_time: isClosed ? null : open,
+          close_time: isClosed ? null : close,
+          is_closed: isClosed,
+        };
+      })
+      .filter(Boolean) as Array<{
+      day_of_week: number;
+      open_time: string | null;
+      close_time: string | null;
+      is_closed: boolean;
+    }>;
+  }
+
+  return (legacyHours ?? []).map((row) => {
+    const isClosed = row.is_closed === true || !row.open_time || !row.close_time;
+    return {
+      day_of_week: row.day_of_week,
+      open_time: isClosed ? null : row.open_time ?? null,
+      close_time: isClosed ? null : row.close_time ?? null,
+      is_closed: isClosed,
+    };
+  });
+}
+
+function mergeSocialLinks(body: z.infer<typeof UpdateStoreSchema>) {
+  const socialLinks: Record<string, string> = {};
+
+  for (const [key, value] of Object.entries(body.social_links ?? {})) {
+    if (!String(key).trim() || !String(value ?? "").trim()) continue;
+    socialLinks[String(key).trim()] = String(value).trim();
+  }
+
+  const aliases = {
+    instagram: body.instagram,
+    facebook: body.facebook,
+    tiktok: body.tiktok,
+    maps: body.maps,
+  };
+
+  for (const [platform, value] of Object.entries(aliases)) {
+    if (value === undefined) continue;
+    if (value === null || value.trim() === "") {
+      delete socialLinks[platform];
+      continue;
+    }
+    socialLinks[platform] = value.trim();
+  }
+
+  return socialLinks;
+}
+
+async function replaceStoreTags(
+  sb: any,
+  storeId: string,
+  updates: Partial<Record<"tags" | "facilities" | "highlights" | "worth_visit" | "mood_tags", string[]>>
+) {
+  const mappings = [
+    { bodyKey: "tags" as const, tagType: "tag" },
+    { bodyKey: "facilities" as const, tagType: "facility" },
+    { bodyKey: "highlights" as const, tagType: "highlight" },
+    { bodyKey: "worth_visit" as const, tagType: "worth_visit" },
+    { bodyKey: "mood_tags" as const, tagType: "mood" },
+  ];
+
+  const providedMappings = mappings.filter(({ bodyKey }) => updates[bodyKey] !== undefined);
+  if (!providedMappings.length) return;
+
+  const { error: deleteError } = await sb
+    .from("store_tags")
+    .delete()
+    .eq("store_id", storeId)
+    .in("tag_type", providedMappings.map(({ tagType }) => tagType));
+  if (deleteError) throw deleteError;
+
+  const rows = providedMappings.flatMap(({ bodyKey, tagType }) =>
+    (updates[bodyKey] ?? [])
+      .map((value, index) => ({
+        store_id: storeId,
+        tag_type: tagType,
+        tag_value: String(value).trim(),
+        sort_order: index,
+      }))
+      .filter((row) => row.tag_value.length > 0)
+  );
+
+  if (!rows.length) return;
+
+  const { error: insertError } = await sb.from("store_tags").insert(rows);
+  if (insertError) throw insertError;
+}
+
+async function replaceStoreSocialLinks(sb: any, storeId: string, socialLinks: Record<string, string> | undefined) {
+  if (socialLinks === undefined) return;
+
+  const { error: deleteError } = await sb
+    .from("store_social_links")
+    .delete()
+    .eq("store_id", storeId);
+  if (deleteError) throw deleteError;
+
+  const rows = Object.entries(socialLinks)
+    .map(([platform, url], index) => ({
+      store_id: storeId,
+      platform,
+      url,
+      sort_order: index,
+    }))
+    .filter((row) => row.platform.trim() && row.url.trim());
+
+  if (!rows.length) return;
+
+  const { error: insertError } = await sb.from("store_social_links").insert(rows);
+  if (insertError) throw insertError;
+}
+
+async function replaceStoreOpeningHours(
+  sb: any,
+  storeId: string,
+  openingHours: Record<string, { open?: string; close?: string; is_closed?: boolean }> | null | undefined,
+  legacyHours: Array<{ day_of_week: number; open_time?: string | null; close_time?: string | null; is_closed?: boolean }> | null | undefined
+) {
+  const rows = normalizeOpeningHoursForStorage(openingHours, legacyHours);
+  if (rows === undefined) return;
+
+  const { error: deleteError } = await sb
+    .from("store_opening_hours")
+    .delete()
+    .eq("store_id", storeId);
+  if (deleteError) throw deleteError;
+
+  if (!rows.length) return;
+
+  const { error: insertError } = await sb
+    .from("store_opening_hours")
+    .insert(rows.map((row) => ({ store_id: storeId, ...row })));
+  if (insertError) throw insertError;
+}
+
+async function replaceStoreOffers(sb: any, storeId: string, offerInput: any[] | null | undefined) {
+  if (offerInput === undefined) return;
+
+  const { error: deleteError } = await sb
+    .from("store_offers")
+    .delete()
+    .eq("store_id", storeId);
+  if (deleteError) throw deleteError;
+
+  if (!offerInput || !offerInput.length) return;
+
+  const rows = offerInput
+    .map((item) => normalizeStoreOfferForStorage(item))
+    .filter(Boolean)
+    .map((offer) => ({
+      store_id: storeId,
+      ...offer,
+    }));
+
+  if (!rows.length) return;
+
+  const { error: insertError } = await sb.from("store_offers").insert(rows);
+  if (insertError) throw insertError;
+}
+
+async function replaceStoreSubscription(
+  sb: any,
+  storeId: string,
+  subscription: z.infer<typeof StoreSubscriptionSchema> | null | undefined
+) {
+  if (subscription === undefined) return;
+
+  const { error: deleteError } = await sb
+    .from("store_subscriptions")
+    .delete()
+    .eq("store_id", storeId);
+  if (deleteError) throw deleteError;
+
+  if (!subscription) return;
+
+  const row = {
+    ...(subscription.id ? { id: subscription.id } : {}),
+    store_id: storeId,
+    plan_code: subscription.plan_code ?? null,
+    status: subscription.status ?? (subscription.pickup_premium_enabled ? "active" : "inactive"),
+    pickup_premium_enabled: subscription.pickup_premium_enabled ?? false,
+    starts_at: subscription.starts_at ?? null,
+    expires_at: subscription.expires_at ?? null,
+    metadata: subscription.metadata ?? {},
+  };
+
+  const { error: insertError } = await sb.from("store_subscriptions").insert(row);
+  if (insertError) throw insertError;
+}
+
+async function replaceStoreMedia(
+  sb: any,
+  storeId: string,
+  media: {
+    logo_url?: string | null;
+    cover_image?: string | null;
+    cover_video_url?: string | null;
+    gallery_urls?: string[];
+  }
+) {
+  const assetMappings = [
+    { assetType: "logo", values: media.logo_url === undefined ? undefined : media.logo_url ? [media.logo_url] : [] },
+    {
+      assetType: "cover_image",
+      values: media.cover_image === undefined ? undefined : media.cover_image ? [media.cover_image] : [],
+    },
+    {
+      assetType: "cover_video",
+      values: media.cover_video_url === undefined ? undefined : media.cover_video_url ? [media.cover_video_url] : [],
+    },
+    { assetType: "gallery", values: media.gallery_urls },
+  ];
+
+  const providedMappings = assetMappings.filter(({ values }) => values !== undefined);
+  if (!providedMappings.length) return;
+
+  const { error: deleteError } = await sb
+    .from("store_media_assets")
+    .delete()
+    .eq("store_id", storeId)
+    .in("asset_type", providedMappings.map(({ assetType }) => assetType));
+  if (deleteError) throw deleteError;
+
+  const rows = providedMappings.flatMap(({ assetType, values }) =>
+    (values ?? [])
+      .map((value, index) => {
+        const mediaRef = normalizeMediaReferenceForStorage(value);
+        if (!mediaRef) return null;
+        return {
+          store_id: storeId,
+          asset_type: assetType,
+          file_url: mediaRef.file_url,
+          file_path: mediaRef.file_path,
+          sort_order: index,
+          is_active: true,
+        };
+      })
+      .filter(Boolean)
+  );
+
+  if (!rows.length) return;
+
+  const { error: insertError } = await sb.from("store_media_assets").insert(rows);
+  if (insertError) throw insertError;
+}
+
+function buildStoreBaseUpdatePayload(body: z.infer<typeof UpdateStoreSchema>) {
+  const payload: Record<string, any> = {};
+  const allowedKeys = [
+    "name",
+    "slug",
+    "description",
+    "category",
+    "subcategory",
+    "phone",
+    "whatsapp",
+    "email",
+    "website",
+    "location_name",
+    "address_line1",
+    "address_line2",
+    "city",
+    "region",
+    "country",
+    "postal_code",
+    "full_address",
+    "lat",
+    "lng",
+    "google_place_id",
+    "logo_url",
+    "cover_image",
+    "owner_user_id",
+    "created_by",
+    "is_featured",
+    "is_active",
+    "is_top_brand",
+    "sort_order",
+    "store_type",
+    "booking_enabled",
+    "avg_duration_minutes",
+    "max_bookings_per_slot",
+    "advance_booking_days",
+    "modification_available",
+    "modification_cutoff_minutes",
+    "cancellation_available",
+    "cancellation_cutoff_minutes",
+    "cover_charge_enabled",
+    "cover_charge_amount",
+    "booking_terms",
+    "pickup_basic_enabled",
+    "pickup_mode",
+    "supports_time_slots",
+    "slot_duration_minutes",
+    "slot_buffer_minutes",
+    "slot_advance_days",
+    "slot_max_per_window",
+    "is_advertised",
+    "ad_priority",
+    "ad_starts_at",
+    "ad_ends_at",
+    "ad_badge_text",
+  ] as const;
+
+  for (const key of allowedKeys) {
+    if (body[key] !== undefined) {
+      payload[key] = body[key];
+    }
+  }
+
+  return payload;
+}
+
+async function hardDeleteStore(sb: any, storeId: string, canonicalMedia: { logo_url?: string | null; cover_image?: string | null }) {
+  const { data: mediaRows, error: mediaLookupError } = await sb
+    .from("store_media_assets")
+    .select("file_path,file_url")
+    .eq("store_id", storeId);
+
+  if (mediaLookupError) {
+    throw new Error(`Failed to inspect store media: ${mediaLookupError.message}`);
+  }
+
+  const storagePaths = new Set<string>();
+  for (const row of mediaRows ?? []) {
+    const fromPath = normalizeStoreStoragePath((row as any).file_path);
+    const fromUrl = normalizeStoreStoragePath((row as any).file_url);
+    if (fromPath) storagePaths.add(fromPath);
+    if (fromUrl) storagePaths.add(fromUrl);
+  }
+
+  const logoPath = normalizeStoreStoragePath(canonicalMedia.logo_url);
+  const coverImagePath = normalizeStoreStoragePath(canonicalMedia.cover_image);
+  if (logoPath) storagePaths.add(logoPath);
+  if (coverImagePath) storagePaths.add(coverImagePath);
+
+  if (storagePaths.size > 0) {
+    const { error: storageDeleteError } = await supabaseService.storage.from(STORE_STORAGE_BUCKET).remove([...storagePaths]);
+    if (storageDeleteError) {
+      throw new Error(`Failed to delete store files from storage: ${storageDeleteError.message}`);
+    }
+  }
+
+  const independentRelationTables = [
+    "store_members",
+    "store_payment_details",
+    "store_tags",
+    "store_social_links",
+    "store_opening_hours",
+    "store_media_assets",
+    "store_offers",
+    "store_subscriptions",
+    "store_reviews",
+  ] as const;
+
+  await Promise.all(
+    independentRelationTables.map(async (table) => {
+      const { error } = await sb.from(table).delete().eq("store_id", storeId);
+      if (error) {
+        throw new Error(`Failed to delete ${table}: ${error.message}`);
+      }
+    })
+  );
+
+  const { error: deleteItemsError } = await sb
+    .from("store_catalogue_items")
+    .delete()
+    .eq("store_id", storeId);
+  if (deleteItemsError) {
+    throw new Error(`Failed to delete store_catalogue_items: ${deleteItemsError.message}`);
+  }
+
+  const { error: deleteCategoriesError } = await sb
+    .from("store_catalogue_categories")
+    .delete()
+    .eq("store_id", storeId);
+  if (deleteCategoriesError) {
+    throw new Error(`Failed to delete store_catalogue_categories: ${deleteCategoriesError.message}`);
+  }
+
+  const { error: deleteStoreError } = await sb.from("stores").delete().eq("id", storeId);
+  if (deleteStoreError) {
+    throw new Error(`Failed to delete store: ${deleteStoreError.message}`);
+  }
+}
+
+async function deleteLinkedStoreOwnerUser(ownerUserId: string | null | undefined, deletedStoreId: string) {
+  const normalizedOwnerId = String(ownerUserId ?? "").trim();
+  if (!normalizedOwnerId) return;
+
+  const { data: ownerRow, error: ownerLookupError } = await supabaseService
+    .from("users")
+    .select("id,role")
+    .eq("id", normalizedOwnerId)
+    .maybeSingle();
+
+  if (ownerLookupError) {
+    throw new Error(`Failed to inspect owner user: ${ownerLookupError.message}`);
+  }
+
+  const ownerRole = String(ownerRow?.role ?? "").trim().toLowerCase();
+  if (ownerRole !== "storepartner") return;
+
+  const [
+    otherStoresResult,
+    restaurantResult,
+    corporateResult,
+  ] = await Promise.all([
+    supabaseService
+      .from("stores")
+      .select("id", { count: "exact", head: true })
+      .eq("owner_user_id", normalizedOwnerId)
+      .neq("id", deletedStoreId),
+    supabaseService
+      .from("restaurants")
+      .select("id", { count: "exact", head: true })
+      .eq("owner_user_id", normalizedOwnerId),
+    supabaseService
+      .from("corporate")
+      .select("id", { count: "exact", head: true })
+      .eq("owner_user_id", normalizedOwnerId),
+  ]);
+
+  for (const result of [otherStoresResult, restaurantResult, corporateResult]) {
+    if (result.error) {
+      throw new Error(result.error.message);
+    }
+  }
+
+  const stillReferenced =
+    (otherStoresResult.count ?? 0) > 0 ||
+    (restaurantResult.count ?? 0) > 0 ||
+    (corporateResult.count ?? 0) > 0;
+
+  if (stillReferenced) return;
+
+  const { error: deleteUserRowError } = await supabaseService
+    .from("users")
+    .delete()
+    .eq("id", normalizedOwnerId);
+
+  if (deleteUserRowError) {
+    throw new Error(`Failed to delete users row: ${deleteUserRowError.message}`);
+  }
+
+  const { error: deleteAuthUserError } = await supabaseService.auth.admin.deleteUser(normalizedOwnerId);
+  if (deleteAuthUserError) {
+    const message = String(deleteAuthUserError.message ?? "");
+    if (!message.toLowerCase().includes("not found")) {
+      throw new Error(`Failed to delete auth user: ${deleteAuthUserError.message}`);
+    }
+  }
+}
 
 function summarizeStoreFeedRows(rows: any[]) {
   const summary = {
@@ -284,6 +1004,7 @@ async function getStoreIdsByTag(tag: string) {
 }
 
 function logStoreFeedRows(label: string, rows: any[]) {
+  if (!STORE_ROUTE_DEBUG) return;
   console.info(label, (rows || []).map((row: any) => ({
     id: row?.id || row?.store_id || null,
     name: row?.name || row?.store_name || null,
@@ -783,20 +1504,22 @@ router.get("/feed", async (req, res) => {
     offset,
   } = parsed.data;
 
-  console.info("[GET /api/stores/feed] query", {
-    search: search || null,
-    city: city || null,
-    region: region || null,
-    country: country || null,
-    category: category || null,
-    subcategory: subcategory || null,
-    tag: tag || null,
-    includeInactive,
-    lat,
-    lng,
-    limit,
-    offset,
-  });
+  if (STORE_ROUTE_DEBUG) {
+    console.info("[GET /api/stores/feed] query", {
+      search: search || null,
+      city: city || null,
+      region: region || null,
+      country: country || null,
+      category: category || null,
+      subcategory: subcategory || null,
+      tag: tag || null,
+      includeInactive,
+      lat,
+      lng,
+      limit,
+      offset,
+    });
+  }
 
   let query = supabase.from("stores").select(STORE_BASE_SELECT, { count: "exact" });
 
@@ -845,30 +1568,36 @@ router.get("/feed", async (req, res) => {
     if (error) return res.status(500).json({ error: error.message });
 
     const rawRows = await hydrateStoreRows(rows ?? []);
-    console.info("[GET /api/stores/feed] raw result", {
-      count: rawRows.length,
-      total: total ?? null,
-      scanLimit,
-      sample: summarizeStoreFeedRows(rawRows),
-    });
+    if (STORE_ROUTE_DEBUG) {
+      console.info("[GET /api/stores/feed] raw result", {
+        count: rawRows.length,
+        total: total ?? null,
+        scanLimit,
+        sample: summarizeStoreFeedRows(rawRows),
+      });
+    }
 
     const ranked = rawRows
       .slice()
       .sort((a: any, b: any) => compareStoresForSmartFeed(a, b, { city, region, country }, lat, lng));
-    console.info("[GET /api/stores/feed] ranked result", {
-      count: ranked.length,
-      topIds: ranked.slice(0, 8).map((row: any) => row?.id || row?.store_id || null),
-      topCities: ranked.slice(0, 8).map((row: any) => row?.city || null),
-    });
+    if (STORE_ROUTE_DEBUG) {
+      console.info("[GET /api/stores/feed] ranked result", {
+        count: ranked.length,
+        topIds: ranked.slice(0, 8).map((row: any) => row?.id || row?.store_id || null),
+        topCities: ranked.slice(0, 8).map((row: any) => row?.city || null),
+      });
+    }
 
     const pageItems = ranked.slice(offset, offset + limit);
 
-    console.info("[GET /api/stores/feed] page result", {
-      count: pageItems.length,
-      limit,
-      offset,
-      returnedIds: pageItems.map((row: any) => row?.id || row?.store_id || null),
-    });
+    if (STORE_ROUTE_DEBUG) {
+      console.info("[GET /api/stores/feed] page result", {
+        count: pageItems.length,
+        limit,
+        offset,
+        returnedIds: pageItems.map((row: any) => row?.id || row?.store_id || null),
+      });
+    }
 
     return res.json({
       items: pageItems,
@@ -973,14 +1702,16 @@ router.get("/new-kick-in", async (req, res) => {
       resolved_city: getStoreResolvedCity(row),
       distance_km: getStoreDistanceKm(row, lat, lng),
     }));
-    console.info("[GET /api/stores/new-kick-in] raw result", {
-      count: rawRows.length,
-      total: total ?? null,
-      scanLimit,
-      freshnessDays,
-      excludedCount: excludedStoreIds.size,
-      sample: summarizeStoreFeedRows(rawRows),
-    });
+    if (STORE_ROUTE_DEBUG) {
+      console.info("[GET /api/stores/new-kick-in] raw result", {
+        count: rawRows.length,
+        total: total ?? null,
+        scanLimit,
+        freshnessDays,
+        excludedCount: excludedStoreIds.size,
+        sample: summarizeStoreFeedRows(rawRows),
+      });
+    }
     logStoreFeedRows("[GET /api/stores/new-kick-in] raw rows", rawRows);
 
     const freshRows = rawRows.filter((row: any) => {
@@ -988,11 +1719,13 @@ router.get("/new-kick-in", async (req, res) => {
       const createdAt = new Date(row.created_at);
       return Number.isFinite(createdAt.getTime()) && createdAt >= freshnessCutoff;
     });
-    console.info("[GET /api/stores/new-kick-in] freshness filter", {
-      freshnessDays,
-      cutoff: freshnessCutoff.toISOString(),
-      count: freshRows.length,
-    });
+    if (STORE_ROUTE_DEBUG) {
+      console.info("[GET /api/stores/new-kick-in] freshness filter", {
+        freshnessDays,
+        cutoff: freshnessCutoff.toISOString(),
+        count: freshRows.length,
+      });
+    }
     logStoreFeedRows("[GET /api/stores/new-kick-in] fresh rows", freshRows);
 
     const inferredCity = inferFeedCity(freshRows.length ? freshRows : rawRows, lat, lng, city);
@@ -1047,38 +1780,44 @@ router.get("/new-kick-in", async (req, res) => {
       ranked = [...ranked, ...outsideCitySorted];
     }
 
-    console.info("[GET /api/stores/new-kick-in] location resolution", {
-      requestedCity: city || null,
-      inferredCity: inferredCity || null,
-      resolvedFeedCity: feedCity || null,
-      sameCityRecentCount,
-      sameCityOlderCount,
-      outsideCityFallbackCount,
-      excludedCount: excludedRows.length,
-    });
+    if (STORE_ROUTE_DEBUG) {
+      console.info("[GET /api/stores/new-kick-in] location resolution", {
+        requestedCity: city || null,
+        inferredCity: inferredCity || null,
+        resolvedFeedCity: feedCity || null,
+        sameCityRecentCount,
+        sameCityOlderCount,
+        outsideCityFallbackCount,
+        excludedCount: excludedRows.length,
+      });
+    }
 
     logStoreFeedRows("[GET /api/stores/new-kick-in] same city recent rows", sameCityRecentSorted);
     logStoreFeedRows("[GET /api/stores/new-kick-in] same city older rows", sameCityOlderSorted);
     logStoreFeedRows("[GET /api/stores/new-kick-in] outside city rows", outsideCitySorted);
 
-    console.info("[GET /api/stores/new-kick-in] ranked result", {
-      count: ranked.length,
-      sameCityCount: sameCityRecentSorted.length + sameCityOlderSorted.length,
-      recentCount: sameCityRecentSorted.length,
-      olderCount: sameCityOlderSorted.length,
-      fallbackCount: outsideCitySorted.length,
-      topIds: ranked.slice(0, 8).map((row: any) => row?.id || row?.store_id || null),
-      topCities: ranked.slice(0, 8).map((row: any) => row?.city || null),
-    });
+    if (STORE_ROUTE_DEBUG) {
+      console.info("[GET /api/stores/new-kick-in] ranked result", {
+        count: ranked.length,
+        sameCityCount: sameCityRecentSorted.length + sameCityOlderSorted.length,
+        recentCount: sameCityRecentSorted.length,
+        olderCount: sameCityOlderSorted.length,
+        fallbackCount: outsideCitySorted.length,
+        topIds: ranked.slice(0, 8).map((row: any) => row?.id || row?.store_id || null),
+        topCities: ranked.slice(0, 8).map((row: any) => row?.city || null),
+      });
+    }
     logStoreFeedRows("[GET /api/stores/new-kick-in] ranked rows", ranked);
 
     const pageItems = ranked.slice(offset, offset + limit);
-    console.info("[GET /api/stores/new-kick-in] page result", {
-      count: pageItems.length,
-      limit,
-      offset,
-      returnedIds: pageItems.map((row: any) => row?.id || row?.store_id || null),
-    });
+    if (STORE_ROUTE_DEBUG) {
+      console.info("[GET /api/stores/new-kick-in] page result", {
+        count: pageItems.length,
+        limit,
+        offset,
+        returnedIds: pageItems.map((row: any) => row?.id || row?.store_id || null),
+      });
+    }
     logStoreFeedRows("[GET /api/stores/new-kick-in] page rows", pageItems);
 
     return res.json({
@@ -1118,16 +1857,14 @@ router.get("/:id", async (req, res) => {
   const includeServices = include.includes("services");
   const includeSlots = include.includes("slots");
 
-  // main store
-  const { data: store, error } = await supabase
-    .from("stores")
-    .select(STORE_BASE_SELECT)
-    .eq("id", idParsed.data)
-    .maybeSingle();
+  let hydratedStore: any = null;
+  try {
+    hydratedStore = await fetchHydratedStoreRowById(idParsed.data);
+  } catch (error: any) {
+    return res.status(500).json({ error: error?.message ?? "Failed to load store" });
+  }
 
-  if (error) return res.status(500).json({ error: error.message });
-  if (!store) return res.status(404).json({ error: "Store not found" });
-  const hydratedStore = await hydrateStoreRow(store);
+  if (!hydratedStore) return res.status(404).json({ error: "Store not found" });
 
   // related (optional)
   let payment: any = null;
@@ -1175,6 +1912,103 @@ router.get("/:id", async (req, res) => {
   });
 });
 
+// PUT /api/stores/:id
+// Admin editor write path for a single normalized store payload.
+router.put("/:id", async (req, res) => {
+  const admin = await requireAdmin(req, res);
+  if (!admin) return;
+
+  const idParsed = IdSchema.safeParse(req.params.id);
+  if (!idParsed.success) return res.status(400).json({ error: "Invalid store id" });
+
+  const bodyParsed = UpdateStoreSchema.safeParse(req.body);
+  if (!bodyParsed.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid body", details: bodyParsed.error.flatten() });
+  }
+
+  const id = idParsed.data;
+  const body = bodyParsed.data;
+
+  const { data: existingStore, error: existingError } = await admin.sb
+    .from("stores")
+    .select("id")
+    .eq("id", id)
+    .maybeSingle();
+
+  if (existingError) return res.status(500).json({ error: existingError.message });
+  if (!existingStore) return res.status(404).json({ error: "Store not found" });
+
+  const basePayload = buildStoreBaseUpdatePayload(body);
+
+  let updatedStore: any = null;
+  if (Object.keys(basePayload).length > 0) {
+    const { data, error } = await admin.sb
+      .from("stores")
+      .update(basePayload)
+      .eq("id", id)
+      .select(STORE_BASE_SELECT)
+      .single();
+
+    if (error) {
+      if ((error as any)?.code === "23505") {
+        return res.status(400).json({ error: "Slug already exists" });
+      }
+      return res.status(500).json({ error: error.message });
+    }
+
+    updatedStore = data;
+  }
+
+  try {
+    const shouldWriteSocialLinks =
+      body.social_links !== undefined ||
+      body.instagram !== undefined ||
+      body.facebook !== undefined ||
+      body.tiktok !== undefined ||
+      body.maps !== undefined;
+    await Promise.all([
+      replaceStoreTags(admin.sb, id, {
+        tags: body.tags,
+        facilities: body.facilities,
+        highlights: body.highlights,
+        worth_visit: body.worth_visit,
+        mood_tags: body.mood_tags,
+      }),
+      replaceStoreSocialLinks(admin.sb, id, shouldWriteSocialLinks ? mergeSocialLinks(body) : undefined),
+      replaceStoreOpeningHours(admin.sb, id, body.opening_hours, body.hours),
+      replaceStoreOffers(admin.sb, id, getStoreOfferRowsFromBody(body)),
+      replaceStoreSubscription(admin.sb, id, body.subscription),
+      replaceStoreMedia(admin.sb, id, {
+        logo_url: body.logo_url,
+        cover_image: body.cover_image,
+        cover_video_url: body.cover_video_url,
+        gallery_urls: body.gallery_urls,
+      }),
+    ]);
+  } catch (relationError: any) {
+    return res.status(500).json({ error: relationError?.message ?? "Failed to update store relations" });
+  }
+
+  const storeForHydration =
+    updatedStore ??
+    (
+      await admin.sb
+        .from("stores")
+        .select(STORE_BASE_SELECT)
+        .eq("id", id)
+        .maybeSingle()
+    ).data;
+
+  if (!storeForHydration) {
+    return res.status(404).json({ error: "Store not found after update" });
+  }
+
+  const hydratedStore = await hydrateStoreRow(storeForHydration);
+  return res.json({ item: hydratedStore });
+});
+
 // DELETE /api/stores/:id?hard=true
 router.delete("/:id", async (req, res) => {
   const admin = await requireAdmin(req, res);
@@ -1196,7 +2030,7 @@ router.delete("/:id", async (req, res) => {
   // Confirm exists
   const exists = await admin.sb
     .from("stores")
-    .select("id,is_active")
+    .select("id,is_active,logo_url,cover_image,owner_user_id")
     .eq("id", id)
     .maybeSingle();
 
@@ -1204,8 +2038,15 @@ router.delete("/:id", async (req, res) => {
   if (!exists.data) return res.status(404).json({ error: "Store not found" });
 
   if (hard) {
-    const { error } = await admin.sb.from("stores").delete().eq("id", id);
-    if (error) return res.status(500).json({ error: error.message });
+    try {
+      await hardDeleteStore(admin.sb, id, {
+        logo_url: exists.data.logo_url,
+        cover_image: exists.data.cover_image,
+      });
+      await deleteLinkedStoreOwnerUser(exists.data.owner_user_id, id);
+    } catch (error: any) {
+      return res.status(500).json({ error: error?.message ?? "Failed to hard delete store" });
+    }
     return res.json({ ok: true, deleted: "hard", id });
   }
 

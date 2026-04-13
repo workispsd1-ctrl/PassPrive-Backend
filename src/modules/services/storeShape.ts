@@ -1,5 +1,16 @@
 import supabase from "../../database/supabase";
 
+const STORE_STORAGE_BUCKET = "stores";
+const STORE_TAG_SELECT = "store_id,tag_type,tag_value,sort_order,created_at";
+const STORE_SOCIAL_LINK_SELECT = "store_id,platform,url,sort_order,created_at";
+const STORE_OPENING_HOURS_SELECT = "store_id,day_of_week,open_time,close_time,is_closed,created_at";
+const STORE_MEDIA_SELECT =
+  "store_id,asset_type,file_url,file_path,sort_order,created_at,is_active";
+const STORE_OFFER_SELECT =
+  "id,store_id,title,description,badge_text,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata,sort_order,created_at";
+const STORE_SUBSCRIPTION_SELECT =
+  "id,store_id,plan_code,status,pickup_premium_enabled,starts_at,expires_at,metadata,created_at,updated_at";
+
 export const STORE_BASE_SELECT = [
   "id",
   "name",
@@ -116,6 +127,40 @@ function buildSocialLinksObject(rows: any[]) {
   return Object.fromEntries(entries);
 }
 
+function getDayKey(dayOfWeek: number) {
+  return String(dayOfWeek);
+}
+
+function normalizeStoreStoragePath(value: unknown) {
+  const raw = String(value ?? "").trim();
+  if (!raw) return null;
+
+  if (!/^https?:\/\//i.test(raw)) {
+    const normalized = raw.replace(/^\/+/, "");
+    const marker = `${STORE_STORAGE_BUCKET}/`;
+    const markerIndex = normalized.indexOf(marker);
+    return markerIndex >= 0 ? normalized.slice(markerIndex + marker.length) : normalized;
+  }
+
+  const objectPublicMatch = raw.match(new RegExp(`/object/public/${STORE_STORAGE_BUCKET}/(.+)$`, "i"));
+  if (objectPublicMatch?.[1]) return objectPublicMatch[1];
+
+  const fallbackMatch = raw.match(new RegExp(`/${STORE_STORAGE_BUCKET}/(.+)$`, "i"));
+  return fallbackMatch?.[1] ?? null;
+}
+
+function toStorePublicUrl(pathOrUrl: unknown) {
+  const raw = String(pathOrUrl ?? "").trim();
+  if (!raw) return null;
+  if (/^https?:\/\//i.test(raw)) return raw;
+
+  const storagePath = normalizeStoreStoragePath(raw);
+  if (!storagePath) return raw;
+
+  const { data } = supabase.storage.from(STORE_STORAGE_BUCKET).getPublicUrl(storagePath);
+  return data?.publicUrl ?? raw;
+}
+
 function buildOpeningHoursPayload(rows: any[]) {
   return sortByOrderAndCreatedAt(rows).map((row) => ({
     day_of_week: row.day_of_week,
@@ -123,6 +168,22 @@ function buildOpeningHoursPayload(rows: any[]) {
     close_time: row.close_time,
     is_closed: row.is_closed,
   }));
+}
+
+function buildOpeningHoursObject(rows: any[]) {
+  return sortByOrderAndCreatedAt(rows).reduce(
+    (acc, row) => {
+      acc[getDayKey(Number(row.day_of_week))] = row?.is_closed
+        ? { open: "", close: "", is_closed: true }
+        : {
+            open: row?.open_time ?? "",
+            close: row?.close_time ?? "",
+            is_closed: false,
+          };
+      return acc;
+    },
+    {} as Record<string, { open: string; close: string; is_closed: boolean }>
+  );
 }
 
 function buildOfferPayload(rows: any[]) {
@@ -187,11 +248,46 @@ function getActiveSubscription(rows: any[]) {
   return active[0] ?? null;
 }
 
-export async function hydrateStoreRows(baseStores: any[]) {
-  const stores = Array.isArray(baseStores) ? baseStores : [];
-  const storeIds = Array.from(new Set(stores.map((store) => store?.id).filter(Boolean)));
-  if (!storeIds.length) return stores;
+function getPreferredSubscription(rows: any[]) {
+  const active = getActiveSubscription(rows);
+  if (active) return active;
 
+  return (rows || [])
+    .slice()
+    .sort((a, b) => {
+      const aCreatedAt = a?.created_at ? new Date(a.created_at).getTime() : 0;
+      const bCreatedAt = b?.created_at ? new Date(b.created_at).getTime() : 0;
+      return bCreatedAt - aCreatedAt;
+    })[0] ?? null;
+}
+
+function normalizeSubscription(row: any) {
+  if (!row) return null;
+
+  return {
+    id: row.id ?? null,
+    plan_code: row.plan_code ?? null,
+    status: row.status ?? null,
+    pickup_premium_enabled: row.pickup_premium_enabled ?? false,
+    starts_at: row.starts_at ?? null,
+    expires_at: row.expires_at ?? null,
+    created_at: row.created_at ?? null,
+    updated_at: row.updated_at ?? null,
+    metadata: row.metadata ?? {},
+  };
+}
+
+type StoreRelationQueryResults = {
+  tags: any[];
+  socialLinks: any[];
+  openingHours: any[];
+  media: any[];
+  offers: any[];
+  subscriptions: any[];
+  reviews: any[];
+};
+
+async function queryStoreRelations(storeIds: string[]): Promise<StoreRelationQueryResults> {
   const [
     tagsResult,
     socialLinksResult,
@@ -201,12 +297,12 @@ export async function hydrateStoreRows(baseStores: any[]) {
     subscriptionsResult,
     reviewsResult,
   ] = await Promise.all([
-    supabase.from("store_tags").select("*").in("store_id", storeIds),
-    supabase.from("store_social_links").select("*").in("store_id", storeIds),
-    supabase.from("store_opening_hours").select("*").in("store_id", storeIds),
-    supabase.from("store_media_assets").select("*").in("store_id", storeIds),
-    supabase.from("store_offers").select("*").in("store_id", storeIds),
-    supabase.from("store_subscriptions").select("*").in("store_id", storeIds),
+    supabase.from("store_tags").select(STORE_TAG_SELECT).in("store_id", storeIds),
+    supabase.from("store_social_links").select(STORE_SOCIAL_LINK_SELECT).in("store_id", storeIds),
+    supabase.from("store_opening_hours").select(STORE_OPENING_HOURS_SELECT).in("store_id", storeIds),
+    supabase.from("store_media_assets").select(STORE_MEDIA_SELECT).in("store_id", storeIds),
+    supabase.from("store_offers").select(STORE_OFFER_SELECT).in("store_id", storeIds),
+    supabase.from("store_subscriptions").select(STORE_SUBSCRIPTION_SELECT).in("store_id", storeIds),
     supabase
       .from("store_reviews")
       .select("store_id, rating, food_rating, service_rating, ambience_rating, drinks_rating, crowd_rating, is_approved")
@@ -227,13 +323,28 @@ export async function hydrateStoreRows(baseStores: any[]) {
     if (result.error) throw result.error;
   }
 
-  const tagsByStoreId = toMapByStoreId(tagsResult.data ?? []);
-  const socialLinksByStoreId = toMapByStoreId(socialLinksResult.data ?? []);
-  const openingHoursByStoreId = toMapByStoreId(openingHoursResult.data ?? []);
-  const mediaByStoreId = toMapByStoreId(mediaResult.data ?? []);
-  const offersByStoreId = toMapByStoreId(offersResult.data ?? []);
-  const subscriptionsByStoreId = toMapByStoreId(subscriptionsResult.data ?? []);
-  const reviewsByStoreId = toMapByStoreId(reviewsResult.data ?? []);
+  return {
+    tags: tagsResult.data ?? [],
+    socialLinks: socialLinksResult.data ?? [],
+    openingHours: openingHoursResult.data ?? [],
+    media: mediaResult.data ?? [],
+    offers: offersResult.data ?? [],
+    subscriptions: subscriptionsResult.data ?? [],
+    reviews: reviewsResult.data ?? [],
+  };
+}
+
+function buildHydratedStoreRows(baseStores: any[], relations: StoreRelationQueryResults) {
+  const stores = Array.isArray(baseStores) ? baseStores : [];
+  if (!stores.length) return stores;
+
+  const tagsByStoreId = toMapByStoreId(relations.tags ?? []);
+  const socialLinksByStoreId = toMapByStoreId(relations.socialLinks ?? []);
+  const openingHoursByStoreId = toMapByStoreId(relations.openingHours ?? []);
+  const mediaByStoreId = toMapByStoreId(relations.media ?? []);
+  const offersByStoreId = toMapByStoreId(relations.offers ?? []);
+  const subscriptionsByStoreId = toMapByStoreId(relations.subscriptions ?? []);
+  const reviewsByStoreId = toMapByStoreId(relations.reviews ?? []);
 
   return stores.map((store) => {
     const tagRows = sortByOrderAndCreatedAt(tagsByStoreId.get(store.id) ?? []);
@@ -241,7 +352,7 @@ export async function hydrateStoreRows(baseStores: any[]) {
       (row) => row?.is_active !== false
     );
     const offerRows = offersByStoreId.get(store.id) ?? [];
-    const subscription = getActiveSubscription(subscriptionsByStoreId.get(store.id) ?? []);
+    const subscription = getPreferredSubscription(subscriptionsByStoreId.get(store.id) ?? []);
     const ratingSummary = buildReviewAggregate(reviewsByStoreId.get(store.id) ?? []);
 
     const tags = tagRows.filter((row) => row.tag_type === "tag").map((row) => row.tag_value);
@@ -249,27 +360,37 @@ export async function hydrateStoreRows(baseStores: any[]) {
     const highlights = tagRows.filter((row) => row.tag_type === "highlight").map((row) => row.tag_value);
     const worthVisit = tagRows.filter((row) => row.tag_type === "worth_visit").map((row) => row.tag_value);
     const moodTags = tagRows.filter((row) => row.tag_type === "mood").map((row) => row.tag_value);
+    const socialLinks = buildSocialLinksObject(socialLinksByStoreId.get(store.id) ?? []);
 
     const galleryUrls = mediaRows
       .filter((row) => row.asset_type === "gallery")
-      .map((row) => row.file_url);
+      .map((row) => toStorePublicUrl(row.file_url ?? row.file_path))
+      .filter(Boolean);
     const foodImages = mediaRows
       .filter((row) => row.asset_type === "food")
-      .map((row) => row.file_url);
+      .map((row) => toStorePublicUrl(row.file_url ?? row.file_path))
+      .filter(Boolean);
     const ambienceImages = mediaRows
       .filter((row) => row.asset_type === "ambience")
-      .map((row) => row.file_url);
+      .map((row) => toStorePublicUrl(row.file_url ?? row.file_path))
+      .filter(Boolean);
     const menuAssets = mediaRows
       .filter((row) => row.asset_type === "menu")
       .map((row) => ({
-        url: row.file_url,
+        url: toStorePublicUrl(row.file_url ?? row.file_path),
         path: row.file_path,
         sort_order: row.sort_order,
-      }));
+      }))
+      .filter((row) => row.url);
 
     const logoAsset = mediaRows.find((row) => row.asset_type === "logo");
     const coverImageAsset = mediaRows.find((row) => row.asset_type === "cover_image");
     const coverVideoAsset = mediaRows.find((row) => row.asset_type === "cover_video");
+    const logoUrl = toStorePublicUrl(store.logo_url) ?? toStorePublicUrl(logoAsset?.file_url ?? logoAsset?.file_path);
+    const coverImageUrl =
+      toStorePublicUrl(store.cover_image) ??
+      toStorePublicUrl(coverImageAsset?.file_url ?? coverImageAsset?.file_path);
+    const coverVideoUrl = toStorePublicUrl(coverVideoAsset?.file_url ?? coverVideoAsset?.file_path);
 
     const offers = buildOfferPayload(offerRows);
 
@@ -280,20 +401,26 @@ export async function hydrateStoreRows(baseStores: any[]) {
       highlights,
       worth_visit: worthVisit,
       mood_tags: moodTags,
-      social_links: buildSocialLinksObject(socialLinksByStoreId.get(store.id) ?? []),
+      social_links: socialLinks,
       hours: buildOpeningHoursPayload(openingHoursByStoreId.get(store.id) ?? []),
+      opening_hours: buildOpeningHoursObject(openingHoursByStoreId.get(store.id) ?? []),
       gallery_urls: galleryUrls,
       food_images: foodImages,
       ambience_images: ambienceImages,
       menu: menuAssets,
       offers,
       offer: offers[0] ?? null,
-      logo_url: store.logo_url ?? logoAsset?.file_url ?? null,
-      cover_image: store.cover_image ?? coverImageAsset?.file_url ?? null,
-      cover_image_url: store.cover_image ?? coverImageAsset?.file_url ?? null,
-      cover_media_type: coverVideoAsset ? "video" : coverImageAsset || store.cover_image ? "image" : null,
-      cover_media_url: coverVideoAsset?.file_url ?? coverImageAsset?.file_url ?? store.cover_image ?? null,
-      cover_video_url: coverVideoAsset?.file_url ?? null,
+      subscription: normalizeSubscription(subscription),
+      logo_url: logoUrl,
+      cover_image: coverImageUrl,
+      cover_image_url: coverImageUrl,
+      cover_media_type: coverVideoUrl ? "video" : coverImageUrl ? "image" : null,
+      cover_media_url: coverVideoUrl ?? coverImageUrl ?? null,
+      cover_video_url: coverVideoUrl,
+      instagram: socialLinks.instagram ?? null,
+      facebook: socialLinks.facebook ?? null,
+      tiktok: socialLinks.tiktok ?? null,
+      maps: socialLinks.maps ?? socialLinks.google_maps ?? null,
       pickup_premium_enabled: subscription?.pickup_premium_enabled ?? false,
       pickup_premium_plan: subscription?.plan_code ?? null,
       pickup_premium_started_at: subscription?.starts_at ?? null,
@@ -306,6 +433,30 @@ export async function hydrateStoreRows(baseStores: any[]) {
       ...ratingSummary,
     };
   });
+}
+
+export async function hydrateStoreRows(baseStores: any[]) {
+  const stores = Array.isArray(baseStores) ? baseStores : [];
+  const storeIds = Array.from(new Set(stores.map((store) => store?.id).filter(Boolean)));
+  if (!storeIds.length) return stores;
+
+  const relations = await queryStoreRelations(storeIds);
+  return buildHydratedStoreRows(stores, relations);
+}
+
+export async function fetchHydratedStoreRowById(storeId: string) {
+  const [
+    storeResult,
+    relations,
+  ] = await Promise.all([
+    supabase.from("stores").select(STORE_BASE_SELECT).eq("id", storeId).maybeSingle(),
+    queryStoreRelations([storeId]),
+  ]);
+
+  if (storeResult.error) throw storeResult.error;
+  if (!storeResult.data) return null;
+
+  return buildHydratedStoreRows([storeResult.data], relations)[0] ?? null;
 }
 
 export async function hydrateStoreRow(baseStore: any) {
@@ -322,22 +473,22 @@ export async function hydrateStorePreviewRows(baseStores: any[]) {
     await Promise.all([
       supabase
         .from("store_tags")
-        .select("store_id,tag_type,tag_value,sort_order,created_at")
+        .select(STORE_TAG_SELECT)
         .in("store_id", storeIds)
         .in("tag_type", ["tag", "facility", "highlight", "worth_visit", "mood"]),
       supabase
         .from("store_media_assets")
-        .select("store_id,asset_type,file_url,sort_order,created_at,is_active")
+        .select(STORE_MEDIA_SELECT)
         .in("store_id", storeIds)
         .eq("is_active", true)
         .in("asset_type", ["logo", "cover_image", "cover_video", "gallery"]),
       supabase
         .from("store_offers")
-        .select("id,store_id,title,description,badge_text,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata,created_at")
+        .select(STORE_OFFER_SELECT)
         .in("store_id", storeIds),
       supabase
         .from("store_subscriptions")
-        .select("store_id,plan_code,status,pickup_premium_enabled,starts_at,expires_at,created_at")
+        .select(STORE_SUBSCRIPTION_SELECT)
         .in("store_id", storeIds),
       supabase
         .from("store_reviews")
@@ -361,7 +512,7 @@ export async function hydrateStorePreviewRows(baseStores: any[]) {
     const mediaRows = sortByOrderAndCreatedAt(mediaByStoreId.get(store.id) ?? []).filter(
       (row) => row?.is_active !== false
     );
-    const subscription = getActiveSubscription(subscriptionsByStoreId.get(store.id) ?? []);
+    const subscription = getPreferredSubscription(subscriptionsByStoreId.get(store.id) ?? []);
     const ratingSummary = buildReviewAggregate(reviewsByStoreId.get(store.id) ?? []);
     const offers = buildOfferPayload(offersByStoreId.get(store.id) ?? []);
 
@@ -369,15 +520,28 @@ export async function hydrateStorePreviewRows(baseStores: any[]) {
     const coverImageAsset = mediaRows.find((row) => row.asset_type === "cover_image");
     const coverVideoAsset = mediaRows.find((row) => row.asset_type === "cover_video");
     const logoAsset = mediaRows.find((row) => row.asset_type === "logo");
+    const socialLinks = {};
+    const coverImageUrl =
+      toStorePublicUrl(store.cover_image) ??
+      toStorePublicUrl(coverImageAsset?.file_url ?? coverImageAsset?.file_path);
+    const coverVideoUrl = toStorePublicUrl(coverVideoAsset?.file_url ?? coverVideoAsset?.file_path);
+    const logoUrl = toStorePublicUrl(store.logo_url) ?? toStorePublicUrl(logoAsset?.file_url ?? logoAsset?.file_path);
 
     return {
       ...store,
       tags,
-      cover_image_url: store.cover_image ?? coverImageAsset?.file_url ?? null,
-      cover_media_url: coverVideoAsset?.file_url ?? coverImageAsset?.file_url ?? store.cover_image ?? null,
-      logo_url: store.logo_url ?? logoAsset?.file_url ?? null,
+      social_links: socialLinks,
+      subscription: normalizeSubscription(subscription),
+      cover_image_url: coverImageUrl,
+      cover_media_url: coverVideoUrl ?? coverImageUrl ?? null,
+      cover_media_type: coverVideoUrl ? "video" : coverImageUrl ? "image" : null,
+      logo_url: logoUrl,
       offers,
       offer: offers[0] ?? null,
+      instagram: null,
+      facebook: null,
+      tiktok: null,
+      maps: null,
       pickup_premium_enabled: subscription?.pickup_premium_enabled ?? false,
       pickup_premium_plan: subscription?.plan_code ?? null,
       pickup_premium_started_at: subscription?.starts_at ?? null,
