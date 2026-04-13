@@ -8,15 +8,15 @@ export const RESTAURANT_PREVIEW_SELECT = [
   "city",
   "area",
   "full_address",
-  "cuisine",
-  "location_name",
-  "lat",
-  "lng",
-  "cover_image_url",
-  "logo_url",
-  "is_featured",
+  "cover_image",
+  "latitude",
+  "longitude",
   "is_active",
-  "sort_order",
+  "is_advertised",
+  "ad_priority",
+  "ad_starts_at",
+  "ad_ends_at",
+  "ad_badge_text",
   "created_at",
 ].join(",");
 
@@ -48,7 +48,7 @@ export async function hydrateRestaurantPreviewRows(baseRestaurants: any[]) {
   const restaurantIds = Array.from(new Set(restaurants.map((restaurant) => restaurant?.id).filter(Boolean)));
   if (!restaurantIds.length) return restaurants;
 
-  const [tagsResp, mediaResp, offersResp, reviewsResp, subscriptionsResp] = await Promise.all([
+  const [tagsResp, mediaResp, hoursResp, offersResp, reviewsResp, subscriptionsResp] = await Promise.all([
     supabase
       .from("restaurant_tags")
       .select("restaurant_id,tag_type,tag_value,sort_order,created_at")
@@ -60,6 +60,10 @@ export async function hydrateRestaurantPreviewRows(baseRestaurants: any[]) {
       .in("restaurant_id", restaurantIds)
       .eq("is_active", true)
       .in("asset_type", ["food", "ambience", "menu"]),
+    supabase
+      .from("restaurant_opening_hours")
+      .select("restaurant_id,day_of_week,open_time,close_time,is_closed,created_at")
+      .in("restaurant_id", restaurantIds),
     supabase
       .from("restaurant_offers")
       .select("id,restaurant_id,title,description,badge_text,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata,created_at")
@@ -75,7 +79,7 @@ export async function hydrateRestaurantPreviewRows(baseRestaurants: any[]) {
       .in("restaurant_id", restaurantIds),
   ]);
 
-  for (const response of [tagsResp, mediaResp, offersResp, reviewsResp, subscriptionsResp]) {
+  for (const response of [tagsResp, mediaResp, hoursResp, offersResp, reviewsResp, subscriptionsResp]) {
     if (response.error) throw response.error;
   }
 
@@ -95,6 +99,18 @@ export async function hydrateRestaurantPreviewRows(baseRestaurants: any[]) {
     values.push(row.file_url);
     bucket[row.asset_type] = values;
     mediaByRestaurant.set(row.restaurant_id, bucket);
+  }
+
+  const hoursByRestaurant = new Map<
+    string,
+    Record<string, { open: string; close: string; is_closed?: boolean }>
+  >();
+  for (const row of sortByOrderAndCreatedAt(hoursResp.data ?? [])) {
+    const bucket = hoursByRestaurant.get(row.restaurant_id) ?? {};
+    bucket[String(row.day_of_week)] = row.is_closed
+      ? { open: "", close: "", is_closed: true }
+      : { open: row.open_time, close: row.close_time };
+    hoursByRestaurant.set(row.restaurant_id, bucket);
   }
 
   const now = new Date();
@@ -160,6 +176,11 @@ export async function hydrateRestaurantPreviewRows(baseRestaurants: any[]) {
 
     return {
       ...restaurant,
+      location_name: null,
+      lat: restaurant.latitude ?? null,
+      lng: restaurant.longitude ?? null,
+      logo_url: null,
+      cover_image_url: restaurant.cover_image ?? null,
       cuisines: tags.cuisine ?? [],
       facilities: tags.facility ?? [],
       highlights: tags.highlight ?? [],
@@ -171,7 +192,7 @@ export async function hydrateRestaurantPreviewRows(baseRestaurants: any[]) {
       food_images: media.food ?? [],
       ambience_images: media.ambience ?? [],
       menu_images: media.menu ?? [],
-      opening_hours: {},
+      opening_hours: hoursByRestaurant.get(restaurant.id) ?? {},
       subscribed: Boolean(activeSubscription),
       subscribed_plan: activeSubscription?.plan_code ?? null,
       premium_unlock_all: activeSubscription?.unlock_all ?? false,

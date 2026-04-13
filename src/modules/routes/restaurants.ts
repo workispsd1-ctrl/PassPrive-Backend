@@ -306,6 +306,19 @@ const FoodieFrontrowQuerySchema = z.object({
     .refine((n) => Number.isFinite(n) && n > 0 && n <= 50, "limit 1-50"),
 });
 
+const PickerQuerySchema = z.object({
+  search: z.string().trim().min(1).optional(),
+  city: z.string().trim().min(1).optional(),
+  area: z.string().trim().min(1).optional(),
+  status: z.enum(["active", "inactive", "all"]).optional().default("active"),
+  owner_user_id: z.string().uuid().optional(),
+  limit: z
+    .string()
+    .optional()
+    .transform((v) => (v ? Number(v) : 50))
+    .refine((n) => Number.isFinite(n) && n > 0 && n <= 200, "limit 1-200"),
+});
+
 function hasUsableOffer(offer: any) {
   if (offer === null || offer === undefined) return false;
   if (typeof offer === "string") return offer.trim().length > 0;
@@ -1055,6 +1068,74 @@ function mapRestaurantForResponse(restaurant: any) {
 function mapRestaurantsForResponse(restaurants: any[]) {
   return (restaurants ?? []).map((restaurant) => mapRestaurantForResponse(restaurant));
 }
+
+router.get("/picker", async (req, res) => {
+  const parsed = PickerQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    return res
+      .status(400)
+      .json({ error: "Invalid query", details: parsed.error.flatten() });
+  }
+
+  const { search, city, area, status, owner_user_id, limit } = parsed.data;
+
+  const caller = await getCallerInfoOptional(req);
+  const isAdmin = isAdminRole(caller?.role);
+  const isPartner = isPartnerRole(caller?.role);
+
+  let query = supabase
+    .from("restaurants")
+    .select("id,name,city,area,cover_image,is_active,owner_user_id,created_at")
+    .order("name", { ascending: true })
+    .limit(limit);
+
+  if (isPartner) {
+    query = query.eq("owner_user_id", caller!.user.id);
+  } else if (isAdmin && owner_user_id) {
+    query = query.eq("owner_user_id", owner_user_id);
+  }
+
+  if (status === "active") query = query.eq("is_active", true);
+  if (status === "inactive") query = query.eq("is_active", false);
+  if (city) query = query.ilike("city", `%${city}%`);
+  if (area) query = query.ilike("area", `%${area}%`);
+
+  if (search) {
+    const s = search.replace(/"/g, '\\"');
+    query = query.or(
+      [
+        `name.ilike.%${s}%`,
+        `city.ilike.%${s}%`,
+        `area.ilike.%${s}%`,
+        `slug.ilike.%${s}%`,
+        `full_address.ilike.%${s}%`,
+      ].join(",")
+    );
+  }
+
+  const { data, error } = await withTimeout(
+    query,
+    LIST_QUERY_TIMEOUT_MS,
+    "GET /api/restaurants/picker query"
+  ) as any;
+
+  if (error) {
+    return res.status(500).json({ error: error.message });
+  }
+
+  return res.json({
+    items: (data ?? []).map((restaurant: any) => ({
+      id: restaurant.id,
+      name: restaurant.name,
+      city: restaurant.city,
+      area: restaurant.area,
+      cover_image: restaurant.cover_image,
+      is_active: restaurant.is_active,
+      owner_user_id: restaurant.owner_user_id,
+      created_at: restaurant.created_at,
+    })),
+  });
+});
 
 /**
  * ✅ POST create restaurant ONLY (NO partner creation here)
