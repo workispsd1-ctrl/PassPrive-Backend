@@ -7,7 +7,7 @@ import {
   getProductCataloguePayload,
   getServiceCataloguePayload,
 } from "./storeCatalogue";
-import { fetchHydratedStoreRowById, hydrateStoreRow, hydrateStoreRows, STORE_BASE_SELECT } from "../services/storeShape";
+import { hydrateStoreRow, hydrateStoreRows, STORE_BASE_SELECT } from "../services/storeShape";
 
 const router = Router();
 
@@ -15,11 +15,6 @@ const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
 const LIST_QUERY_TIMEOUT_MS = Number(process.env.LIST_QUERY_TIMEOUT_MS ?? 5000);
 const STORE_ROUTE_DEBUG = String(process.env.STORE_ROUTE_DEBUG ?? "false").trim().toLowerCase() === "true";
-const STORE_STORAGE_BUCKET = "stores";
-
-const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false },
-});
 
 function supabaseAuthed(req: any) {
   const h = req.headers.authorization || "";
@@ -111,7 +106,7 @@ const DeleteQuerySchema = z.object({
   hard: z
     .string()
     .optional()
-    .transform((v) => v === undefined ? true : v !== "false"),
+    .transform((v) => v === "true"),
 });
 
 const FeedQuerySchema = z.object({
@@ -325,10 +320,10 @@ function normalizeStoreStoragePath(value: unknown) {
     return markerIndex >= 0 ? normalized.slice(markerIndex + marker.length) : normalized;
   }
 
-  const objectPublicMatch = raw.match(new RegExp(`/object/public/${STORE_STORAGE_BUCKET}/(.+)$`, "i"));
+  const objectPublicMatch = raw.match(/\/object\/public\/store\/(.+)$/i);
   if (objectPublicMatch?.[1]) return objectPublicMatch[1];
 
-  const fallbackMatch = raw.match(new RegExp(`/${STORE_STORAGE_BUCKET}/(.+)$`, "i"));
+  const fallbackMatch = raw.match(/\/store\/(.+)$/i);
   return fallbackMatch?.[1] ?? null;
 }
 
@@ -341,7 +336,7 @@ function normalizeMediaReferenceForStorage(value: unknown) {
     return { file_url: raw, file_path: filePath };
   }
 
-  const { data } = supabase.storage.from(STORE_STORAGE_BUCKET).getPublicUrl(filePath ?? raw);
+  const { data } = supabase.storage.from("store").getPublicUrl(filePath ?? raw);
   return {
     file_url: data?.publicUrl ?? raw,
     file_path: filePath ?? raw,
@@ -785,7 +780,7 @@ async function hardDeleteStore(sb: any, storeId: string, canonicalMedia: { logo_
   if (coverImagePath) storagePaths.add(coverImagePath);
 
   if (storagePaths.size > 0) {
-    const { error: storageDeleteError } = await supabaseService.storage.from(STORE_STORAGE_BUCKET).remove([...storagePaths]);
+    const { error: storageDeleteError } = await sb.storage.from("store").remove([...storagePaths]);
     if (storageDeleteError) {
       throw new Error(`Failed to delete store files from storage: ${storageDeleteError.message}`);
     }
@@ -831,74 +826,6 @@ async function hardDeleteStore(sb: any, storeId: string, canonicalMedia: { logo_
   const { error: deleteStoreError } = await sb.from("stores").delete().eq("id", storeId);
   if (deleteStoreError) {
     throw new Error(`Failed to delete store: ${deleteStoreError.message}`);
-  }
-}
-
-async function deleteLinkedStoreOwnerUser(ownerUserId: string | null | undefined, deletedStoreId: string) {
-  const normalizedOwnerId = String(ownerUserId ?? "").trim();
-  if (!normalizedOwnerId) return;
-
-  const { data: ownerRow, error: ownerLookupError } = await supabaseService
-    .from("users")
-    .select("id,role")
-    .eq("id", normalizedOwnerId)
-    .maybeSingle();
-
-  if (ownerLookupError) {
-    throw new Error(`Failed to inspect owner user: ${ownerLookupError.message}`);
-  }
-
-  const ownerRole = String(ownerRow?.role ?? "").trim().toLowerCase();
-  if (ownerRole !== "storepartner") return;
-
-  const [
-    otherStoresResult,
-    restaurantResult,
-    corporateResult,
-  ] = await Promise.all([
-    supabaseService
-      .from("stores")
-      .select("id", { count: "exact", head: true })
-      .eq("owner_user_id", normalizedOwnerId)
-      .neq("id", deletedStoreId),
-    supabaseService
-      .from("restaurants")
-      .select("id", { count: "exact", head: true })
-      .eq("owner_user_id", normalizedOwnerId),
-    supabaseService
-      .from("corporate")
-      .select("id", { count: "exact", head: true })
-      .eq("owner_user_id", normalizedOwnerId),
-  ]);
-
-  for (const result of [otherStoresResult, restaurantResult, corporateResult]) {
-    if (result.error) {
-      throw new Error(result.error.message);
-    }
-  }
-
-  const stillReferenced =
-    (otherStoresResult.count ?? 0) > 0 ||
-    (restaurantResult.count ?? 0) > 0 ||
-    (corporateResult.count ?? 0) > 0;
-
-  if (stillReferenced) return;
-
-  const { error: deleteUserRowError } = await supabaseService
-    .from("users")
-    .delete()
-    .eq("id", normalizedOwnerId);
-
-  if (deleteUserRowError) {
-    throw new Error(`Failed to delete users row: ${deleteUserRowError.message}`);
-  }
-
-  const { error: deleteAuthUserError } = await supabaseService.auth.admin.deleteUser(normalizedOwnerId);
-  if (deleteAuthUserError) {
-    const message = String(deleteAuthUserError.message ?? "");
-    if (!message.toLowerCase().includes("not found")) {
-      throw new Error(`Failed to delete auth user: ${deleteAuthUserError.message}`);
-    }
   }
 }
 
@@ -1857,14 +1784,16 @@ router.get("/:id", async (req, res) => {
   const includeServices = include.includes("services");
   const includeSlots = include.includes("slots");
 
-  let hydratedStore: any = null;
-  try {
-    hydratedStore = await fetchHydratedStoreRowById(idParsed.data);
-  } catch (error: any) {
-    return res.status(500).json({ error: error?.message ?? "Failed to load store" });
-  }
+  // main store
+  const { data: store, error } = await supabase
+    .from("stores")
+    .select(STORE_BASE_SELECT)
+    .eq("id", idParsed.data)
+    .maybeSingle();
 
-  if (!hydratedStore) return res.status(404).json({ error: "Store not found" });
+  if (error) return res.status(500).json({ error: error.message });
+  if (!store) return res.status(404).json({ error: "Store not found" });
+  const hydratedStore = await hydrateStoreRow(store);
 
   // related (optional)
   let payment: any = null;
@@ -2030,7 +1959,7 @@ router.delete("/:id", async (req, res) => {
   // Confirm exists
   const exists = await admin.sb
     .from("stores")
-    .select("id,is_active,logo_url,cover_image,owner_user_id")
+    .select("id,is_active,logo_url,cover_image")
     .eq("id", id)
     .maybeSingle();
 
@@ -2043,7 +1972,6 @@ router.delete("/:id", async (req, res) => {
         logo_url: exists.data.logo_url,
         cover_image: exists.data.cover_image,
       });
-      await deleteLinkedStoreOwnerUser(exists.data.owner_user_id, id);
     } catch (error: any) {
       return res.status(500).json({ error: error?.message ?? "Failed to hard delete store" });
     }

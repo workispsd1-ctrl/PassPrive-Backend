@@ -1,9 +1,9 @@
 import supabase from "../../database/supabase";
 
-const STORE_STORAGE_BUCKET = "stores";
+const STORE_STORAGE_BUCKET = "store";
 const STORE_TAG_SELECT = "store_id,tag_type,tag_value,sort_order,created_at";
 const STORE_SOCIAL_LINK_SELECT = "store_id,platform,url,sort_order,created_at";
-const STORE_OPENING_HOURS_SELECT = "store_id,day_of_week,open_time,close_time,is_closed,created_at";
+const STORE_OPENING_HOURS_SELECT = "store_id,day_of_week,open_time,close_time,is_closed,sort_order,created_at";
 const STORE_MEDIA_SELECT =
   "store_id,asset_type,file_url,file_path,sort_order,created_at,is_active";
 const STORE_OFFER_SELECT =
@@ -277,17 +277,11 @@ function normalizeSubscription(row: any) {
   };
 }
 
-type StoreRelationQueryResults = {
-  tags: any[];
-  socialLinks: any[];
-  openingHours: any[];
-  media: any[];
-  offers: any[];
-  subscriptions: any[];
-  reviews: any[];
-};
+export async function hydrateStoreRows(baseStores: any[]) {
+  const stores = Array.isArray(baseStores) ? baseStores : [];
+  const storeIds = Array.from(new Set(stores.map((store) => store?.id).filter(Boolean)));
+  if (!storeIds.length) return stores;
 
-async function queryStoreRelations(storeIds: string[]): Promise<StoreRelationQueryResults> {
   const [
     tagsResult,
     socialLinksResult,
@@ -323,28 +317,13 @@ async function queryStoreRelations(storeIds: string[]): Promise<StoreRelationQue
     if (result.error) throw result.error;
   }
 
-  return {
-    tags: tagsResult.data ?? [],
-    socialLinks: socialLinksResult.data ?? [],
-    openingHours: openingHoursResult.data ?? [],
-    media: mediaResult.data ?? [],
-    offers: offersResult.data ?? [],
-    subscriptions: subscriptionsResult.data ?? [],
-    reviews: reviewsResult.data ?? [],
-  };
-}
-
-function buildHydratedStoreRows(baseStores: any[], relations: StoreRelationQueryResults) {
-  const stores = Array.isArray(baseStores) ? baseStores : [];
-  if (!stores.length) return stores;
-
-  const tagsByStoreId = toMapByStoreId(relations.tags ?? []);
-  const socialLinksByStoreId = toMapByStoreId(relations.socialLinks ?? []);
-  const openingHoursByStoreId = toMapByStoreId(relations.openingHours ?? []);
-  const mediaByStoreId = toMapByStoreId(relations.media ?? []);
-  const offersByStoreId = toMapByStoreId(relations.offers ?? []);
-  const subscriptionsByStoreId = toMapByStoreId(relations.subscriptions ?? []);
-  const reviewsByStoreId = toMapByStoreId(relations.reviews ?? []);
+  const tagsByStoreId = toMapByStoreId(tagsResult.data ?? []);
+  const socialLinksByStoreId = toMapByStoreId(socialLinksResult.data ?? []);
+  const openingHoursByStoreId = toMapByStoreId(openingHoursResult.data ?? []);
+  const mediaByStoreId = toMapByStoreId(mediaResult.data ?? []);
+  const offersByStoreId = toMapByStoreId(offersResult.data ?? []);
+  const subscriptionsByStoreId = toMapByStoreId(subscriptionsResult.data ?? []);
+  const reviewsByStoreId = toMapByStoreId(reviewsResult.data ?? []);
 
   return stores.map((store) => {
     const tagRows = sortByOrderAndCreatedAt(tagsByStoreId.get(store.id) ?? []);
@@ -433,30 +412,6 @@ function buildHydratedStoreRows(baseStores: any[], relations: StoreRelationQuery
       ...ratingSummary,
     };
   });
-}
-
-export async function hydrateStoreRows(baseStores: any[]) {
-  const stores = Array.isArray(baseStores) ? baseStores : [];
-  const storeIds = Array.from(new Set(stores.map((store) => store?.id).filter(Boolean)));
-  if (!storeIds.length) return stores;
-
-  const relations = await queryStoreRelations(storeIds);
-  return buildHydratedStoreRows(stores, relations);
-}
-
-export async function fetchHydratedStoreRowById(storeId: string) {
-  const [
-    storeResult,
-    relations,
-  ] = await Promise.all([
-    supabase.from("stores").select(STORE_BASE_SELECT).eq("id", storeId).maybeSingle(),
-    queryStoreRelations([storeId]),
-  ]);
-
-  if (storeResult.error) throw storeResult.error;
-  if (!storeResult.data) return null;
-
-  return buildHydratedStoreRows([storeResult.data], relations)[0] ?? null;
 }
 
 export async function hydrateStoreRow(baseStore: any) {
