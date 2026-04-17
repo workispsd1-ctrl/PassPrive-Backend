@@ -18,7 +18,14 @@ const store = new Map<string, CacheEntry>();
 const inflight = new Map<string, Promise<void>>();
 const localScopeVersions = new Map<string, number>();
 
-const excludedPrefixes = ["/api/payments", "/api/auth", "/api/admin", "/api/user"];
+const excludedPrefixes = [
+  "/api/payments",
+  "/api/auth",
+  "/api/admin",
+  "/api/user",
+  "/api/moodcategories",
+  "/api/storemoodcategories",
+];
 const cacheScopes = [
   "/api/offers",
   "/api/restaurants",
@@ -29,8 +36,6 @@ const cacheScopes = [
   "/api/homeherooffers",
   "/api/dineinhomebanners",
   "/api/inyourpassprive",
-  "/api/moodcategories",
-  "/api/storemoodcategories",
   "/api/spotlight",
   "/api/restaurant-bookings",
   "/api/editorial-collections",

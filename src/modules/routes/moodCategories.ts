@@ -40,6 +40,25 @@ const parseMetadata = (value: any) => {
 
 const logPrefix = "[restaurant-mood-categories]";
 
+const CATEGORY_SELECT =
+  "id,key,slug,title,subtitle,description,badge_text,image_url,image_path,sort_order,is_active,selection_type,metadata,created_at,updated_at";
+
+const toPublicImageUrl = (imageUrl: any, imagePath: any) => {
+  const normalizedUrl = normalizeText(imageUrl);
+  if (normalizedUrl) return normalizedUrl;
+
+  const normalizedPath = normalizeText(imagePath);
+  if (!normalizedPath) return null;
+
+  const { data } = supabase.storage.from(BUCKET_NAME).getPublicUrl(normalizedPath);
+  return data?.publicUrl ?? normalizedPath;
+};
+
+const shapeCategoryRow = (row: any) => ({
+  ...row,
+  image_url: toPublicImageUrl(row?.image_url, row?.image_path),
+});
+
 const uploadImage = async (file: Express.Multer.File) => {
   const fileExt = file.originalname.split(".").pop();
   const fileName = `mood_category_${Date.now()}.${fileExt}`;
@@ -65,17 +84,16 @@ const uploadImage = async (file: Express.Multer.File) => {
 router.get("/", async (req: Request, res: Response) => {
   try {
     console.log(`${logPrefix} list start`);
-
     const { data, error } = await supabase
       .from(TABLE_NAME)
-      .select("*")
+      .select(CATEGORY_SELECT)
       .order("sort_order", { ascending: true })
       .order("created_at", { ascending: true });
 
     if (error) throw error;
 
     console.log(`${logPrefix} list success`, { count: data?.length ?? 0 });
-    return res.json({ categories: data || [] });
+    return res.json({ categories: (data || []).map(shapeCategoryRow) });
   } catch (err: any) {
     console.error(`${logPrefix} list failed`, {
       message: err?.message ?? String(err),
@@ -91,7 +109,7 @@ router.get("/:id", async (req: Request, res: Response) => {
 
     const { data, error } = await supabase
       .from(TABLE_NAME)
-      .select("*")
+      .select(CATEGORY_SELECT)
       .eq("id", id)
       .single();
 
@@ -101,7 +119,7 @@ router.get("/:id", async (req: Request, res: Response) => {
     }
 
     console.log(`${logPrefix} get success`, { id });
-    return res.json({ category: data });
+    return res.json({ category: shapeCategoryRow(data) });
   } catch (err: any) {
     console.error(`${logPrefix} get failed`, {
       id: req.params.id,
