@@ -40,6 +40,7 @@ const cacheScopes = [
   "/api/spotlight",
   "/api/restaurant-bookings",
   "/api/editorial-collections",
+  "/api/editorials",
   "/api/now-trending",
   "/api/stores-home",
   "/api/corporates",
