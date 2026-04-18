@@ -23,6 +23,7 @@ const excludedPrefixes = [
   "/api/auth",
   "/api/admin",
   "/api/user",
+  "/api/analytics",
   "/api/moodcategories",
   "/api/storemoodcategories",
 ];
@@ -39,6 +40,7 @@ const cacheScopes = [
   "/api/spotlight",
   "/api/restaurant-bookings",
   "/api/editorial-collections",
+  "/api/now-trending",
   "/api/stores-home",
   "/api/corporates",
 ];

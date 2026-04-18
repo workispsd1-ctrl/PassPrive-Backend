@@ -20,6 +20,8 @@ import StoresHomeBanners from "./modules/routes/storesHomeBanners";
 import corporatesRouter from "./modules/routes/corporates";
 import Payments from "./modules/routes/payments";
 import EditorialCollections from "./modules/routes/editorialCollections";
+import NowTrending from "./modules/routes/nowTrending";
+import Analytics from "./modules/routes/analytics";
 import { cacheInvalidationMiddleware, responseCacheMiddleware } from "./modules/middleware/responseCache";
 import { requestTelemetryMiddleware } from "./modules/middleware/requestTelemetry";
 import { rateLimitMiddleware } from "./modules/middleware/rateLimit";
@@ -117,6 +119,8 @@ app.use("/api/store-catalogue", StoreCatalogue);
 app.use("/api/store-catalog", StoreCatalogue); // Alias for clients using US spelling
 app.use("/api/payments", Payments);
 app.use("/api/editorial-collections", EditorialCollections);
+app.use("/api/now-trending", NowTrending);
+app.use("/api/analytics", Analytics);
 app.use("/api/stores-home", StoresHomeSections);
 app.use("/api/stores", Stores);
 app.use("/api/store", Stores);       // Alias
