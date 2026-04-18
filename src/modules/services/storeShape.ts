@@ -9,7 +9,7 @@ const STORE_MEDIA_SELECT =
 const STORE_OFFER_SELECT =
   "id,store_id,title,description,badge_text,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata,created_at";
 const STORE_SUBSCRIPTION_SELECT =
-  "id,store_id,plan_code,status,pickup_premium_enabled,starts_at,expires_at,metadata,created_at,updated_at";
+  "id,store_id,plan_code,status,pickup_premium_enabled,starts_at,expires_at,created_at,updated_at";
 
 export const STORE_BASE_SELECT = [
   "id",
