@@ -1,13 +1,13 @@
 import supabase from "../../database/supabase";
 
-const STORE_STORAGE_BUCKET = "store";
+const STORE_STORAGE_BUCKET = "stores";
 const STORE_TAG_SELECT = "store_id,tag_type,tag_value,sort_order,created_at";
 const STORE_SOCIAL_LINK_SELECT = "store_id,platform,url,sort_order,created_at";
-const STORE_OPENING_HOURS_SELECT = "store_id,day_of_week,open_time,close_time,is_closed,sort_order,created_at";
+const STORE_OPENING_HOURS_SELECT = "store_id,day_of_week,open_time,close_time,is_closed,created_at";
 const STORE_MEDIA_SELECT =
   "store_id,asset_type,file_url,file_path,sort_order,created_at,is_active";
 const STORE_OFFER_SELECT =
-  "id,store_id,title,description,badge_text,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata,sort_order,created_at";
+  "id,store_id,title,description,badge_text,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata,created_at";
 const STORE_SUBSCRIPTION_SELECT =
   "id,store_id,plan_code,status,pickup_premium_enabled,starts_at,expires_at,metadata,created_at,updated_at";
 

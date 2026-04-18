@@ -1576,6 +1576,45 @@ router.get("/new-kick-in", async (req, res) => {
 
   const excludedStoreIds = parseStoreIdList(excludeStoreIds);
   const freshnessCutoff = new Date(Date.now() - freshnessDays * 24 * 60 * 60 * 1000);
+  const rpcLimit = Math.min(Math.max(limit + offset + excludedStoreIds.size, limit), 100);
+
+  try {
+    const rpcResult = await withTimeout(
+      supabase.rpc("get_new_kick_in_stores", {
+        p_user_lat: lat,
+        p_user_lng: lng,
+        p_city: city ?? null,
+        p_limit: rpcLimit,
+      }),
+      LIST_QUERY_TIMEOUT_MS,
+      "GET /api/stores/new-kick-in rpc"
+    );
+
+    const { data, error } = rpcResult as any;
+    if (!error && Array.isArray(data)) {
+      const usableRows = data.filter(
+        (row: any) => !excludedStoreIds.has(String(row?.store_id || row?.id || ""))
+      );
+      const pageItems = usableRows.slice(offset, offset + limit);
+
+      return res.json({
+        items: pageItems,
+        page: { limit, offset, total: usableRows.length },
+      });
+    }
+
+    if (STORE_ROUTE_DEBUG && error) {
+      console.warn("[GET /api/stores/new-kick-in] RPC failed, falling back to query hydrator", {
+        message: error.message,
+      });
+    }
+  } catch (error: any) {
+    if (STORE_ROUTE_DEBUG) {
+      console.warn("[GET /api/stores/new-kick-in] RPC unavailable, falling back to query hydrator", {
+        message: error?.message ?? String(error),
+      });
+    }
+  }
 
   let query = supabase.from("stores").select(STORE_BASE_SELECT, { count: "exact" });
 
