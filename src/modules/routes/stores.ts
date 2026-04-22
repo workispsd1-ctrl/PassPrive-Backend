@@ -1362,7 +1362,6 @@ router.get("/", async (req, res) => {
   query = query
     .order("is_advertised", { ascending: false })
     .order("ad_priority", { ascending: true, nullsFirst: false })
-    .order("pickup_premium_enabled", { ascending: false })
     .order(sort, { ascending: order === "asc" });
 
   if (sort !== "created_at") {
