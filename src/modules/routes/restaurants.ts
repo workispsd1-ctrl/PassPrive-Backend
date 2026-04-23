@@ -1136,7 +1136,7 @@ router.get("/picker", async (req, res) => {
     })),
   });
 });
-
+  
 /**
  * ✅ POST create restaurant ONLY (NO partner creation here)
  * owner_user_id can be passed from frontend after /api/auth/create-user returns id

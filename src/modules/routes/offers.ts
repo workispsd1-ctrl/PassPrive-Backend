@@ -65,6 +65,8 @@ const OfferBaseSchema = z
     ribbon_text: z.string().trim().nullable().optional(),
     logo_url: z.string().trim().nullable().optional(),
     sponsor_name: z.string().trim().nullable().optional(),
+    discount_value: z.coerce.number().nullable().optional(),
+    Discount_value: z.coerce.number().nullable().optional(),
     benefit_value: z.coerce.number().nullable().optional(),
     benefit_percent: z.coerce.number().nullable().optional(),
     max_discount_amount: z.coerce.number().nullable().optional(),
@@ -237,6 +239,39 @@ function buildNullAwarePayload(payload: Record<string, any>) {
   );
 }
 
+function normalizeOfferPayloadForStorage(payload: Record<string, any>) {
+  const normalized = { ...payload };
+  const discountValue =
+    normalized.discount_value ?? normalized.Discount_value ?? normalized.benefit_value;
+
+  if (normalized.Discount_value === undefined && discountValue !== undefined) {
+    normalized.Discount_value = discountValue;
+  }
+
+  if (discountValue !== undefined) {
+    // Keep legacy and canonical discount fields in sync so updates are deterministic.
+    normalized.benefit_value = discountValue;
+    normalized.Discount_value = discountValue;
+  }
+
+  delete normalized.discount_value;
+  return normalized;
+}
+
+function normalizeOfferResponse(offer: any) {
+  if (!offer) return offer;
+
+  const discountValue =
+    offer.discount_value ?? offer.Discount_value ?? offer.benefit_value ?? null;
+
+  return {
+    ...offer,
+    discount_value: discountValue,
+    Discount_value: discountValue,
+    benefit_value: offer.benefit_value ?? discountValue,
+  };
+}
+
 function normalizeRequestValue(value: any) {
   if (value === "null") return null;
   if (value === "undefined") return undefined;
@@ -391,7 +426,7 @@ async function getOfferBundle(offerId: string) {
   if (usageLimitError) throw usageLimitError;
 
   return {
-    ...offer,
+    ...normalizeOfferResponse(offer),
     targets: targets ?? [],
     conditions: conditions ?? [],
     payment_rules: payment_rules ?? [],
@@ -607,6 +642,9 @@ async function isUsageLimitAvailable(offer: any, usageLimit: any, context: any) 
 }
 
 function normalizeApplicableOffer(offer: any, applicability: { is_eligible: boolean; reason: string | null }) {
+  const discountValue =
+    offer.discount_value ?? offer.Discount_value ?? offer.benefit_value ?? null;
+
   return {
     id: offer.id,
     source_type: offer.source_type,
@@ -618,7 +656,9 @@ function normalizeApplicableOffer(offer: any, applicability: { is_eligible: bool
     ribbon_text: offer.ribbon_text ?? null,
     logo_url: offer.logo_url ?? null,
     offer_type: offer.offer_type,
-    benefit_value: offer.benefit_value ?? null,
+    discount_value: discountValue,
+    Discount_value: discountValue,
+    benefit_value: offer.benefit_value ?? discountValue,
     benefit_percent: offer.benefit_percent ?? null,
     max_discount_amount: offer.max_discount_amount ?? null,
     currency_code: offer.currency_code ?? "MUR",
@@ -787,7 +827,7 @@ router.get("/", async (req, res) => {
     .order("created_at", { ascending: false });
 
   if (error) return res.status(500).json({ error: error.message });
-  return res.json({ items: data ?? [] });
+  return res.json({ items: (data ?? []).map((item) => normalizeOfferResponse(item)) });
 });
 
 router.get("/applicable/store/:storeId", async (req, res) => {
@@ -864,7 +904,7 @@ router.post("/", upload.single("logo"), async (req, res) => {
   }
 
   const payload = buildNullAwarePayload({
-    ...parsed.data,
+    ...normalizeOfferPayloadForStorage(parsed.data),
     currency_code: parsed.data.currency_code ?? "MUR",
     is_active: parsed.data.is_active ?? true,
     is_auto_apply: parsed.data.is_auto_apply ?? true,
@@ -883,7 +923,7 @@ router.post("/", upload.single("logo"), async (req, res) => {
     .single();
 
   if (error) return res.status(500).json({ error: error.message });
-  return res.status(201).json({ offer: data });
+  return res.status(201).json({ offer: normalizeOfferResponse(data) });
 });
 
 router.put("/:id", upload.single("logo"), async (req, res) => {
@@ -906,7 +946,7 @@ router.put("/:id", upload.single("logo"), async (req, res) => {
   }
 
   const payload = buildNullAwarePayload({
-    ...parsed.data,
+    ...normalizeOfferPayloadForStorage(parsed.data),
     ...(logoUrl ? { logo_url: logoUrl } : {}),
   });
   if (Object.keys(payload).length === 0) {
@@ -921,7 +961,7 @@ router.put("/:id", upload.single("logo"), async (req, res) => {
     .single();
 
   if (error) return res.status(500).json({ error: error.message });
-  return res.json({ offer: data });
+  return res.json({ offer: normalizeOfferResponse(data) });
 });
 
 router.delete("/:id", async (req, res) => {
