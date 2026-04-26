@@ -381,6 +381,28 @@ function deriveClientStatus(booking: any) {
   return booking?.status;
 }
 
+async function loadRestaurantOpeningHours(restaurantId: string) {
+  const { data, error } = await supabase
+    .from("restaurant_opening_hours")
+    .select("day_of_week,open_time,close_time,is_closed")
+    .eq("restaurant_id", restaurantId);
+
+  if (error) {
+    return null;
+  }
+
+  const openingHours: Record<string, { open: string; close: string; is_closed?: boolean }> = {};
+  for (const row of data ?? []) {
+    const day = Number(row.day_of_week);
+    if (!Number.isInteger(day) || day < 0 || day > 6) continue;
+    openingHours[String(day)] = row.is_closed
+      ? { open: "", close: "", is_closed: true }
+      : { open: String(row.open_time ?? ""), close: String(row.close_time ?? "") };
+  }
+
+  return openingHours;
+}
+
 async function getRestaurantSlotBookingCount(restaurantId: string, bookingDate: string, bookingTime: string) {
   const { count, error } = await supabase
     .from("restaurant_bookings")
@@ -477,7 +499,10 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
     return { ok: false as const, status: 400, body: { error: "Selected slot is no longer available", code: "INVALID_SLOT" } };
   }
 
-  const openingWindows = getOpeningWindowsForDate(restaurant.opening_hours, bookingDateValue);
+  const openingHours =
+    (await loadRestaurantOpeningHours(restaurantId)) ??
+    (restaurant?.opening_hours && typeof restaurant.opening_hours === "object" ? restaurant.opening_hours : {});
+  const openingWindows = getOpeningWindowsForDate(openingHours, bookingDateValue);
   if (openingWindows.length > 0) {
     const bookingTimeMinutes = timeToMinutes(bookingTime);
     const isOpenForSlot =
