@@ -535,6 +535,24 @@ function getDayKey(dayOfWeek: number) {
   return String(dayOfWeek);
 }
 
+function getWeekdayName(dayOfWeek: number) {
+  const names = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+  return names[dayOfWeek] ?? null;
+}
+
+function addOpeningHourEntry(
+  bucket: Record<string, { open: string; close: string; is_closed?: boolean }>,
+  dayOfWeek: number,
+  value: { open: string; close: string; is_closed?: boolean }
+) {
+  bucket[String(dayOfWeek)] = value;
+  const weekdayName = getWeekdayName(dayOfWeek);
+  if (weekdayName) {
+    bucket[weekdayName] = value;
+    bucket[weekdayName.slice(0, 3)] = value;
+  }
+}
+
 function extractRestaurantStoragePath(value: unknown) {
   const raw = String(value ?? "").trim();
   if (!raw) return null;
@@ -694,9 +712,10 @@ async function hydrateRestaurants(baseRestaurants: any[]) {
   const hoursByRestaurant = new Map<string, Record<string, { open: string; close: string; is_closed?: boolean }>>();
   for (const hour of sortByOrderAndCreatedAt(hoursResp.data ?? [])) {
     const bucket = hoursByRestaurant.get(hour.restaurant_id) ?? {};
-    bucket[getDayKey(hour.day_of_week)] = hour.is_closed
+    const normalizedHour = hour.is_closed
       ? { open: "", close: "", is_closed: true }
       : { open: hour.open_time, close: hour.close_time };
+    addOpeningHourEntry(bucket, Number(hour.day_of_week), normalizedHour);
     hoursByRestaurant.set(hour.restaurant_id, bucket);
   }
 
