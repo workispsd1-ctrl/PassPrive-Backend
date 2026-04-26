@@ -74,7 +74,7 @@ export async function hydrateRestaurantPreviewRows(baseRestaurants: any[]) {
       .in("tag_type", ["cuisine", "facility", "highlight", "worth_visit", "mood"]),
     supabase
       .from("restaurant_media_assets")
-      .select("restaurant_id,asset_type,file_url,sort_order,created_at,is_active")
+      .select("id,restaurant_id,asset_type,file_url,file_path,sort_order,created_at,is_active")
       .in("restaurant_id", restaurantIds)
       .eq("is_active", true)
       .in("asset_type", ["food", "ambience", "menu"]),
@@ -111,12 +111,34 @@ export async function hydrateRestaurantPreviewRows(baseRestaurants: any[]) {
   }
 
   const mediaByRestaurant = new Map<string, Record<string, string[]>>();
+  const mediaAssetsByRestaurant = new Map<
+    string,
+    Array<{
+      id: string;
+      asset_type: string;
+      file_url: string;
+      file_path: string | null;
+      sort_order: number | null;
+      is_active: boolean;
+    }>
+  >();
   for (const row of sortByOrderAndCreatedAt(mediaResp.data ?? [])) {
     const bucket = mediaByRestaurant.get(row.restaurant_id) ?? {};
     const values = bucket[row.asset_type] ?? [];
     values.push(row.file_url);
     bucket[row.asset_type] = values;
     mediaByRestaurant.set(row.restaurant_id, bucket);
+
+    const assets = mediaAssetsByRestaurant.get(row.restaurant_id) ?? [];
+    assets.push({
+      id: row.id,
+      asset_type: row.asset_type,
+      file_url: row.file_url,
+      file_path: row.file_path ?? null,
+      sort_order: row.sort_order ?? null,
+      is_active: row.is_active !== false,
+    });
+    mediaAssetsByRestaurant.set(row.restaurant_id, assets);
   }
 
   const hoursByRestaurant = new Map<
@@ -211,6 +233,7 @@ export async function hydrateRestaurantPreviewRows(baseRestaurants: any[]) {
       food_images: media.food ?? [],
       ambience_images: media.ambience ?? [],
       menu_images: media.menu ?? [],
+      media_assets: mediaAssetsByRestaurant.get(restaurant.id) ?? [],
       opening_hours: hoursByRestaurant.get(restaurant.id) ?? {},
       subscribed: Boolean(activeSubscription),
       subscribed_plan: activeSubscription?.plan_code ?? null,

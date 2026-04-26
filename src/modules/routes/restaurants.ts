@@ -665,7 +665,7 @@ async function hydrateRestaurants(baseRestaurants: any[]) {
       .in("restaurant_id", restaurantIds),
     supabase
       .from("restaurant_media_assets")
-      .select("restaurant_id,asset_type,file_url,sort_order,created_at,is_active")
+      .select("id,restaurant_id,asset_type,file_url,file_path,sort_order,created_at,is_active")
       .in("restaurant_id", restaurantIds)
       .eq("is_active", true),
     supabase
@@ -701,12 +701,34 @@ async function hydrateRestaurants(baseRestaurants: any[]) {
   }
 
   const mediaByRestaurant = new Map<string, Record<string, string[]>>();
+  const mediaAssetsByRestaurant = new Map<
+    string,
+    Array<{
+      id: string;
+      asset_type: string;
+      file_url: string;
+      file_path: string | null;
+      sort_order: number | null;
+      is_active: boolean;
+    }>
+  >();
   for (const asset of sortByOrderAndCreatedAt(mediaResp.data ?? [])) {
     const bucket = mediaByRestaurant.get(asset.restaurant_id) ?? {};
     const values = bucket[asset.asset_type] ?? [];
     values.push(asset.file_url);
     bucket[asset.asset_type] = values;
     mediaByRestaurant.set(asset.restaurant_id, bucket);
+
+    const assets = mediaAssetsByRestaurant.get(asset.restaurant_id) ?? [];
+    assets.push({
+      id: asset.id,
+      asset_type: asset.asset_type,
+      file_url: asset.file_url,
+      file_path: asset.file_path ?? null,
+      sort_order: asset.sort_order ?? null,
+      is_active: asset.is_active !== false,
+    });
+    mediaAssetsByRestaurant.set(asset.restaurant_id, assets);
   }
 
   const hoursByRestaurant = new Map<string, Record<string, { open: string; close: string; is_closed?: boolean }>>();
@@ -839,6 +861,7 @@ async function hydrateRestaurants(baseRestaurants: any[]) {
       food_images: media.food ?? [],
       ambience_images: media.ambience ?? [],
       menu_images: media.menu ?? [],
+      media_assets: mediaAssetsByRestaurant.get(restaurant.id) ?? [],
       opening_hours: hoursByRestaurant.get(restaurant.id) ?? {},
       subscribed: Boolean(activeSubscription),
       subscribed_plan: activeSubscription?.plan_code ?? null,
@@ -893,11 +916,12 @@ async function replaceRestaurantTags(
 async function replaceRestaurantMedia(
   sb: any,
   restaurantId: string,
-  updates: Partial<Record<"food_images" | "ambience_images", string[]>>,
+  updates: Partial<Record<"food_images" | "ambience_images" | "menu_images", string[]>>,
 ) {
   const mappings = [
     { bodyKey: "food_images" as const, assetType: "food" },
     { bodyKey: "ambience_images" as const, assetType: "ambience" },
+    { bodyKey: "menu_images" as const, assetType: "menu" },
   ];
 
   for (const { bodyKey, assetType } of mappings) {
@@ -1183,6 +1207,7 @@ const CreateRestaurantSchema = z.object({
 
   food_images: z.array(z.string()).optional().default([]),
   ambience_images: z.array(z.string()).optional().default([]),
+  menu_images: z.array(z.string()).optional().default([]),
   cover_image: z.string().optional().nullable(),
 
   is_active: z.boolean().optional().default(true),
@@ -1231,6 +1256,7 @@ const UpdateRestaurantSchema = z.object({
 
   food_images: z.array(z.string()).optional(),
   ambience_images: z.array(z.string()).optional(),
+  menu_images: z.array(z.string()).optional(),
   cover_image: z.string().nullable().optional(),
 
   is_active: z.boolean().optional(),
@@ -1665,6 +1691,7 @@ router.post("/", async (req, res) => {
     await replaceRestaurantMedia(sb, data.id, {
       food_images: body.food_images ?? [],
       ambience_images: body.ambience_images ?? [],
+      menu_images: body.menu_images ?? [],
     });
     await replaceRestaurantOpeningHours(sb, data.id, body.opening_hours ?? {});
     await replaceRestaurantOffers(sb, data.id, getOfferRowsFromBody(body) ?? []);
@@ -1717,6 +1744,7 @@ router.put("/:id", async (req, res) => {
   delete payload.mood_tags;
   delete payload.food_images;
   delete payload.ambience_images;
+  delete payload.menu_images;
   delete payload.opening_hours;
   delete payload.offer;
   delete payload.offers;
@@ -1753,6 +1781,7 @@ router.put("/:id", async (req, res) => {
     await replaceRestaurantMedia(access.sb, id, {
       food_images: bodyParsed.data.food_images,
       ambience_images: bodyParsed.data.ambience_images,
+      menu_images: bodyParsed.data.menu_images,
     });
     await replaceRestaurantOpeningHours(access.sb, id, bodyParsed.data.opening_hours);
     await replaceRestaurantOffers(access.sb, id, getOfferRowsFromBody(bodyParsed.data));
