@@ -12,6 +12,7 @@ import StoreInYourPassPrive from "./modules/routes/storeInYourPassPrive";
 import SpotLight from "./modules/routes/spotLight"
 import Offers from "./modules/routes/offers";
 import RestaurantBookings from "./modules/routes/restaurantBookings";
+import StoreServiceBookings, { STORE_SERVICE_BOOKING_ROUTE_ALIASES } from "./modules/routes/storeServiceBookings";
 import Restaurants from "./modules/routes/restaurants";
 import StoreCatalogue from "./modules/routes/storeCatalogue";
 import StoresHomeSections from "./modules/routes/storesHomeSections";
@@ -113,6 +114,9 @@ app.use("/api/storemoodcategories", StoreMoodCategories);
 app.use("/api/spotlight", SpotLight);
 
 app.use("/api/restaurant-bookings", RestaurantBookings);
+for (const alias of STORE_SERVICE_BOOKING_ROUTE_ALIASES) {
+  app.use(alias, StoreServiceBookings);
+}
 app.use("/api/restaurants", Restaurants);
 app.use("/api/restaurant", Restaurants); // Alias
 
