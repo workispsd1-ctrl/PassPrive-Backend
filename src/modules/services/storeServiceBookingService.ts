@@ -3,7 +3,7 @@ import supabase from "../../database/supabase";
 import type { AuthenticatedCustomer } from "./authService";
 import { normalizeDateString, normalizeTimeString } from "./restaurantBookingService";
 
-const NON_CANCELLED_STATUSES = ["pending", "confirmed", "seated", "completed"];
+const NON_CANCELLED_ORDER_STATUSES = ["NEW", "PLACED", "ACCEPTED", "PREPARING", "READY", "OUT_FOR_DELIVERY"];
 
 const StoreRefSchema = z.union([
   z.string().uuid(),
@@ -68,8 +68,14 @@ function generateBookingCode() {
   return `PP-${dateSegment}-${randomSegment}`;
 }
 
-function deriveClientStatus(booking: any) {
-  return booking?.status;
+function deriveClientStatus(order: any) {
+  const status = String(order?.status ?? "").trim().toUpperCase();
+  if (["NEW"].includes(status)) return "pending";
+  if (["PLACED", "ACCEPTED", "PREPARING", "READY", "OUT_FOR_DELIVERY", "DELIVERED"].includes(status)) {
+    return "confirmed";
+  }
+  if (["REJECTED", "CANCELLED"].includes(status)) return "cancelled";
+  return "pending";
 }
 
 function normalizeStoreId(value: string | { id: string } | null | undefined) {
@@ -96,24 +102,62 @@ function normalizeServiceLines(body: StoreServiceBookingPayload) {
   });
 }
 
-function mapBookingForClient(booking: any) {
+function buildUtcSlotIso(bookingDate: string, bookingTime: string) {
+  const [year, month, day] = bookingDate.split("-").map(Number);
+  const [hour, minute, second] = bookingTime.split(":").map(Number);
+  if (
+    !Number.isInteger(year) || !Number.isInteger(month) || !Number.isInteger(day) ||
+    !Number.isInteger(hour) || !Number.isInteger(minute) || !Number.isInteger(second)
+  ) {
+    return null;
+  }
+  return new Date(Date.UTC(year, month - 1, day, hour, minute, second)).toISOString();
+}
+
+function parseSlotToDateAndTime(slot: any, fallbackDate?: any, fallbackTime?: any) {
+  const slotString = String(slot ?? "").trim();
+  if (slotString) {
+    const parsed = new Date(slotString);
+    if (!Number.isNaN(parsed.getTime())) {
+      const year = parsed.getUTCFullYear();
+      const month = String(parsed.getUTCMonth() + 1).padStart(2, "0");
+      const day = String(parsed.getUTCDate()).padStart(2, "0");
+      const hours = String(parsed.getUTCHours()).padStart(2, "0");
+      const minutes = String(parsed.getUTCMinutes()).padStart(2, "0");
+      const seconds = String(parsed.getUTCSeconds()).padStart(2, "0");
+      return {
+        date: `${year}-${month}-${day}`,
+        time: `${hours}:${minutes}:${seconds}`,
+      };
+    }
+  }
+
   return {
-    id: booking.id,
-    booking_code: booking.booking_code ?? null,
-    store_id: booking.store_id,
-    booking_date: booking.booking_date,
-    booking_time: booking.booking_time,
-    status: deriveClientStatus(booking),
-    booking_status: booking.status,
-    notes: booking.special_request ?? null,
-    services: booking.services ?? booking.service_details ?? [],
-    selected_offer: booking.selected_offer ?? null,
-    cover_charge_amount: booking.cover_charge_amount ?? null,
-    payment_status: booking.payment_status ?? null,
-    payment_method: booking.payment_method ?? null,
-    payment_reference: booking.payment_reference ?? null,
-    payment_amount: booking.payment_amount ?? null,
-    metadata: booking.metadata ?? null,
+    date: normalizeDateString(String(fallbackDate ?? "")) ?? null,
+    time: normalizeTimeString(String(fallbackTime ?? "")) ?? null,
+  };
+}
+
+function mapBookingForClient(order: any) {
+  const slot = parseSlotToDateAndTime(order.slot_start_at, order.metadata?.booking_date, order.metadata?.booking_time);
+
+  return {
+    id: order.id,
+    booking_code: order.order_no ?? null,
+    store_id: order.store_id,
+    booking_date: slot.date,
+    booking_time: slot.time,
+    status: deriveClientStatus(order),
+    booking_status: order.status,
+    notes: order.notes ?? null,
+    services: order.items ?? [],
+    selected_offer: order.metadata?.selected_offer ?? null,
+    cover_charge_amount: order.metadata?.cover_charge_amount ?? null,
+    payment_status: order.payment_status ? String(order.payment_status).toLowerCase() : null,
+    payment_method: order.payment_method ?? null,
+    payment_reference: order.metadata?.payment?.reference ?? null,
+    payment_amount: order.total_amount ?? null,
+    metadata: order.metadata ?? null,
   };
 }
 
@@ -121,17 +165,15 @@ async function findRecentDuplicateBooking(params: {
   db: any;
   storeId: string;
   customerUserId: string;
-  bookingDate: string;
-  bookingTime: string;
+  slotStartAt: string;
 }) {
   const { data, error } = await params.db
-    .from("store_bookings")
+    .from("store_orders")
     .select("*")
     .eq("store_id", params.storeId)
     .eq("customer_user_id", params.customerUserId)
-    .eq("booking_date", params.bookingDate)
-    .eq("booking_time", params.bookingTime)
-    .in("status", NON_CANCELLED_STATUSES)
+    .eq("slot_start_at", params.slotStartAt)
+    .in("status", NON_CANCELLED_ORDER_STATUSES)
     .order("created_at", { ascending: false })
     .limit(1)
     .maybeSingle();
@@ -240,40 +282,58 @@ export async function confirmStoreServiceBooking(
   const paymentAmount = parseNumericSignal(payment?.amount);
   const paymentRequired = paymentAmount > 0;
   const paymentVerified = !paymentRequired || isPaymentVerified(payment);
-  const normalizedPaymentStatus = paymentRequired ? (paymentVerified ? "paid" : "pending") : "paid";
-  const normalizedBookingStatus = paymentVerified ? "confirmed" : "pending";
+  const normalizedPaymentStatus = paymentRequired ? (paymentVerified ? "PAID" : "PENDING") : "PAID";
+  const normalizedOrderStatus = paymentVerified ? "PLACED" : "NEW";
+
+  const totalDuration = normalizedServices.reduce((total, line) => total + line.duration_minutes * line.quantity, 0);
+  const slotStartAt = buildUtcSlotIso(bookingDate, bookingTime);
+  if (!slotStartAt) {
+    return {
+      ok: false as const,
+      status: 400,
+      body: {
+        error: "Invalid booking date or time",
+        code: "INVALID_SLOT",
+      },
+    };
+  }
+
+  const slotEndAt = new Date(new Date(slotStartAt).getTime() + (totalDuration || 30) * 60 * 1000).toISOString();
 
   const existingBooking = await findRecentDuplicateBooking({
     db,
     storeId,
     customerUserId: customer.userId,
-    bookingDate,
-    bookingTime,
+    slotStartAt,
   });
 
   if (existingBooking) {
     let updatedBooking = existingBooking;
 
-    const shouldConfirmPending = existingBooking.status === "pending" && paymentVerified;
+    const shouldConfirmPending = existingBooking.status === "NEW" && paymentVerified;
     const shouldSyncPayment =
       paymentRequired &&
-      (String(existingBooking.payment_status ?? "").trim().toLowerCase() !== normalizedPaymentStatus ||
-        existingBooking.payment_reference !== (payment?.reference ?? null) ||
-        existingBooking.payment_method !== (payment?.method ?? null));
+      (String(existingBooking.payment_status ?? "").trim().toUpperCase() !== normalizedPaymentStatus ||
+        String(existingBooking.payment_method ?? "") !== String(payment?.method ?? existingBooking.payment_method ?? "") ||
+        String(existingBooking.total_amount ?? "") !== String(paymentAmount));
 
     if (shouldConfirmPending || shouldSyncPayment) {
       const { data: syncedBooking, error: syncError } = await db
-        .from("store_bookings")
+        .from("store_orders")
         .update({
-          status: shouldConfirmPending ? "confirmed" : existingBooking.status,
-          payment_required: paymentRequired,
-          cover_charge_required: paymentRequired,
-          cover_charge_amount: paymentAmount,
-          payment_amount: paymentAmount,
+          status: shouldConfirmPending ? "PLACED" : existingBooking.status,
           payment_status: normalizedPaymentStatus,
           payment_method: payment?.method ?? existingBooking.payment_method ?? null,
-          payment_reference: payment?.reference ?? existingBooking.payment_reference ?? null,
+          total_amount: paymentAmount > 0 ? paymentAmount : existingBooking.total_amount,
           updated_at: new Date().toISOString(),
+          metadata: {
+            ...(existingBooking.metadata ?? {}),
+            payment: {
+              ...(existingBooking.metadata?.payment ?? {}),
+              ...(payment ?? {}),
+              amount: paymentAmount,
+            },
+          },
         })
         .eq("id", existingBooking.id)
         .select("*")
@@ -306,61 +366,50 @@ export async function confirmStoreServiceBooking(
     };
   }
 
-  const customerBookingNumberResp = await db
-    .from("store_bookings")
-    .select("id", { count: "exact", head: true })
-    .eq("customer_user_id", customer.userId);
-
-  if (customerBookingNumberResp?.error) {
-    return {
-      ok: false as const,
-      status: 500,
-      body: {
-        error: customerBookingNumberResp.error.message,
-        code: "BOOKING_COUNT_FAILED",
-      },
-    };
-  }
-
-  const totalDuration = normalizedServices.reduce((total, line) => total + line.duration_minutes * line.quantity, 0);
   const bookingCode = generateBookingCode();
+  const subtotal = Number(
+    normalizedServices.reduce((total, line) => total + parseNumericSignal(line.price) * parseNumericSignal(line.quantity), 0)
+  );
+  const totalAmount = paymentAmount > 0 ? paymentAmount : subtotal;
 
   const insertPayload = {
+    order_no: bookingCode,
     store_id: storeId,
     customer_user_id: customer.userId,
     customer_name: customer.fullName || "Guest",
     customer_phone: customer.phone || "NA",
     customer_email: customer.email,
-    booking_date: bookingDate,
-    booking_time: bookingTime,
-    duration_minutes: totalDuration || 30,
-    status: normalizedBookingStatus,
-    source: String(body.metadata?.source ?? "app"),
-    special_request: body.notes ?? null,
-    booking_code: bookingCode,
-    read: false,
-    customer_booking_number: (customerBookingNumberResp?.count ?? 0) + 1,
-    selected_offer: body.option ?? null,
-    payment_required: paymentRequired,
-    cover_charge_required: paymentRequired,
-    cover_charge_amount: paymentAmount,
-    payment_amount: paymentAmount,
+    notes: body.notes ?? null,
+    items: normalizedServices,
+    subtotal,
+    total_amount: totalAmount,
+    payment_method: payment?.method ?? "COD",
     payment_status: normalizedPaymentStatus,
-    payment_method: payment?.method ?? null,
-    payment_reference: payment?.reference ?? null,
-    booked_slot_label: selectedTime,
-    services: normalizedServices,
-    service_details: normalizedServices,
+    status: normalizedOrderStatus,
+    order_flow: "BASIC",
+    service_type: "APPOINTMENT",
+    selected_item_in_store: true,
+    scheduled_for: slotStartAt,
+    slot_start_at: slotStartAt,
+    slot_end_at: slotEndAt,
     metadata: {
       ...(body.metadata ?? {}),
       stylist: body.metadata?.stylist ?? null,
       source: body.metadata?.source ?? "app",
       serviceBooking: body.serviceBooking !== false,
+      selected_offer: body.option ?? null,
+      cover_charge_amount: paymentAmount,
+      booking_date: bookingDate,
+      booking_time: bookingTime,
+      payment: {
+        ...(payment ?? {}),
+        amount: paymentAmount,
+      },
     },
   };
 
   const { data: booking, error: insertError } = await db
-    .from("store_bookings")
+    .from("store_orders")
     .insert(insertPayload as any)
     .select("*")
     .single();

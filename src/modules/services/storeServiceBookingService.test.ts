@@ -12,7 +12,6 @@ import {
 type DbMockOptions = {
   store?: any;
   existingBooking?: any;
-  bookingCount?: number;
 };
 
 function createDbMock(options: DbMockOptions = {}) {
@@ -27,27 +26,19 @@ function createDbMock(options: DbMockOptions = {}) {
       const state: {
         filters: Record<string, any>;
         inFilters: Record<string, any[]>;
-        isCountHead: boolean;
         pendingInsert?: any;
         pendingUpdate?: any;
-        selectedColumns?: string;
       } = {
         filters: {},
         inFilters: {},
-        isCountHead: false,
       };
 
       const chain: any = {
-        select(columns?: string, config?: any) {
-          state.selectedColumns = columns;
-          state.isCountHead = Boolean(config?.head);
+        select() {
           return chain;
         },
         eq(key: string, value: any) {
           state.filters[key] = value;
-          if (state.isCountHead) {
-            return Promise.resolve({ count: options.bookingCount ?? 0, error: null });
-          }
           return chain;
         },
         in(key: string, values: any[]) {
@@ -78,19 +69,18 @@ function createDbMock(options: DbMockOptions = {}) {
             return { data: null, error: null };
           }
 
-          if (table === "store_bookings") {
+          if (table === "store_orders") {
             const existing = options.existingBooking;
             const matchesStatus =
               !state.inFilters.status ||
-              state.inFilters.status.includes(String(existing?.status ?? "").toLowerCase()) ||
+              state.inFilters.status.includes(String(existing?.status ?? "").toUpperCase()) ||
               state.inFilters.status.includes(existing?.status);
 
             const matches =
               !!existing &&
               String(existing.store_id) === String(state.filters.store_id) &&
               String(existing.customer_user_id) === String(state.filters.customer_user_id) &&
-              String(existing.booking_date) === String(state.filters.booking_date) &&
-              String(existing.booking_time) === String(state.filters.booking_time) &&
+              String(existing.slot_start_at) === String(state.filters.slot_start_at) &&
               matchesStatus;
 
             return { data: matches ? existing : null, error: null };
@@ -99,7 +89,7 @@ function createDbMock(options: DbMockOptions = {}) {
           return { data: null, error: null };
         },
         async single() {
-          if (table !== "store_bookings") {
+          if (table !== "store_orders") {
             return { data: null, error: new Error("Unsupported table single()") };
           }
 
@@ -107,6 +97,7 @@ function createDbMock(options: DbMockOptions = {}) {
             return {
               data: {
                 id: "4dc176f2-88ee-4305-90de-ae4ab8de5bca",
+                created_at: new Date().toISOString(),
                 ...state.pendingInsert,
               },
               error: null,
@@ -147,7 +138,6 @@ const storeId = "59588f50-3c85-4f2f-baf3-22739f907ac2";
 test("valid service booking confirm persists booking payload", async () => {
   const db = createDbMock({
     store: { id: storeId, is_active: true },
-    bookingCount: 2,
   });
 
   const payload = {
@@ -197,8 +187,9 @@ test("valid service booking confirm persists booking payload", async () => {
 
   assert.equal(db.writes.insertedBooking?.store_id, storeId);
   assert.equal(db.writes.insertedBooking?.customer_user_id, customer.userId);
-  assert.equal(db.writes.insertedBooking?.payment_status, "paid");
+  assert.equal(db.writes.insertedBooking?.payment_status, "PAID");
   assert.equal(db.writes.insertedBooking?.metadata?.stylist, "Best available");
+  assert.equal(db.writes.insertedBooking?.service_type, "APPOINTMENT");
 });
 
 test("missing store id returns 400", async () => {
