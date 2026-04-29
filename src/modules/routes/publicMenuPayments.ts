@@ -73,6 +73,89 @@ function isAlreadyFinal(session: any) {
   return session.status === "FINALIZED" || session.status === "VERIFIED_SUCCESS" || session.status === "VERIFIED_FAILED";
 }
 
+async function finalizePublicMenuSessionIfVerified(session: any) {
+  if (!session || session.status !== "VERIFIED_SUCCESS") return null;
+  if (session.finalized_booking_id) return session.finalized_booking_id;
+
+  const snapshot = session.gateway_payload?.order_snapshot;
+  if (!snapshot || !Array.isArray(snapshot.items) || !snapshot.table_no) {
+    throw new Error("Stored order snapshot is missing or invalid");
+  }
+
+  const paymentReference = session.transaction_index || session.bank_reference || session.tracking_id;
+
+  const { data: booking, error: bookingError } = await supabaseServiceRole
+    .from("restaurant_table_bookings")
+    .insert({
+      restaurant_id: session.restaurant_id,
+      table_no: snapshot.table_no,
+      customer_name: snapshot.customer_name,
+      customer_phone: snapshot.customer_phone,
+      order_items: snapshot.items,
+      order_details: {
+        source: "public_menu",
+        payment_session_id: session.id,
+        merchant_trace: session.merchant_trace,
+        gateway: {
+          transaction_index: session.transaction_index,
+          authorization_code: session.authorization_code,
+          bank_reference: session.bank_reference,
+        },
+      },
+      subtotal_amount: snapshot.subtotal_amount,
+      tax_amount: snapshot.tax_amount,
+      total_amount: snapshot.total_amount,
+      payment_method: "IVERI",
+      payment_status: "PAID",
+      payment_reference: paymentReference,
+      booking_status: "PLACED",
+      source: "public_menu",
+      notes: snapshot.notes,
+    })
+    .select("id")
+    .single();
+
+  if (bookingError || !booking) {
+    throw bookingError ?? new Error("Failed to create table booking");
+  }
+
+  const { data: finalized, error: finalizeError } = await supabaseServiceRole
+    .from("payment_sessions")
+    .update({
+      status: "FINALIZED",
+      finalized_booking_id: booking.id,
+      context_reference_id: booking.id,
+      gateway_payload: {
+        ...(session.gateway_payload ?? {}),
+        finalized_booking_id: booking.id,
+        transitions: [
+          ...((session.gateway_payload?.transitions ?? []) as any[]),
+          { at: new Date().toISOString(), from: "VERIFIED_SUCCESS", to: "FINALIZED", reason: "public_menu_finalize" },
+        ],
+      },
+    })
+    .eq("id", session.id)
+    .eq("status", "VERIFIED_SUCCESS")
+    .is("finalized_booking_id", null)
+    .select("id, tracking_id, finalized_booking_id")
+    .maybeSingle();
+
+  if (finalizeError) throw finalizeError;
+  if (finalized?.finalized_booking_id) return finalized.finalized_booking_id;
+
+  const { data: current, error: currentErr } = await supabaseServiceRole
+    .from("payment_sessions")
+    .select("status, finalized_booking_id")
+    .eq("id", session.id)
+    .maybeSingle();
+  if (currentErr) throw currentErr;
+  if (current?.status === "FINALIZED" && current?.finalized_booking_id) {
+    return current.finalized_booking_id;
+  }
+
+  return null;
+}
+
 function buildPublicMenuFrontendReturnUrl(params: {
   outcome: "success" | "fail" | "pending" | "error";
   sessionId: string;
@@ -374,6 +457,18 @@ router.post("/webhook", async (req, res) => {
 
     if (updateError) throw updateError;
 
+    if (success) {
+      const { data: refreshedSession, error: refreshError } = await supabaseServiceRole
+        .from("payment_sessions")
+        .select("*")
+        .eq("id", session.id)
+        .maybeSingle();
+      if (refreshError) throw refreshError;
+      if (refreshedSession) {
+        await finalizePublicMenuSessionIfVerified(refreshedSession);
+      }
+    }
+
     logWithCorrelation("info", "public menu webhook processed", {
       tracking_id: session.tracking_id,
       payment_session_id: session.id,
@@ -424,72 +519,8 @@ router.post("/finalize", async (req, res) => {
       return res.status(409).json({ ok: false, code: "INVALID_STATE", message: `Cannot finalize from status ${session.status}` });
     }
 
-    const snapshot = session.gateway_payload?.order_snapshot;
-    if (!snapshot || !Array.isArray(snapshot.items) || !snapshot.table_no) {
-      return res.status(500).json({ ok: false, code: "SNAPSHOT_MISSING", message: "Stored order snapshot is missing or invalid" });
-    }
-
-    const paymentReference = session.transaction_index || session.bank_reference || session.tracking_id;
-
-    const { data: booking, error: bookingError } = await supabaseServiceRole
-      .from("restaurant_table_bookings")
-      .insert({
-        restaurant_id: session.restaurant_id,
-        table_no: snapshot.table_no,
-        customer_name: snapshot.customer_name,
-        customer_phone: snapshot.customer_phone,
-        order_items: snapshot.items,
-        order_details: {
-          source: "public_menu",
-          payment_session_id: session.id,
-          merchant_trace: session.merchant_trace,
-          gateway: {
-            transaction_index: session.transaction_index,
-            authorization_code: session.authorization_code,
-            bank_reference: session.bank_reference,
-          },
-        },
-        subtotal_amount: snapshot.subtotal_amount,
-        tax_amount: snapshot.tax_amount,
-        total_amount: snapshot.total_amount,
-        payment_method: "IVERI",
-        payment_status: "PAID",
-        payment_reference: paymentReference,
-        booking_status: "PLACED",
-        source: "public_menu",
-        notes: snapshot.notes,
-      })
-      .select("id")
-      .single();
-
-    if (bookingError || !booking) {
-      throw bookingError ?? new Error("Failed to create table booking");
-    }
-
-    const { data: finalized, error: finalizeError } = await supabaseServiceRole
-      .from("payment_sessions")
-      .update({
-        status: "FINALIZED",
-        finalized_booking_id: booking.id,
-        context_reference_id: booking.id,
-        gateway_payload: {
-          ...(session.gateway_payload ?? {}),
-          finalized_booking_id: booking.id,
-          transitions: [
-            ...((session.gateway_payload?.transitions ?? []) as any[]),
-            { at: new Date().toISOString(), from: "VERIFIED_SUCCESS", to: "FINALIZED", reason: "public_menu_finalize" },
-          ],
-        },
-      })
-      .eq("id", session.id)
-      .eq("status", "VERIFIED_SUCCESS")
-      .is("finalized_booking_id", null)
-      .select("id, tracking_id, finalized_booking_id")
-      .maybeSingle();
-
-    if (finalizeError) throw finalizeError;
-
-    if (!finalized) {
+    const bookingId = await finalizePublicMenuSessionIfVerified(session);
+    if (!bookingId) {
       const { data: current, error: currentErr } = await supabaseServiceRole
         .from("payment_sessions")
         .select("id, tracking_id, status, finalized_booking_id")
@@ -513,7 +544,7 @@ router.post("/finalize", async (req, res) => {
     logWithCorrelation("info", "public menu finalize success", {
       tracking_id: session.tracking_id,
       payment_session_id: session.id,
-      table_booking_id: booking.id,
+      table_booking_id: bookingId,
     });
 
     return res.status(200).json({
@@ -521,7 +552,7 @@ router.post("/finalize", async (req, res) => {
       status: "FINALIZED",
       payment_session_id: session.id,
       tracking_id: session.tracking_id,
-      table_booking_id: booking.id,
+      table_booking_id: bookingId,
     });
   } catch (err: any) {
     return res.status(500).json({ ok: false, code: "FINALIZE_FAILED", message: err?.message || "Unexpected error" });
