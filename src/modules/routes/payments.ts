@@ -194,6 +194,26 @@ function buildPendingDeepLink(sessionId: string) {
   return buildAppDeepLink("pending", sessionId);
 }
 
+function buildPublicMenuFrontendRedirectUrl(params: {
+  outcome: string;
+  sessionId: string;
+  trackingId: string | null;
+  restaurantId: string | null;
+  tableNo: number | null;
+}) {
+  const baseUrl =
+    process.env.PUBLIC_MENU_FRONTEND_RETURN_URL?.trim() ||
+    process.env.PUBLIC_MENU_FRONTEND_URL?.trim() ||
+    "https://passprive-partner.vercel.app/public-menu";
+  const url = new URL(baseUrl);
+  if (params.restaurantId) url.searchParams.set("id", params.restaurantId);
+  if (params.tableNo && Number.isFinite(params.tableNo)) url.searchParams.set("table", String(params.tableNo));
+  url.searchParams.set("session_id", params.sessionId);
+  if (params.trackingId) url.searchParams.set("tracking_id", params.trackingId);
+  url.searchParams.set("outcome", params.outcome);
+  return url.toString();
+}
+
 function renderAppRedirectPage(params: {
   title: string;
   message: string;
@@ -1083,6 +1103,20 @@ async function handleIveriReturn(req: any, res: any) {
     }
 
     const outcome = mapSessionStatusToAppOutcome(session.status);
+    const isPublicMenuSession =
+      String(session.payment_context ?? "").toUpperCase() === "TABLE_ORDERS" ||
+      String(session.gateway_payload?.source ?? "").toLowerCase() === "public_menu";
+    if (isPublicMenuSession) {
+      const redirectUrl = buildPublicMenuFrontendRedirectUrl({
+        outcome,
+        sessionId,
+        trackingId: session.tracking_id ?? null,
+        restaurantId: session.restaurant_id ?? null,
+        tableNo: Number(session.gateway_payload?.order_snapshot?.table_no ?? 0) || null,
+      });
+      return res.redirect(303, redirectUrl);
+    }
+
     const appUrl = buildAppDeepLink(outcome, sessionId);
 
     res.setHeader("Content-Type", "text/html; charset=utf-8");
