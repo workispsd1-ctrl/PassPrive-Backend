@@ -437,11 +437,17 @@ router.post("/webhook", async (req, res) => {
       payload: rawPayload,
       headers: req.headers as Record<string, any>,
     });
+    const isTestMode = String(process.env.IVERI_MODE ?? "TEST").trim().toUpperCase() !== "LIVE";
 
     if (!signature.ok && signature.reason === "SIGNATURE_MISSING") {
-      return res.status(401).json({ ok: false, code: "SIGNATURE_MISSING", message: "Missing webhook signature" });
+      if (!isTestMode) {
+        return res.status(401).json({ ok: false, code: "SIGNATURE_MISSING", message: "Missing webhook signature" });
+      }
+      logWithCorrelation("warn", "public menu webhook accepted without signature in TEST mode", {
+        reason: signature.reason,
+      });
     }
-    if (!signature.ok) {
+    if (!signature.ok && signature.reason !== "SIGNATURE_MISSING") {
       return res.status(403).json({ ok: false, code: "SIGNATURE_INVALID", message: "Invalid webhook signature" });
     }
 
