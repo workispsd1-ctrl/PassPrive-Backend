@@ -73,6 +73,26 @@ function isAlreadyFinal(session: any) {
   return session.status === "FINALIZED" || session.status === "VERIFIED_SUCCESS" || session.status === "VERIFIED_FAILED";
 }
 
+function buildPublicMenuFrontendReturnUrl(params: {
+  outcome: "success" | "fail" | "pending" | "error";
+  sessionId: string;
+  trackingId: string;
+  restaurantId: string;
+  tableNo: number;
+}) {
+  const configuredBaseUrl =
+    process.env.PUBLIC_MENU_FRONTEND_RETURN_URL?.trim() ||
+    process.env.PUBLIC_MENU_FRONTEND_URL?.trim() ||
+    "http://localhost:3000/public-menu";
+  const url = new URL(configuredBaseUrl);
+  url.searchParams.set("id", params.restaurantId);
+  url.searchParams.set("table", String(params.tableNo));
+  url.searchParams.set("session_id", params.sessionId);
+  url.searchParams.set("tracking_id", params.trackingId);
+  url.searchParams.set("outcome", params.outcome);
+  return url.toString();
+}
+
 router.post("/create-session", async (req, res) => {
   const parsed = CreateSessionSchema.safeParse(req.body);
   if (!parsed.success) {
@@ -159,8 +179,40 @@ router.post("/create-session", async (req, res) => {
       });
     }
 
+    const publicReturnConfig = {
+      ...config,
+      returnSuccessUrl: buildPublicMenuFrontendReturnUrl({
+        outcome: "success",
+        sessionId: session.id,
+        trackingId,
+        restaurantId: payload.restaurant_id,
+        tableNo: payload.table_no,
+      }),
+      returnFailUrl: buildPublicMenuFrontendReturnUrl({
+        outcome: "fail",
+        sessionId: session.id,
+        trackingId,
+        restaurantId: payload.restaurant_id,
+        tableNo: payload.table_no,
+      }),
+      returnTryLaterUrl: buildPublicMenuFrontendReturnUrl({
+        outcome: "pending",
+        sessionId: session.id,
+        trackingId,
+        restaurantId: payload.restaurant_id,
+        tableNo: payload.table_no,
+      }),
+      returnErrorUrl: buildPublicMenuFrontendReturnUrl({
+        outcome: "error",
+        sessionId: session.id,
+        trackingId,
+        restaurantId: payload.restaurant_id,
+        tableNo: payload.table_no,
+      }),
+    };
+
     const gatewayRequest = buildIveriAuthoriseRequest({
-      config,
+      config: publicReturnConfig,
       sessionId: session.id,
       merchantTrace,
       amountMajor: serverTotal,
