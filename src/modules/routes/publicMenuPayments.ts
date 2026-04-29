@@ -149,6 +149,15 @@ router.post("/create-session", async (req, res) => {
       quantity: item.qty,
       unitAmountMajor: item.unit_price,
     }));
+    // iVeri validates that order amount equals line-item total (+/- discount).
+    // Include tax as a separate line item so totals always reconcile.
+    if (serverTax > 0) {
+      lineItems.push({
+        description: "Tax",
+        quantity: 1,
+        unitAmountMajor: serverTax,
+      });
+    }
 
     const gatewayRequest = buildIveriAuthoriseRequest({
       config,
