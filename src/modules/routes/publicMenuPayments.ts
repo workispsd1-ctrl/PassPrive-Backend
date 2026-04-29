@@ -216,18 +216,18 @@ async function finalizePublicMenuSessionIfVerified(session: any) {
   return null;
 }
 
-function buildPublicMenuFrontendReturnUrl(params: {
+function buildPublicMenuBackendReturnUrl(params: {
   outcome: "success" | "fail" | "pending" | "error";
   sessionId: string;
   trackingId: string;
   restaurantId: string;
   tableNo: number;
 }) {
-  const configuredBaseUrl =
-    process.env.PUBLIC_MENU_FRONTEND_RETURN_URL?.trim() ||
-    process.env.PUBLIC_MENU_FRONTEND_URL?.trim() ||
-    "http://localhost:3000/public-menu";
-  const url = new URL(configuredBaseUrl);
+  const backendBase =
+    process.env.PUBLIC_BACKEND_BASE_URL?.trim() ||
+    process.env.BACKEND_URL?.trim() ||
+    "https://api.passprive.com";
+  const url = new URL("/api/payments/iveri/return", backendBase);
   url.searchParams.set("id", params.restaurantId);
   url.searchParams.set("table", String(params.tableNo));
   url.searchParams.set("session_id", params.sessionId);
@@ -324,28 +324,28 @@ router.post("/create-session", async (req, res) => {
 
     const publicReturnConfig = {
       ...config,
-      returnSuccessUrl: buildPublicMenuFrontendReturnUrl({
+      returnSuccessUrl: buildPublicMenuBackendReturnUrl({
         outcome: "success",
         sessionId: session.id,
         trackingId,
         restaurantId: payload.restaurant_id,
         tableNo: payload.table_no,
       }),
-      returnFailUrl: buildPublicMenuFrontendReturnUrl({
+      returnFailUrl: buildPublicMenuBackendReturnUrl({
         outcome: "fail",
         sessionId: session.id,
         trackingId,
         restaurantId: payload.restaurant_id,
         tableNo: payload.table_no,
       }),
-      returnTryLaterUrl: buildPublicMenuFrontendReturnUrl({
+      returnTryLaterUrl: buildPublicMenuBackendReturnUrl({
         outcome: "pending",
         sessionId: session.id,
         trackingId,
         restaurantId: payload.restaurant_id,
         tableNo: payload.table_no,
       }),
-      returnErrorUrl: buildPublicMenuFrontendReturnUrl({
+      returnErrorUrl: buildPublicMenuBackendReturnUrl({
         outcome: "error",
         sessionId: session.id,
         trackingId,
