@@ -74,15 +74,45 @@ function isAlreadyFinal(session: any) {
 }
 
 async function finalizePublicMenuSessionIfVerified(session: any) {
-  if (!session || session.status !== "VERIFIED_SUCCESS") return null;
-  if (session.finalized_booking_id) return session.finalized_booking_id;
+  if (!session || session.status !== "VERIFIED_SUCCESS") {
+    logWithCorrelation("warn", "public menu finalize skipped: session not verified", {
+      payment_session_id: session?.id ?? null,
+      tracking_id: session?.tracking_id ?? null,
+      status: session?.status ?? null,
+    });
+    return null;
+  }
+  if (session.finalized_booking_id) {
+    logWithCorrelation("info", "public menu finalize skipped: already finalized", {
+      payment_session_id: session.id,
+      tracking_id: session.tracking_id,
+      table_booking_id: session.finalized_booking_id,
+    });
+    return session.finalized_booking_id;
+  }
 
   const snapshot = session.gateway_payload?.order_snapshot;
   if (!snapshot || !Array.isArray(snapshot.items) || !snapshot.table_no) {
+    logWithCorrelation("error", "public menu finalize failed: snapshot missing/invalid", {
+      payment_session_id: session.id,
+      tracking_id: session.tracking_id,
+      snapshot_present: !!snapshot,
+      has_items_array: Array.isArray(snapshot?.items),
+      table_no: snapshot?.table_no ?? null,
+    });
     throw new Error("Stored order snapshot is missing or invalid");
   }
 
   const paymentReference = session.transaction_index || session.bank_reference || session.tracking_id;
+  logWithCorrelation("info", "public menu finalize insert attempt", {
+    payment_session_id: session.id,
+    tracking_id: session.tracking_id,
+    restaurant_id: session.restaurant_id,
+    table_no: snapshot.table_no,
+    item_count: snapshot.items.length,
+    total_amount: snapshot.total_amount,
+    payment_reference: paymentReference,
+  });
 
   const { data: booking, error: bookingError } = await supabaseServiceRole
     .from("restaurant_table_bookings")
@@ -116,8 +146,21 @@ async function finalizePublicMenuSessionIfVerified(session: any) {
     .single();
 
   if (bookingError || !booking) {
+    logWithCorrelation("error", "public menu finalize insert failed", {
+      payment_session_id: session.id,
+      tracking_id: session.tracking_id,
+      error: bookingError?.message ?? null,
+      details: (bookingError as any)?.details ?? null,
+      hint: (bookingError as any)?.hint ?? null,
+      code: (bookingError as any)?.code ?? null,
+    });
     throw bookingError ?? new Error("Failed to create table booking");
   }
+  logWithCorrelation("info", "public menu finalize insert success", {
+    payment_session_id: session.id,
+    tracking_id: session.tracking_id,
+    table_booking_id: booking.id,
+  });
 
   const { data: finalized, error: finalizeError } = await supabaseServiceRole
     .from("payment_sessions")
@@ -141,7 +184,14 @@ async function finalizePublicMenuSessionIfVerified(session: any) {
     .maybeSingle();
 
   if (finalizeError) throw finalizeError;
-  if (finalized?.finalized_booking_id) return finalized.finalized_booking_id;
+  if (finalized?.finalized_booking_id) {
+    logWithCorrelation("info", "public menu session marked FINALIZED", {
+      payment_session_id: session.id,
+      tracking_id: session.tracking_id,
+      table_booking_id: finalized.finalized_booking_id,
+    });
+    return finalized.finalized_booking_id;
+  }
 
   const { data: current, error: currentErr } = await supabaseServiceRole
     .from("payment_sessions")
@@ -150,9 +200,20 @@ async function finalizePublicMenuSessionIfVerified(session: any) {
     .maybeSingle();
   if (currentErr) throw currentErr;
   if (current?.status === "FINALIZED" && current?.finalized_booking_id) {
+    logWithCorrelation("info", "public menu finalize resolved by race winner", {
+      payment_session_id: session.id,
+      tracking_id: session.tracking_id,
+      table_booking_id: current.finalized_booking_id,
+    });
     return current.finalized_booking_id;
   }
 
+  logWithCorrelation("warn", "public menu finalize ended without booking id", {
+    payment_session_id: session.id,
+    tracking_id: session.tracking_id,
+    current_status: current?.status ?? null,
+    current_finalized_booking_id: current?.finalized_booking_id ?? null,
+  });
   return null;
 }
 
@@ -406,6 +467,13 @@ router.post("/webhook", async (req, res) => {
     const outcomeStatus = String(normalized.canonical.card_status ?? "").trim();
     const success = outcomeStatus === "0";
     const nextStatus = success ? "VERIFIED_SUCCESS" : "VERIFIED_FAILED";
+    logWithCorrelation("info", "public menu webhook received", {
+      payment_session_id: session.id,
+      tracking_id: session.tracking_id,
+      merchant_trace: session.merchant_trace,
+      card_status: outcomeStatus || null,
+      next_status: nextStatus,
+    });
 
     const previousEvents = Array.isArray(session.gateway_payload?.webhook_events)
       ? session.gateway_payload.webhook_events
@@ -465,6 +533,11 @@ router.post("/webhook", async (req, res) => {
         .maybeSingle();
       if (refreshError) throw refreshError;
       if (refreshedSession) {
+        logWithCorrelation("info", "public menu webhook triggering auto-finalize", {
+          payment_session_id: refreshedSession.id,
+          tracking_id: refreshedSession.tracking_id,
+          status: refreshedSession.status,
+        });
         await finalizePublicMenuSessionIfVerified(refreshedSession);
       }
     }
