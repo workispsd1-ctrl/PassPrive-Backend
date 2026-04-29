@@ -82,13 +82,13 @@ async function finalizePublicMenuSessionIfVerified(session: any) {
     });
     return null;
   }
-  if (session.finalized_booking_id) {
+  if (session.context_reference_id) {
     logWithCorrelation("info", "public menu finalize skipped: already finalized", {
       payment_session_id: session.id,
       tracking_id: session.tracking_id,
-      table_booking_id: session.finalized_booking_id,
+      table_booking_id: session.context_reference_id,
     });
-    return session.finalized_booking_id;
+    return session.context_reference_id;
   }
 
   const snapshot = session.gateway_payload?.order_snapshot;
@@ -166,7 +166,6 @@ async function finalizePublicMenuSessionIfVerified(session: any) {
     .from("payment_sessions")
     .update({
       status: "FINALIZED",
-      finalized_booking_id: booking.id,
       context_reference_id: booking.id,
       gateway_payload: {
         ...(session.gateway_payload ?? {}),
@@ -179,40 +178,40 @@ async function finalizePublicMenuSessionIfVerified(session: any) {
     })
     .eq("id", session.id)
     .eq("status", "VERIFIED_SUCCESS")
-    .is("finalized_booking_id", null)
-    .select("id, tracking_id, finalized_booking_id")
+    .is("context_reference_id", null)
+    .select("id, tracking_id, context_reference_id")
     .maybeSingle();
 
   if (finalizeError) throw finalizeError;
-  if (finalized?.finalized_booking_id) {
+  if (finalized?.context_reference_id) {
     logWithCorrelation("info", "public menu session marked FINALIZED", {
       payment_session_id: session.id,
       tracking_id: session.tracking_id,
-      table_booking_id: finalized.finalized_booking_id,
+      table_booking_id: finalized.context_reference_id,
     });
-    return finalized.finalized_booking_id;
+    return finalized.context_reference_id;
   }
 
   const { data: current, error: currentErr } = await supabaseServiceRole
     .from("payment_sessions")
-    .select("status, finalized_booking_id")
+    .select("status, context_reference_id")
     .eq("id", session.id)
     .maybeSingle();
   if (currentErr) throw currentErr;
-  if (current?.status === "FINALIZED" && current?.finalized_booking_id) {
+  if (current?.status === "FINALIZED" && current?.context_reference_id) {
     logWithCorrelation("info", "public menu finalize resolved by race winner", {
       payment_session_id: session.id,
       tracking_id: session.tracking_id,
-      table_booking_id: current.finalized_booking_id,
+      table_booking_id: current.context_reference_id,
     });
-    return current.finalized_booking_id;
+    return current.context_reference_id;
   }
 
   logWithCorrelation("warn", "public menu finalize ended without booking id", {
     payment_session_id: session.id,
     tracking_id: session.tracking_id,
     current_status: current?.status ?? null,
-    current_finalized_booking_id: current?.finalized_booking_id ?? null,
+    current_finalized_booking_id: null,
   });
   return null;
 }
@@ -581,7 +580,7 @@ router.post("/finalize", async (req, res) => {
     }
 
     if (session.payment_context !== PUBLIC_PAYMENT_CONTEXT) {
-      return res.status(409).json({ ok: false, code: "INVALID_CONTEXT", message: "Payment session is not BILL_PAYMENT" });
+      return res.status(409).json({ ok: false, code: "INVALID_CONTEXT", message: "Payment session is not TABLE_ORDERS" });
     }
 
     if (session.status === "FINALIZED") {
@@ -590,7 +589,7 @@ router.post("/finalize", async (req, res) => {
         status: "FINALIZED",
         payment_session_id: session.id,
         tracking_id: session.tracking_id,
-        table_booking_id: session.finalized_booking_id ?? null,
+        table_booking_id: session.context_reference_id ?? null,
       });
     }
 
@@ -602,7 +601,7 @@ router.post("/finalize", async (req, res) => {
     if (!bookingId) {
       const { data: current, error: currentErr } = await supabaseServiceRole
         .from("payment_sessions")
-        .select("id, tracking_id, status, finalized_booking_id")
+        .select("id, tracking_id, status, context_reference_id")
         .eq("id", session.id)
         .maybeSingle();
       if (currentErr) throw currentErr;
@@ -613,7 +612,7 @@ router.post("/finalize", async (req, res) => {
           status: "FINALIZED",
           payment_session_id: current.id,
           tracking_id: current.tracking_id,
-          table_booking_id: current.finalized_booking_id,
+          table_booking_id: current.context_reference_id,
         });
       }
 

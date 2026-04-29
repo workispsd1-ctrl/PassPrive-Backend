@@ -1,7 +1,7 @@
 import { createHmac, randomUUID } from "crypto";
 
 export const PUBLIC_PAYMENT_PROVIDER = "IVERI";
-export const PUBLIC_PAYMENT_CONTEXT = "BILL_PAYMENT";
+export const PUBLIC_PAYMENT_CONTEXT = "TABLE_ORDERS";
 export const MONEY_TOLERANCE = 0.02;
 
 export type PublicMenuItem = {
