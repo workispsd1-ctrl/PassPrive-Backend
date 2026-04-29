@@ -34,7 +34,8 @@ export function generatePublicMerchantTrace() {
 }
 
 export function generatePublicTrackingId() {
-  const compact = randomUUID().replace(/-/g, "").slice(0, 8).toUpperCase();
+  // payment_sessions.tracking_id is varchar(8), so keep total length exactly 8.
+  const compact = randomUUID().replace(/-/g, "").slice(0, 6).toUpperCase();
   return `PM${compact}`;
 }
 
