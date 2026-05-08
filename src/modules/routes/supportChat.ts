@@ -278,6 +278,12 @@ async function insertMessage(params: {
   const { error } = await supabase.from("chat_messages").upsert(
     {
       conversation_id: params.conversationId,
+      role: "system",
+      message: "[transcript stored in transcript jsonb]",
+      message_type: "system_note",
+      model: null,
+      token_usage: {},
+      sources: [],
       transcript: nextTranscript,
       created_at: row ? undefined : new Date().toISOString(),
       updated_at: new Date().toISOString(),
