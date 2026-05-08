@@ -1,0 +1,489 @@
+import { Router } from "express";
+import { z } from "zod";
+import supabase from "../../database/supabase";
+import { getBearerToken, supabaseAuthed } from "../services/authService";
+import https from "https";
+
+const router = Router();
+
+const SUPPORT_MODEL = process.env.OPENAI_SUPPORT_MODEL || "gpt-4.1-mini";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
+
+const StartSessionSchema = z.object({
+  guest_identifier: z.string().trim().max(200).optional(),
+  channel: z.string().trim().max(60).optional(),
+  metadata: z.record(z.string(), z.any()).optional(),
+});
+
+const MessageSchema = z.object({
+  chat_id: z.string().uuid().optional(),
+  message: z.string().trim().min(1).max(4000),
+  guest_identifier: z.string().trim().max(200).optional(),
+  channel: z.string().trim().max(60).optional(),
+  metadata: z.record(z.string(), z.any()).optional(),
+  confirm_handoff: z.boolean().optional(),
+  user_context: z
+    .object({
+      full_name: z.string().trim().max(140).optional(),
+      phone: z.string().trim().max(40).optional(),
+      email: z.string().trim().email().optional(),
+    })
+    .optional(),
+});
+
+function jsonResponse(statusCode: number, payload: any) {
+  return { statusCode, payload };
+}
+
+function callOpenAIChat(input: {
+  systemPrompt: string;
+  conversation: Array<{ role: "user" | "assistant"; content: string }>;
+}): Promise<{ text: string; raw: any }> {
+  if (!OPENAI_API_KEY) {
+    throw new Error("OPENAI_API_KEY is missing");
+  }
+
+  const body = JSON.stringify({
+    model: SUPPORT_MODEL,
+    messages: [
+      { role: "system", content: input.systemPrompt },
+      ...input.conversation.map((m) => ({ role: m.role, content: m.content })),
+    ],
+    temperature: 0.2,
+  });
+
+  return new Promise((resolve, reject) => {
+    const req = https.request(
+      "https://api.openai.com/v1/chat/completions",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Content-Length": Buffer.byteLength(body),
+          Authorization: `Bearer ${OPENAI_API_KEY}`,
+        },
+      },
+      (res) => {
+        let data = "";
+        res.on("data", (chunk) => {
+          data += chunk;
+        });
+        res.on("end", () => {
+          try {
+            const parsed = JSON.parse(data || "{}");
+            if (res.statusCode && res.statusCode >= 400) {
+              return reject(new Error(parsed?.error?.message || `OpenAI request failed (${res.statusCode})`));
+            }
+            const text = parsed?.choices?.[0]?.message?.content;
+            if (!text || typeof text !== "string") {
+              return reject(new Error("OpenAI response did not include assistant text"));
+            }
+            return resolve({ text: text.trim(), raw: parsed });
+          } catch (error: any) {
+            return reject(new Error(error?.message || "Failed to parse OpenAI response"));
+          }
+        });
+      }
+    );
+
+    req.on("error", (error) => reject(error));
+    req.write(body);
+    req.end();
+  });
+}
+
+async function resolveIdentity(req: any) {
+  const token = getBearerToken(req);
+  if (!token) return { userId: null as string | null, isLoggedIn: false };
+
+  const authed = supabaseAuthed(req);
+  if (!authed) return { userId: null as string | null, isLoggedIn: false };
+
+  const { data, error } = await authed.auth.getUser();
+  if (error || !data?.user) return { userId: null as string | null, isLoggedIn: false };
+
+  return { userId: data.user.id, isLoggedIn: true };
+}
+
+async function fetchKnowledgeBase(query: string) {
+  const queryTerms = query
+    .toLowerCase()
+    .split(/\s+/)
+    .map((x) => x.trim())
+    .filter((x) => x.length > 2)
+    .slice(0, 8);
+
+  let helpQ = supabase
+    .from("help_topics")
+    .select("id, category, title, content, tags, source, display_order")
+    .eq("is_published", true)
+    .order("display_order", { ascending: true })
+    .order("updated_at", { ascending: false })
+    .limit(6);
+
+  let faqQ = supabase
+    .from("faq_entries")
+    .select("id, question, answer, tags, source, display_order")
+    .eq("is_published", true)
+    .order("display_order", { ascending: true })
+    .order("updated_at", { ascending: false })
+    .limit(6);
+
+  if (queryTerms.length > 0) {
+    const like = queryTerms[0];
+    helpQ = helpQ.or(`title.ilike.%${like}%,content.ilike.%${like}%,category.ilike.%${like}%`);
+    faqQ = faqQ.or(`question.ilike.%${like}%,answer.ilike.%${like}%`);
+  }
+
+  const [{ data: topics, error: topicErr }, { data: faqs, error: faqErr }] = await Promise.all([helpQ, faqQ]);
+
+  if (topicErr) throw topicErr;
+  if (faqErr) throw faqErr;
+
+  return {
+    topics: topics || [],
+    faqs: faqs || [],
+  };
+}
+
+async function ensureConversation(params: {
+  chatId?: string;
+  userId: string | null;
+  guestIdentifier?: string;
+  channel?: string;
+  metadata?: Record<string, any>;
+}) {
+  if (params.chatId) {
+    const { data, error } = await supabase
+      .from("chat_conversations")
+      .select("*")
+      .eq("id", params.chatId)
+      .maybeSingle();
+    if (error) throw error;
+    if (data) return data;
+  }
+
+  const { data, error } = await supabase
+    .from("chat_conversations")
+    .insert({
+      user_id: params.userId,
+      guest_identifier: params.userId ? null : params.guestIdentifier || `guest_${Date.now()}`,
+      channel: params.channel || "mobile_app",
+      metadata: params.metadata || {},
+      status: "OPEN",
+    })
+    .select("*")
+    .single();
+
+  if (error) throw error;
+  return data;
+}
+
+function canAccessConversation(params: {
+  conversation: any;
+  userId: string | null;
+  guestIdentifier?: string;
+}) {
+  if (params.conversation.user_id) {
+    return Boolean(params.userId && params.conversation.user_id === params.userId);
+  }
+
+  return Boolean(
+    params.guestIdentifier &&
+      params.conversation.guest_identifier &&
+      params.guestIdentifier === params.conversation.guest_identifier
+  );
+}
+
+async function insertMessage(params: {
+  conversationId: string;
+  role: "user" | "assistant" | "system";
+  message: string;
+  messageType?: "text" | "escalation_prompt" | "escalation_confirmation" | "system_note";
+  model?: string | null;
+  sources?: any[];
+  tokenUsage?: Record<string, any>;
+}) {
+  const { error } = await supabase.from("chat_messages").insert({
+    conversation_id: params.conversationId,
+    role: params.role,
+    message: params.message,
+    message_type: params.messageType || "text",
+    model: params.model || null,
+    sources: params.sources || [],
+    token_usage: params.tokenUsage || {},
+  });
+
+  if (error) throw error;
+}
+
+async function buildTranscript(conversationId: string) {
+  const { data, error } = await supabase
+    .from("chat_messages")
+    .select("role, message, created_at")
+    .eq("conversation_id", conversationId)
+    .order("created_at", { ascending: true })
+    .limit(200);
+
+  if (error) throw error;
+  return data || [];
+}
+
+async function createTicketFromConversation(params: {
+  conversationId: string;
+  userId: string | null;
+  guestIdentifier: string | null;
+  latestUserMessage: string;
+}) {
+  const transcript = await buildTranscript(params.conversationId);
+
+  const subject = `Support from chat ${params.conversationId.slice(0, 8)}`;
+  const summary = params.latestUserMessage.slice(0, 500);
+
+  const { data: ticket, error: ticketErr } = await supabase
+    .from("support_tickets")
+    .insert({
+      conversation_id: params.conversationId,
+      user_id: params.userId,
+      guest_identifier: params.userId ? null : params.guestIdentifier,
+      subject,
+      summary,
+      transcript,
+      status: "OPEN",
+      priority: "NORMAL",
+      source: "chatbot",
+    })
+    .select("*")
+    .single();
+
+  if (ticketErr) throw ticketErr;
+
+  const { error: convoErr } = await supabase
+    .from("chat_conversations")
+    .update({
+      status: "HANDED_OFF",
+      handed_off_at: new Date().toISOString(),
+      ticket_id: ticket.id,
+    })
+    .eq("id", params.conversationId);
+
+  if (convoErr) throw convoErr;
+
+  return ticket;
+}
+
+router.post("/session", async (req, res) => {
+  try {
+    const parsed = StartSessionSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid payload", issues: parsed.error.issues });
+    }
+
+    const identity = await resolveIdentity(req);
+    const convo = await ensureConversation({
+      userId: identity.userId,
+      guestIdentifier: parsed.data.guest_identifier,
+      channel: parsed.data.channel,
+      metadata: parsed.data.metadata,
+    });
+
+    return res.status(201).json({
+      chat_id: convo.id,
+      status: convo.status,
+      is_logged_in: identity.isLoggedIn,
+    });
+  } catch (error: any) {
+    console.error("[support-chat/session]", error);
+    return res.status(500).json({ error: error?.message || "Failed to create chat session" });
+  }
+});
+
+router.post("/message", async (req, res) => {
+  try {
+    const parsed = MessageSchema.safeParse(req.body || {});
+    if (!parsed.success) {
+      return res.status(400).json({ error: "Invalid payload", issues: parsed.error.issues });
+    }
+
+    const payload = parsed.data;
+    const identity = await resolveIdentity(req);
+
+    const convo = await ensureConversation({
+      chatId: payload.chat_id,
+      userId: identity.userId,
+      guestIdentifier: payload.guest_identifier,
+      channel: payload.channel,
+      metadata: payload.metadata,
+    });
+
+    if (
+      payload.chat_id &&
+      !canAccessConversation({
+        conversation: convo,
+        userId: identity.userId,
+        guestIdentifier: payload.guest_identifier,
+      })
+    ) {
+      return res.status(403).json({ error: "You cannot access this chat" });
+    }
+
+    await insertMessage({
+      conversationId: convo.id,
+      role: "user",
+      message: payload.message,
+      messageType: "text",
+    });
+
+    if (payload.confirm_handoff === true || convo.status === "HANDOFF_REQUESTED") {
+      const ticket = await createTicketFromConversation({
+        conversationId: convo.id,
+        userId: identity.userId,
+        guestIdentifier: convo.guest_identifier,
+        latestUserMessage: payload.message,
+      });
+
+      const assistantText = `Thanks for confirming. I have created support ticket ${ticket.id} and our team will contact you soon.`;
+      await insertMessage({
+        conversationId: convo.id,
+        role: "assistant",
+        message: assistantText,
+        messageType: "escalation_confirmation",
+      });
+
+      return res.status(200).json(
+        jsonResponse(200, {
+          chat_id: convo.id,
+          response: assistantText,
+          status: "HANDED_OFF",
+          handoff_requested: true,
+          ticket_id: ticket.id,
+        }).payload
+      );
+    }
+
+    const kb = await fetchKnowledgeBase(payload.message);
+
+    const kbText = [
+      "Help topics:",
+      ...kb.topics.map((t: any, index: number) => `${index + 1}. [${t.category}] ${t.title}: ${t.content}`),
+      "FAQ entries:",
+      ...kb.faqs.map((f: any, index: number) => `${index + 1}. Q: ${f.question} A: ${f.answer}`),
+    ].join("\n");
+
+    const conversationForModel: Array<{ role: "user" | "assistant"; content: string }> = [
+      {
+        role: "user",
+        content: `User message: ${payload.message}`,
+      },
+    ];
+
+    const systemPrompt = [
+      "You are a concise support chatbot for a consumer app.",
+      "Use only provided knowledge base context when possible.",
+      "If question is out-of-scope or answer is not in context, reply exactly with: ESCALATE_TO_SUPPORT_CONFIRMATION",
+      "When answering from KB, keep to 2-5 sentences and be specific.",
+      "Knowledge base context:",
+      kbText,
+    ].join("\n");
+
+    const completion = await callOpenAIChat({
+      systemPrompt,
+      conversation: conversationForModel,
+    });
+
+    let assistantText = completion.text;
+    let handoffRequested = false;
+    let status = "OPEN";
+    let messageType: "text" | "escalation_prompt" = "text";
+
+    if (assistantText.includes("ESCALATE_TO_SUPPORT_CONFIRMATION")) {
+      handoffRequested = true;
+      status = "HANDOFF_REQUESTED";
+      messageType = "escalation_prompt";
+      assistantText = "I may not have the right answer for this. Should I connect you to support and create a ticket with this chat? Reply with yes to continue.";
+
+      const { error: updateErr } = await supabase
+        .from("chat_conversations")
+        .update({
+          status,
+          handoff_requested_at: new Date().toISOString(),
+        })
+        .eq("id", convo.id);
+
+      if (updateErr) throw updateErr;
+    }
+
+    await insertMessage({
+      conversationId: convo.id,
+      role: "assistant",
+      message: assistantText,
+      messageType,
+      model: SUPPORT_MODEL,
+      tokenUsage: completion.raw?.usage || {},
+      sources: {
+        help_topics: kb.topics.map((x: any) => x.id),
+        faq_entries: kb.faqs.map((x: any) => x.id),
+      } as any,
+    });
+
+    return res.status(200).json({
+      chat_id: convo.id,
+      response: assistantText,
+      status,
+      handoff_requested: handoffRequested,
+      ticket_id: null,
+      used_sources: {
+        help_topics: kb.topics.map((x: any) => ({ id: x.id, title: x.title, category: x.category })),
+        faq_entries: kb.faqs.map((x: any) => ({ id: x.id, question: x.question })),
+      },
+    });
+  } catch (error: any) {
+    console.error("[support-chat/message]", error);
+    return res.status(500).json({ error: error?.message || "Failed to process message" });
+  }
+});
+
+router.get("/conversation/:chatId", async (req, res) => {
+  try {
+    const chatId = String(req.params.chatId || "").trim();
+    if (!chatId) return res.status(400).json({ error: "chatId is required" });
+
+    const identity = await resolveIdentity(req);
+    const { data: convo, error: convoErr } = await supabase
+      .from("chat_conversations")
+      .select("*")
+      .eq("id", chatId)
+      .maybeSingle();
+
+    if (convoErr) throw convoErr;
+    if (!convo) return res.status(404).json({ error: "Conversation not found" });
+    const guestIdentifier = String(req.query.guest_identifier || "").trim();
+    if (
+      !canAccessConversation({
+        conversation: convo,
+        userId: identity.userId,
+        guestIdentifier,
+      })
+    ) {
+      return res.status(403).json({ error: "You cannot access this chat" });
+    }
+
+    const { data: messages, error: msgErr } = await supabase
+      .from("chat_messages")
+      .select("id, role, message, message_type, created_at")
+      .eq("conversation_id", chatId)
+      .order("created_at", { ascending: true });
+
+    if (msgErr) throw msgErr;
+
+    return res.status(200).json({
+      conversation: convo,
+      messages: messages || [],
+    });
+  } catch (error: any) {
+    console.error("[support-chat/conversation]", error);
+    return res.status(500).json({ error: error?.message || "Failed to fetch conversation" });
+  }
+});
+
+export default router;
