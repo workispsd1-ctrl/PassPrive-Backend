@@ -26,6 +26,7 @@ import Editorials from "./modules/routes/editorials";
 import NowTrending from "./modules/routes/nowTrending";
 import Analytics from "./modules/routes/analytics";
 import SupportChat from "./modules/routes/supportChat";
+import SupportAdmin from "./modules/routes/supportAdmin";
 import { cacheInvalidationMiddleware, responseCacheMiddleware } from "./modules/middleware/responseCache";
 import { requestTelemetryMiddleware } from "./modules/middleware/requestTelemetry";
 import { rateLimitMiddleware } from "./modules/middleware/rateLimit";
@@ -131,6 +132,7 @@ app.use("/api/editorials", Editorials);
 app.use("/api/now-trending", NowTrending);
 app.use("/api/analytics", Analytics);
 app.use("/api/support-chat", SupportChat);
+app.use("/api/support-admin", SupportAdmin);
 app.use("/api/stores-home", StoresHomeSections);
 app.use("/api/stores", Stores);
 app.use("/api/store", Stores);       // Alias
