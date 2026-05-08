@@ -3,6 +3,7 @@ import { z } from "zod";
 import supabase from "../../database/supabase";
 import { getBearerToken, supabaseAuthed } from "../services/authService";
 import https from "https";
+import crypto from "crypto";
 
 const router = Router();
 
@@ -30,6 +31,17 @@ const MessageSchema = z.object({
     })
     .optional(),
 });
+
+type ChatTranscriptMessage = {
+  id: string;
+  role: "user" | "assistant" | "system";
+  message: string;
+  message_type: "text" | "escalation_prompt" | "escalation_confirmation" | "system_note";
+  model: string | null;
+  token_usage: Record<string, any>;
+  sources: any;
+  created_at: string;
+};
 
 function jsonResponse(statusCode: number, payload: any) {
   return { statusCode, payload };
@@ -238,18 +250,40 @@ async function insertMessage(params: {
   message: string;
   messageType?: "text" | "escalation_prompt" | "escalation_confirmation" | "system_note";
   model?: string | null;
-  sources?: any[];
+  sources?: any;
   tokenUsage?: Record<string, any>;
 }) {
-  const { error } = await supabase.from("chat_messages").insert({
-    conversation_id: params.conversationId,
+  const { data: row, error: fetchErr } = await supabase
+    .from("chat_messages")
+    .select("conversation_id, transcript")
+    .eq("conversation_id", params.conversationId)
+    .maybeSingle();
+
+  if (fetchErr) throw fetchErr;
+
+  const nextMessage: ChatTranscriptMessage = {
+    id: crypto.randomUUID(),
     role: params.role,
     message: params.message,
     message_type: params.messageType || "text",
     model: params.model || null,
     sources: params.sources || [],
     token_usage: params.tokenUsage || {},
-  });
+    created_at: new Date().toISOString(),
+  };
+
+  const existingTranscript = Array.isArray((row as any)?.transcript) ? (row as any).transcript : [];
+  const nextTranscript = [...existingTranscript, nextMessage];
+
+  const { error } = await supabase.from("chat_messages").upsert(
+    {
+      conversation_id: params.conversationId,
+      transcript: nextTranscript,
+      created_at: row ? undefined : new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "conversation_id" }
+  );
 
   if (error) throw error;
 }
@@ -257,13 +291,17 @@ async function insertMessage(params: {
 async function buildTranscript(conversationId: string) {
   const { data, error } = await supabase
     .from("chat_messages")
-    .select("role, message, created_at")
+    .select("transcript")
     .eq("conversation_id", conversationId)
-    .order("created_at", { ascending: true })
-    .limit(200);
+    .maybeSingle();
 
   if (error) throw error;
-  return data || [];
+  const transcript = Array.isArray((data as any)?.transcript) ? (data as any).transcript : [];
+  return transcript.map((entry: any) => ({
+    role: entry.role,
+    message: entry.message,
+    created_at: entry.created_at,
+  }));
 }
 
 async function createTicketFromConversation(params: {
@@ -586,15 +624,16 @@ router.get("/conversation/:chatId", async (req, res) => {
 
     const { data: messages, error: msgErr } = await supabase
       .from("chat_messages")
-      .select("id, role, message, message_type, created_at")
+      .select("transcript")
       .eq("conversation_id", chatId)
-      .order("created_at", { ascending: true });
+      .maybeSingle();
 
     if (msgErr) throw msgErr;
+    const transcript = Array.isArray((messages as any)?.transcript) ? (messages as any).transcript : [];
 
     return res.status(200).json({
       conversation: convo,
-      messages: messages || [],
+      messages: transcript,
     });
   } catch (error: any) {
     console.error("[support-chat/conversation]", error);

@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import supabase from "../../database/supabase";
 import { requireAdmin } from "../services/authService";
+import crypto from "crypto";
 
 const router = Router();
 
@@ -28,10 +29,62 @@ const TicketReplySchema = z.object({
   message: z.string().trim().min(1).max(4000),
 });
 
+type ChatTranscriptMessage = {
+  id: string;
+  role: "user" | "assistant" | "system";
+  message: string;
+  message_type: "text" | "escalation_prompt" | "escalation_confirmation" | "system_note";
+  model: string | null;
+  token_usage: Record<string, any>;
+  sources: any;
+  created_at: string;
+};
+
 async function getAdmin(req: any, res: any) {
   const admin = await requireAdmin(req, res);
   if (!admin) return null;
   return admin;
+}
+
+async function appendConversationMessage(params: {
+  conversationId: string;
+  role: "user" | "assistant" | "system";
+  message: string;
+  messageType?: "text" | "escalation_prompt" | "escalation_confirmation" | "system_note";
+}) {
+  const { data: row, error: fetchErr } = await supabase
+    .from("chat_messages")
+    .select("conversation_id, transcript")
+    .eq("conversation_id", params.conversationId)
+    .maybeSingle();
+  if (fetchErr) throw fetchErr;
+
+  const nextMessage: ChatTranscriptMessage = {
+    id: crypto.randomUUID(),
+    role: params.role,
+    message: params.message,
+    message_type: params.messageType || "text",
+    model: null,
+    token_usage: {},
+    sources: [],
+    created_at: new Date().toISOString(),
+  };
+
+  const existingTranscript = Array.isArray((row as any)?.transcript) ? (row as any).transcript : [];
+  const nextTranscript = [...existingTranscript, nextMessage];
+
+  const { error: upsertErr } = await supabase.from("chat_messages").upsert(
+    {
+      conversation_id: params.conversationId,
+      transcript: nextTranscript,
+      created_at: row ? undefined : new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: "conversation_id" }
+  );
+  if (upsertErr) throw upsertErr;
+
+  return nextMessage;
 }
 
 router.get("/tickets", async (req, res) => {
@@ -80,14 +133,11 @@ router.get("/tickets", async (req, res) => {
     if (conversationIds.length > 0) {
       const { data: messages, error: msgErr } = await supabase
         .from("chat_messages")
-        .select("conversation_id, created_at")
-        .in("conversation_id", conversationIds)
-        .order("created_at", { ascending: false });
+        .select("conversation_id, updated_at");
       if (msgErr) throw msgErr;
-      for (const m of messages || []) {
-        if (!latestByConversation.has(m.conversation_id)) {
-          latestByConversation.set(m.conversation_id, m);
-        }
+      const filtered = (messages || []).filter((m: any) => conversationIds.includes(m.conversation_id));
+      for (const m of filtered) {
+        latestByConversation.set(m.conversation_id, m);
       }
     }
 
@@ -107,7 +157,7 @@ router.get("/tickets", async (req, res) => {
           }
         : null,
       guest_identifier: t.guest_identifier || null,
-      last_message_at: latestByConversation.get(t.conversation_id)?.created_at || t.updated_at,
+      last_message_at: latestByConversation.get(t.conversation_id)?.updated_at || t.updated_at,
       unread_count: 0,
       assigned_to: t.assigned_to,
       created_at: t.created_at,
@@ -189,15 +239,16 @@ router.get("/tickets/:ticketId", async (req, res) => {
 
     const { data: messages, error: msgErr } = await supabase
       .from("chat_messages")
-      .select("id, role, message, message_type, created_at")
+      .select("transcript")
       .eq("conversation_id", ticket.conversation_id)
-      .order("created_at", { ascending: true });
+      .maybeSingle();
     if (msgErr) throw msgErr;
+    const transcript = Array.isArray((messages as any)?.transcript) ? (messages as any).transcript : [];
 
     return res.status(200).json({
       ticket,
       conversation,
-      messages: messages || [],
+      messages: transcript,
     });
   } catch (error: any) {
     console.error("[support-admin/ticket-detail]", error);
@@ -226,16 +277,12 @@ router.post("/tickets/:ticketId/reply", async (req, res) => {
     if (ticketErr) throw ticketErr;
     if (!ticket) return res.status(404).json({ error: "Ticket not found" });
 
-    const { error: msgErr } = await supabase.from("chat_messages").insert({
-      conversation_id: ticket.conversation_id,
+    await appendConversationMessage({
+      conversationId: ticket.conversation_id,
       role: "assistant",
       message: parsed.data.message,
-      message_type: "text",
-      model: null,
-      token_usage: {},
-      sources: [],
+      messageType: "text",
     });
-    if (msgErr) throw msgErr;
 
     const nextStatus = ticket.status === "OPEN" ? "IN_PROGRESS" : ticket.status;
 
@@ -360,16 +407,12 @@ router.post("/tickets/:ticketId/close", async (req, res) => {
     if (updateConvoErr) throw updateConvoErr;
 
     // Add a system note to transcript for traceability.
-    const { error: noteErr } = await supabase.from("chat_messages").insert({
-      conversation_id: ticket.conversation_id,
+    await appendConversationMessage({
+      conversationId: ticket.conversation_id,
       role: "system",
       message: "Conversation closed by support agent.",
-      message_type: "system_note",
-      model: null,
-      token_usage: {},
-      sources: [],
+      messageType: "system_note",
     });
-    if (noteErr) throw noteErr;
 
     return res.status(200).json({
       success: true,
