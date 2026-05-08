@@ -485,7 +485,11 @@ router.post("/message", async (req, res) => {
         latestUserMessage: payload.message,
       });
 
-      const assistantText = `Thanks for confirming. I have created support ticket ${ticket.id} and you will be connected to the agent soon.`;
+      const assistantText = `Done — your support ticket has been created successfully.
+
+Ticket ID: ${ticket.id}
+
+A PassPrivé support agent will assist you shortly. Please keep this ticket ID for reference.`;
       await insertMessage({
         conversationId: convo.id,
         role: "assistant",
