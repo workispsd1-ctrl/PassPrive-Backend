@@ -395,6 +395,19 @@ router.post("/message", async (req, res) => {
       messageType: "text",
     });
 
+    // Once handed off, AI must not respond in this conversation.
+    if (["HANDED_OFF", "RESOLVED", "CLOSED"].includes(String(convo.status || ""))) {
+      return res.status(200).json({
+        chat_id: convo.id,
+        response:
+          "Your chat is now with our support team. Please continue here and an agent will respond shortly.",
+        status: convo.status,
+        handoff_requested: true,
+        ticket_id: convo.ticket_id || null,
+        ai_disabled: true,
+      });
+    }
+
     if (payload.confirm_handoff === true || convo.status === "HANDOFF_REQUESTED") {
       const ticket = await createTicketFromConversation({
         conversationId: convo.id,
