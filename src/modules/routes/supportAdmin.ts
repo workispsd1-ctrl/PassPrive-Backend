@@ -318,4 +318,68 @@ router.post("/tickets/:ticketId/mark-read", async (req, res) => {
   }
 });
 
+router.post("/tickets/:ticketId/close", async (req, res) => {
+  try {
+    const admin = await getAdmin(req, res);
+    if (!admin) return;
+
+    const ticketId = String(req.params.ticketId || "").trim();
+    if (!ticketId) return res.status(400).json({ error: "ticketId is required" });
+
+    const { data: ticket, error: ticketErr } = await supabase
+      .from("support_tickets")
+      .select("*")
+      .eq("id", ticketId)
+      .maybeSingle();
+    if (ticketErr) throw ticketErr;
+    if (!ticket) return res.status(404).json({ error: "Ticket not found" });
+
+    const nowIso = new Date().toISOString();
+
+    const { data: updatedTicket, error: updateTicketErr } = await supabase
+      .from("support_tickets")
+      .update({
+        status: "CLOSED",
+        closed_at: nowIso,
+        updated_at: nowIso,
+      })
+      .eq("id", ticketId)
+      .select("*")
+      .single();
+    if (updateTicketErr) throw updateTicketErr;
+
+    const { data: updatedConversation, error: updateConvoErr } = await supabase
+      .from("chat_conversations")
+      .update({
+        status: "CLOSED",
+        updated_at: nowIso,
+      })
+      .eq("id", ticket.conversation_id)
+      .select("*")
+      .single();
+    if (updateConvoErr) throw updateConvoErr;
+
+    // Add a system note to transcript for traceability.
+    const { error: noteErr } = await supabase.from("chat_messages").insert({
+      conversation_id: ticket.conversation_id,
+      role: "system",
+      message: "Conversation closed by support agent.",
+      message_type: "system_note",
+      model: null,
+      token_usage: {},
+      sources: [],
+    });
+    if (noteErr) throw noteErr;
+
+    return res.status(200).json({
+      success: true,
+      ticket: updatedTicket,
+      conversation: updatedConversation,
+    });
+  } catch (error: any) {
+    console.error("[support-admin/close-ticket]", error);
+    return res.status(500).json({ error: error?.message || "Failed to close ticket" });
+  }
+});
+
 export default router;

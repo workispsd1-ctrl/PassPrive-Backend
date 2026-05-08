@@ -341,17 +341,42 @@ router.post("/session", async (req, res) => {
     }
 
     const identity = await resolveIdentity(req);
-    const convo = await ensureConversation({
-      userId: identity.userId,
-      guestIdentifier: parsed.data.guest_identifier,
-      channel: parsed.data.channel,
-      metadata: parsed.data.metadata,
-    });
+    const guestIdentifier =
+      parsed.data.guest_identifier ||
+      (identity.userId ? undefined : `guest_${Date.now()}`);
+
+    let existingQuery = supabase
+      .from("chat_conversations")
+      .select("*")
+      .order("updated_at", { ascending: false })
+      .limit(1);
+
+    if (identity.userId) {
+      existingQuery = existingQuery.eq("user_id", identity.userId);
+    } else {
+      existingQuery = existingQuery.eq("guest_identifier", guestIdentifier || "");
+    }
+
+    const { data: existingRows, error: existingErr } = await existingQuery;
+    if (existingErr) throw existingErr;
+    const latestConversation = (existingRows || [])[0] || null;
+
+    // Reuse same thread until it is explicitly CLOSED.
+    const convo =
+      latestConversation && latestConversation.status !== "CLOSED"
+        ? latestConversation
+        : await ensureConversation({
+            userId: identity.userId,
+            guestIdentifier,
+            channel: parsed.data.channel,
+            metadata: parsed.data.metadata,
+          });
 
     return res.status(201).json({
       chat_id: convo.id,
       status: convo.status,
       is_logged_in: identity.isLoggedIn,
+      ai_enabled: convo.status === "OPEN" || convo.status === "HANDOFF_REQUESTED",
     });
   } catch (error: any) {
     console.error("[support-chat/session]", error);
