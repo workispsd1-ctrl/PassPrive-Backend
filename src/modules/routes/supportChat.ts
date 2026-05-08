@@ -113,36 +113,59 @@ async function fetchKnowledgeBase(query: string) {
     .filter((x) => x.length > 2)
     .slice(0, 8);
 
-  let helpQ = supabase
+  const baseHelpQ = supabase
     .from("help_topics")
     .select("id, category, title, content, tags, source, display_order")
     .eq("is_published", true)
     .order("display_order", { ascending: true })
     .order("updated_at", { ascending: false })
-    .limit(6);
+    .limit(12);
 
-  let faqQ = supabase
+  const baseFaqQ = supabase
     .from("faq_entries")
     .select("id, question, answer, tags, source, display_order")
     .eq("is_published", true)
     .order("display_order", { ascending: true })
     .order("updated_at", { ascending: false })
-    .limit(6);
+    .limit(12);
+
+  let topics: any[] = [];
+  let faqs: any[] = [];
 
   if (queryTerms.length > 0) {
-    const like = queryTerms[0];
-    helpQ = helpQ.or(`title.ilike.%${like}%,content.ilike.%${like}%,category.ilike.%${like}%`);
-    faqQ = faqQ.or(`question.ilike.%${like}%,answer.ilike.%${like}%`);
+    const likes = queryTerms.map((term) => term.replace(/[%_]/g, ""));
+    const orHelp = likes
+      .map((term) => `title.ilike.%${term}%,content.ilike.%${term}%,category.ilike.%${term}%,tags.cs.{${term}}`)
+      .join(",");
+    const orFaq = likes
+      .map((term) => `question.ilike.%${term}%,answer.ilike.%${term}%,tags.cs.{${term}}`)
+      .join(",");
+
+    const [{ data: filteredTopics, error: topicErr }, { data: filteredFaqs, error: faqErr }] =
+      await Promise.all([baseHelpQ.or(orHelp), baseFaqQ.or(orFaq)]);
+
+    if (topicErr) throw topicErr;
+    if (faqErr) throw faqErr;
+
+    topics = filteredTopics || [];
+    faqs = filteredFaqs || [];
   }
 
-  const [{ data: topics, error: topicErr }, { data: faqs, error: faqErr }] = await Promise.all([helpQ, faqQ]);
+  if (topics.length === 0 && faqs.length === 0) {
+    const [{ data: fallbackTopics, error: topicErr }, { data: fallbackFaqs, error: faqErr }] = await Promise.all([
+      baseHelpQ,
+      baseFaqQ,
+    ]);
 
-  if (topicErr) throw topicErr;
-  if (faqErr) throw faqErr;
+    if (topicErr) throw topicErr;
+    if (faqErr) throw faqErr;
+    topics = fallbackTopics || [];
+    faqs = fallbackFaqs || [];
+  }
 
   return {
-    topics: topics || [],
-    faqs: faqs || [],
+    topics,
+    faqs,
   };
 }
 
@@ -193,6 +216,20 @@ function canAccessConversation(params: {
       params.conversation.guest_identifier &&
       params.guestIdentifier === params.conversation.guest_identifier
   );
+}
+
+function userAskedForHumanSupport(message: string) {
+  const normalized = message.toLowerCase();
+  return [
+    "human",
+    "agent",
+    "customer care",
+    "customer support",
+    "support team",
+    "call me",
+    "raise ticket",
+    "escalate",
+  ].some((keyword) => normalized.includes(keyword));
 }
 
 async function insertMessage(params: {
@@ -395,23 +432,40 @@ router.post("/message", async (req, res) => {
     let handoffRequested = false;
     let status = "OPEN";
     let messageType: "text" | "escalation_prompt" = "text";
+    const previousOutOfScopeCount = Number(convo?.metadata?.out_of_scope_count || 0);
+    const explicitHumanSupport = userAskedForHumanSupport(payload.message);
+    let nextMetadata = convo?.metadata || {};
 
     if (assistantText.includes("ESCALATE_TO_SUPPORT_CONFIRMATION")) {
-      handoffRequested = true;
-      status = "HANDOFF_REQUESTED";
-      messageType = "escalation_prompt";
-      assistantText = "I may not have the right answer for this. Should I connect you to support and create a ticket with this chat? Reply with yes to continue.";
-
-      const { error: updateErr } = await supabase
-        .from("chat_conversations")
-        .update({
-          status,
-          handoff_requested_at: new Date().toISOString(),
-        })
-        .eq("id", convo.id);
-
-      if (updateErr) throw updateErr;
+      if (explicitHumanSupport || previousOutOfScopeCount >= 1) {
+        handoffRequested = true;
+        status = "HANDOFF_REQUESTED";
+        messageType = "escalation_prompt";
+        assistantText =
+          "I may not have the right answer for this. Should I connect you to support and create a ticket with this chat? Reply with yes to continue.";
+        nextMetadata = { ...(convo?.metadata || {}), out_of_scope_count: 0 };
+      } else {
+        handoffRequested = false;
+        status = "OPEN";
+        messageType = "text";
+        assistantText =
+          "I want to help with this. Could you share a bit more detail or ask in another way? I can answer from PassPrive help topics and FAQs, or connect you to support if you prefer.";
+        nextMetadata = { ...(convo?.metadata || {}), out_of_scope_count: previousOutOfScopeCount + 1 };
+      }
+    } else {
+      nextMetadata = { ...(convo?.metadata || {}), out_of_scope_count: 0 };
     }
+
+    const { error: updateErr } = await supabase
+      .from("chat_conversations")
+      .update({
+        status,
+        handoff_requested_at: handoffRequested ? new Date().toISOString() : null,
+        metadata: nextMetadata,
+      })
+      .eq("id", convo.id);
+
+    if (updateErr) throw updateErr;
 
     await insertMessage({
       conversationId: convo.id,
