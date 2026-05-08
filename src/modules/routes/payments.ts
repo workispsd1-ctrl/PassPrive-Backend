@@ -1503,4 +1503,98 @@ router.post("/iveri/finalize-membership", async (req, res) => {
   }
 });
 
+router.post("/iveri/membership/success", async (req, res) => {
+  const parsed = FinalizeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid membership success payload", details: parsed.error.flatten() });
+  }
+
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+
+  try {
+    let session = await getPaymentSessionById(parsed.data.session_id);
+    if (!session) {
+      return res.status(404).json({ error: "Payment session not found" });
+    }
+    if (session.user_id !== auth.user.id) {
+      return res.status(403).json({ error: "Access denied" });
+    }
+    if (session.payment_context !== "MEMBERSHIP") {
+      return res.status(400).json({ error: "Payment session is not a membership payment" });
+    }
+
+    if (session.status !== "FINALIZED" && session.status !== "VERIFIED_SUCCESS") {
+      const config = getIveriConfig();
+      await verifyPaymentSessionWithIveri({
+        sessionId: session.id,
+        applicationId: config.applicationId,
+        authoriseInfoUrl: config.authoriseInfoUrl,
+      });
+      session = (await getPaymentSessionById(session.id)) ?? session;
+    }
+
+    if (session.status === "FINALIZED") {
+      return res.json({
+        session_id: session.id,
+        tracking_id: session.tracking_id ?? null,
+        finalized: true,
+        duplicate: true,
+        membership: session.gateway_payload?.finalized_membership ?? null,
+        user: null,
+        membership_reference_id: session.context_reference_id ?? auth.user.id,
+      });
+    }
+
+    if (session.status !== "VERIFIED_SUCCESS") {
+      return res.status(409).json({
+        error: "Payment session has not been verified as successful",
+        status: session.status,
+      });
+    }
+
+    const result = await finalizeMembershipPayment({
+      session,
+      userId: auth.user.id,
+    });
+
+    const updated = await updatePaymentSessionIfStatusIn({
+      sessionId: session.id,
+      allowedCurrentStatuses: ["VERIFIED_SUCCESS"],
+      updates: {
+        status: "FINALIZED",
+        context_reference_id: auth.user.id,
+        gateway_payload: {
+          ...(session.gateway_payload ?? {}),
+          finalized_membership: result.membership,
+        },
+      },
+    });
+    const effectiveSession = updated ?? (await getPaymentSessionById(session.id));
+
+    return res.json({
+      session_id: session.id,
+      tracking_id: effectiveSession?.tracking_id ?? session.tracking_id ?? null,
+      finalized: true,
+      duplicate: result.duplicate,
+      membership: result.membership,
+      user: result.user ?? null,
+      amount_breakdown: result.membership?.amount_breakdown ?? null,
+      discount_details: {
+        source: effectiveSession?.discount_source ?? session.discount_source ?? "NONE",
+        code: effectiveSession?.discount_code ?? session.discount_code ?? null,
+        name: effectiveSession?.discount_name ?? session.discount_name ?? null,
+        applied_amount_major: effectiveSession?.discount_amount ?? session.discount_amount ?? 0,
+        meta: effectiveSession?.discount_meta ?? session.discount_meta ?? {},
+      },
+      membership_reference_id: effectiveSession?.context_reference_id ?? auth.user.id,
+    });
+  } catch (err: any) {
+    if (err instanceof MembershipPaymentValidationError) {
+      return res.status(err.status).json({ error: err.message });
+    }
+    return res.status(500).json({ error: err?.message || "Failed to handle membership payment success" });
+  }
+});
+
 export default router;
