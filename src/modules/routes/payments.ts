@@ -178,6 +178,24 @@ function getBackendBaseUrl(req: any) {
     return configured.replace(/\/+$/, "");
   }
 
+  const forwardedProtoRaw = req.headers?.["x-forwarded-proto"];
+  const forwardedHostRaw = req.headers?.["x-forwarded-host"];
+  const hostRaw = req.headers?.host;
+
+  const forwardedProto = Array.isArray(forwardedProtoRaw)
+    ? forwardedProtoRaw[0]
+    : String(forwardedProtoRaw ?? "").split(",")[0];
+  const forwardedHost = Array.isArray(forwardedHostRaw)
+    ? forwardedHostRaw[0]
+    : String(forwardedHostRaw ?? "").split(",")[0];
+  const host = Array.isArray(hostRaw) ? hostRaw[0] : String(hostRaw ?? "");
+
+  const protocol = String(forwardedProto ?? "").trim() || req.protocol || "https";
+  const resolvedHost = String(forwardedHost ?? "").trim() || String(host ?? "").trim();
+  if (resolvedHost) {
+    return `${protocol}://${resolvedHost}`.replace(/\/+$/, "");
+  }
+
   return "https://api.passprive.com";
 }
 
@@ -574,6 +592,7 @@ router.post("/iveri/initiate", async (req, res) => {
     let cashbackAmount = 0;
     let originalAmount = 0;
     let contextPayload: Record<string, any> = {};
+    let paymentDetails: Record<string, any> = {};
     let merchantReference = merchantTrace.slice(-20);
     let lineItems: Array<{ description: string; quantity: number; unitAmountMajor: number }> = [];
 
@@ -622,6 +641,10 @@ router.post("/iveri/initiate", async (req, res) => {
       contextPayload = {
         restaurant_id: parsed.data.restaurant_id,
         booking_payload: parsed.data.booking_payload,
+      };
+      paymentDetails = {
+        flow: "BOOKING",
+        instrument_type: null,
       };
       if (discountAmount > 0 && evaluation.verifiedOffer) {
         discountSource = normalizeDiscountSource(
@@ -707,6 +730,14 @@ router.post("/iveri/initiate", async (req, res) => {
         store_id: parsed.data.store_id ?? null,
         bill_payload: parsed.data.bill_payload,
       };
+      paymentDetails = {
+        flow: "BILL_PAYMENT",
+        instrument_type: parsed.data.bill_payload.payment_instrument_type ?? null,
+        card_network: parsed.data.bill_payload.card_network ?? null,
+        issuer_bank_name: parsed.data.bill_payload.issuer_bank_name ?? null,
+        bin: parsed.data.bill_payload.bin ?? null,
+        coupon_code: parsed.data.bill_payload.coupon_code ?? null,
+      };
       const clientBreakdown = deriveClientAmountBreakdown({
         top_level: {
           original_amount: parsed.data.original_amount,
@@ -779,6 +810,15 @@ router.post("/iveri/initiate", async (req, res) => {
         membership_payload: parsed.data.membership_payload,
         membership_purchase: membershipContext.metadata.membership_purchase,
       };
+      paymentDetails = {
+        flow: "MEMBERSHIP",
+        instrument_type: parsed.data.membership_payload.payment_instrument_type ?? null,
+        plan_id: parsed.data.membership_payload.plan_id,
+        plan_name: parsed.data.membership_payload.plan_name,
+        price_id: parsed.data.membership_payload.price_id,
+        product_id: parsed.data.membership_payload.product_id,
+        promo_code: parsed.data.membership_payload.promo_code ?? null,
+      };
 
       lineItems = [
         {
@@ -811,6 +851,7 @@ router.post("/iveri/initiate", async (req, res) => {
       status: "PENDING",
       gateway_payload: {
         context_payload: contextPayload,
+        payment_details: paymentDetails,
         mode: config.mode,
         ...(paymentContext === "MEMBERSHIP"
           ? {
