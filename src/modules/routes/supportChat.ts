@@ -272,6 +272,27 @@ async function createTicketFromConversation(params: {
   guestIdentifier: string | null;
   latestUserMessage: string;
 }) {
+  const { data: existingTicket, error: existingErr } = await supabase
+    .from("support_tickets")
+    .select("*")
+    .eq("conversation_id", params.conversationId)
+    .maybeSingle();
+
+  if (existingErr) throw existingErr;
+  if (existingTicket) {
+    const { error: convoErr } = await supabase
+      .from("chat_conversations")
+      .update({
+        status: "HANDED_OFF",
+        handed_off_at: new Date().toISOString(),
+        ticket_id: existingTicket.id,
+      })
+      .eq("id", params.conversationId);
+
+    if (convoErr) throw convoErr;
+    return existingTicket;
+  }
+
   const transcript = await buildTranscript(params.conversationId);
 
   const subject = `Support from chat ${params.conversationId.slice(0, 8)}`;
@@ -279,17 +300,20 @@ async function createTicketFromConversation(params: {
 
   const { data: ticket, error: ticketErr } = await supabase
     .from("support_tickets")
-    .insert({
-      conversation_id: params.conversationId,
-      user_id: params.userId,
-      guest_identifier: params.userId ? null : params.guestIdentifier,
-      subject,
-      summary,
-      transcript,
-      status: "OPEN",
-      priority: "NORMAL",
-      source: "chatbot",
-    })
+    .upsert(
+      {
+        conversation_id: params.conversationId,
+        user_id: params.userId,
+        guest_identifier: params.userId ? null : params.guestIdentifier,
+        subject,
+        summary,
+        transcript,
+        status: "OPEN",
+        priority: "NORMAL",
+        source: "chatbot",
+      },
+      { onConflict: "conversation_id" }
+    )
     .select("*")
     .single();
 
