@@ -95,8 +95,18 @@ export function resolveMembershipDurationDays(typeValue: any) {
     "20days": 20,
     month: 30,
     "1month": 30,
+    quarter: 90,
+    quarterly: 90,
+    "3month": 90,
     "2months": 60,
     "3months": 90,
+    year: 365,
+    yearly: 365,
+    annual: 365,
+    annually: 365,
+    "1year": 365,
+    "12month": 365,
+    "12months": 365,
   };
 
   if (mapping[normalized]) return mapping[normalized];
@@ -104,11 +114,8 @@ export function resolveMembershipDurationDays(typeValue: any) {
 }
 
 function resolveMembershipTier(planName: any) {
-  const normalized = normalizeText(planName);
-  if (normalized.includes("platinum")) return "platinum";
-  if (normalized.includes("gold")) return "gold";
-  if (normalized.includes("silver")) return "silver";
-  return "premium";
+  const value = String(planName ?? "").trim();
+  return value || "none";
 }
 
 function normalizeDiscountSource(value: any): "NONE" | "BANK" | "PLATFORM" | "PARTNER" {
