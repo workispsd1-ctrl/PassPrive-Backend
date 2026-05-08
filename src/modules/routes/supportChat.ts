@@ -485,7 +485,7 @@ router.post("/message", async (req, res) => {
         latestUserMessage: payload.message,
       });
 
-      const assistantText = `Thanks for confirming. I have created support ticket ${ticket.id} and our team will contact you soon.`;
+      const assistantText = `Thanks for confirming. I have created support ticket ${ticket.id} and you will be connected to the agent soon.`;
       await insertMessage({
         conversationId: convo.id,
         role: "assistant",
@@ -548,7 +548,7 @@ router.post("/message", async (req, res) => {
         status = "HANDOFF_REQUESTED";
         messageType = "escalation_prompt";
         assistantText =
-          "I may not have the right answer for this. Should I connect you to support and create a ticket with this chat? Reply with yes to continue.";
+          "Please confirm if you want to connect to support. Reply with yes to continue.";
         nextMetadata = { ...(convo?.metadata || {}), out_of_scope_count: 0 };
       } else {
         handoffRequested = false;
