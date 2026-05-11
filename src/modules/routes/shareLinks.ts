@@ -94,7 +94,7 @@ router.get("/:code", async (req, res) => {
   if (error) return res.status(500).json({ error: error.message });
   if (!data) return res.status(404).json({ error: "Link not found" });
 
-  const deepLink = `district://store/${data.entity_id}`;
+  const deepLink = `passprive://store/${data.entity_id}`;
 
   const html = `<!DOCTYPE html>
 <html lang="en">
