@@ -27,6 +27,7 @@ import NowTrending from "./modules/routes/nowTrending";
 import Analytics from "./modules/routes/analytics";
 import SupportChat from "./modules/routes/supportChat";
 import SupportAdmin from "./modules/routes/supportAdmin";
+import ShareLinks from "./modules/routes/shareLinks";
 import { cacheInvalidationMiddleware, responseCacheMiddleware } from "./modules/middleware/responseCache";
 import { requestTelemetryMiddleware } from "./modules/middleware/requestTelemetry";
 import { rateLimitMiddleware } from "./modules/middleware/rateLimit";
@@ -139,6 +140,9 @@ app.use("/api/store", Stores);       // Alias
 
 app.use("/api/corporates", corporatesRouter);
 app.use("/api/corporate", corporatesRouter); // Alias
+
+app.use("/api/share", ShareLinks);
+app.use("/r", ShareLinks);
 
 // 404 Catch-all Logger
 app.use((req, res) => {
