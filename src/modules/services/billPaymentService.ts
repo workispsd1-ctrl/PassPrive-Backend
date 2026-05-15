@@ -178,20 +178,6 @@ function deriveDiscountSourceFromOffers(offers: any[]): "NONE" | "BANK" | "PLATF
   return "NONE";
 }
 
-function extractRestaurantMinimumBillAmount(offer: any) {
-  if (offer === null || offer === undefined) return null;
-
-  if (typeof offer === "object" && !Array.isArray(offer)) {
-    const rawAmount = (offer as Record<string, any>).minimum_bill_amount;
-    if (rawAmount === "" || rawAmount === null || rawAmount === undefined) return null;
-    const parsed = Number(rawAmount);
-    if (!Number.isFinite(parsed) || parsed < 0) return null;
-    return parsed;
-  }
-
-  return null;
-}
-
 export async function buildBillPaymentContext(input: BillContextInput) {
   const quantity = input.quantity ?? 1;
   if (!Number.isInteger(quantity) || quantity <= 0) {
@@ -219,11 +205,6 @@ export async function buildBillPaymentContext(input: BillContextInput) {
     if (restaurantError) throw restaurantError;
     if (!restaurant || restaurant.is_active !== true) {
       throw new BillPaymentValidationError("Restaurant not found", 404);
-    }
-
-    const minimumBillAmount = extractRestaurantMinimumBillAmount(restaurant.offer);
-    if (minimumBillAmount !== null && originalAmount < minimumBillAmount) {
-      throw new BillPaymentValidationError("Minimum bill not met");
     }
 
     entityType = "RESTAURANT";

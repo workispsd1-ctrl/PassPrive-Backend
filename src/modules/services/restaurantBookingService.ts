@@ -500,8 +500,7 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
   }
 
   const openingHours =
-    (await loadRestaurantOpeningHours(restaurantId)) ??
-    (restaurant?.opening_hours && typeof restaurant.opening_hours === "object" ? restaurant.opening_hours : {});
+    (await loadRestaurantOpeningHours(restaurantId)) ?? {};
   const openingWindows = getOpeningWindowsForDate(openingHours, bookingDateValue);
   if (openingWindows.length > 0) {
     const bookingTimeMinutes = timeToMinutes(bookingTime);
@@ -544,9 +543,42 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
     String(selectedOption.type).trim().toLowerCase() === "regular table reservation";
 
   let verifiedOffer: any = null;
+  const { data: activeOfferRows, error: activeOfferRowsError } = await supabase
+    .from("restaurant_offers")
+    .select("id,title,description,badge_text,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata")
+    .eq("restaurant_id", restaurantId);
+  if (activeOfferRowsError) {
+    return { ok: false as const, status: 500, body: { error: activeOfferRowsError.message } };
+  }
+
+  const nowTs = new Date().getTime();
+  const offers = (activeOfferRows ?? [])
+    .filter((row: any) => row?.is_active !== false)
+    .filter((row: any) => {
+      const startMs = row?.start_at ? new Date(row.start_at).getTime() : null;
+      const endMs = row?.end_at ? new Date(row.end_at).getTime() : null;
+      if (startMs !== null && Number.isFinite(startMs) && startMs > nowTs) return false;
+      if (endMs !== null && Number.isFinite(endMs) && endMs < nowTs) return false;
+      return true;
+    })
+    .map((row: any) => ({
+      title: row?.title,
+      description: row?.description,
+      badge_text: row?.badge_text,
+      offer_type: row?.offer_type,
+      discount_value: row?.discount_value,
+      minimum_bill_amount: row?.min_spend,
+      min_spend: row?.min_spend,
+      start_at: row?.start_at,
+      end_at: row?.end_at,
+      ...((row?.metadata && typeof row.metadata === "object" && !Array.isArray(row.metadata))
+        ? row.metadata
+        : {}),
+    }));
+
   if (!isRegularBooking) {
     verifiedOffer = findVerifiedOffer(
-      restaurant.offer,
+      offers,
       selectedOption,
       bookingDate,
       bookingDateValue,

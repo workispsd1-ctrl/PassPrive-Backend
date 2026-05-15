@@ -58,6 +58,9 @@ const RESTAURANT_BASE_SELECT = [
   "ad_ends_at",
   "ad_badge_text",
   "booking_terms",
+  "menu_json",
+  "on_boarded",
+  "created_creds",
 ].join(",");
 
 async function withTimeout<T>(promise: PromiseLike<T>, timeoutMs: number, label: string): Promise<T> {
@@ -1187,6 +1190,7 @@ router.get("/picker", async (req, res) => {
 const CreateRestaurantSchema = z.object({
   name: z.string().trim().min(1),
   phone: z.union([z.string().trim(), z.null(), z.undefined()]).optional().nullable(),
+  description: z.string().trim().optional().nullable(),
   city: z.string().trim().optional().nullable(),
   area: z.string().trim().optional().nullable(),
   full_address: z.string().trim().optional().nullable(),
@@ -1228,6 +1232,14 @@ const CreateRestaurantSchema = z.object({
   cancellation_cutoff_minutes: z.coerce.number().int().optional().nullable(),
   cover_charge_enabled: z.boolean().optional().default(false),
   cover_charge_amount: z.coerce.number().optional().nullable(),
+  is_advertised: z.boolean().optional().default(false),
+  ad_priority: z.coerce.number().int().optional().nullable(),
+  ad_starts_at: z.string().datetime({ offset: true }).optional().nullable(),
+  ad_ends_at: z.string().datetime({ offset: true }).optional().nullable(),
+  ad_badge_text: z.string().trim().optional().nullable(),
+  menu_json: z.any().optional().nullable(),
+  on_boarded: z.boolean().optional().default(false),
+  created_creds: z.boolean().optional().default(true),
 
   // ✅ optional: allow admin to set owner_user_id at creation time
   owner_user_id: z.string().uuid().optional().nullable(),
@@ -1236,6 +1248,7 @@ const CreateRestaurantSchema = z.object({
 const UpdateRestaurantSchema = z.object({
   name: z.string().trim().min(1).optional(),
   phone: z.union([z.string().trim(), z.null(), z.undefined()]).optional().nullable(),
+  description: z.string().trim().nullable().optional(),
   city: z.string().trim().nullable().optional(),
   area: z.string().trim().nullable().optional(),
   full_address: z.string().trim().nullable().optional(),
@@ -1277,6 +1290,14 @@ const UpdateRestaurantSchema = z.object({
   cancellation_cutoff_minutes: z.coerce.number().int().nullable().optional(),
   cover_charge_enabled: z.boolean().optional(),
   cover_charge_amount: z.coerce.number().nullable().optional(),
+  is_advertised: z.boolean().optional(),
+  ad_priority: z.coerce.number().int().nullable().optional(),
+  ad_starts_at: z.string().datetime({ offset: true }).nullable().optional(),
+  ad_ends_at: z.string().datetime({ offset: true }).nullable().optional(),
+  ad_badge_text: z.string().trim().nullable().optional(),
+  menu_json: z.any().nullable().optional(),
+  on_boarded: z.boolean().optional(),
+  created_creds: z.boolean().optional(),
 
   // ✅ allow admin to relink owner if needed
   owner_user_id: z.string().uuid().nullable().optional(),
@@ -1644,6 +1665,7 @@ router.post("/", async (req, res) => {
     .insert({
       name: body.name,
       phone: body.phone ?? null,
+      description: body.description ?? null,
       city: body.city ?? null,
       area: body.area ?? null,
       full_address: body.full_address ?? null,
@@ -1658,7 +1680,7 @@ router.post("/", async (req, res) => {
       longitude: body.longitude ?? null,
 
       booking_enabled: body.booking_enabled ?? true,
-      booking_terms: body.booking_terms ?? null,
+      booking_terms: body.booking_terms ?? [],
       avg_duration_minutes: body.avg_duration_minutes ?? 90,
       max_bookings_per_slot: body.max_bookings_per_slot ?? null,
       advance_booking_days: body.advance_booking_days ?? 30,
@@ -1669,6 +1691,14 @@ router.post("/", async (req, res) => {
       cancellation_cutoff_minutes: body.cancellation_cutoff_minutes ?? null,
       cover_charge_enabled: body.cover_charge_enabled ?? false,
       cover_charge_amount: body.cover_charge_amount ?? null,
+      is_advertised: body.is_advertised ?? false,
+      ad_priority: body.ad_priority ?? null,
+      ad_starts_at: body.ad_starts_at ?? null,
+      ad_ends_at: body.ad_ends_at ?? null,
+      ad_badge_text: body.ad_badge_text ?? null,
+      menu_json: body.menu_json ?? null,
+      on_boarded: body.on_boarded ?? false,
+      created_creds: body.created_creds ?? true,
 
       owner_user_id: body.owner_user_id ?? null,
     })
@@ -1753,6 +1783,9 @@ router.put("/:id", async (req, res) => {
   // 🛡️ SECURITY: Only allow admins to change owner_user_id
   if (payload.owner_user_id !== undefined && !isAdminRole(access.role)) {
     delete payload.owner_user_id;
+  }
+  if (payload.booking_terms === null) {
+    payload.booking_terms = [];
   }
 
   console.log("[PUT /restaurants/:id] Updating restaurant:", { id, role: access.role, payload });
