@@ -20,11 +20,11 @@ export function requestTelemetryMiddleware(req: Request, res: Response, next: Ne
     };
 
     if (level === "warn") {
-      console.warn("[request]", payload);
+      console.warn(`[request] ${JSON.stringify(payload)}`);
       return;
     }
     if (String(process.env.REQUEST_LOG_VERBOSE ?? "false").trim().toLowerCase() === "true") {
-      console.log("[request]", payload);
+      console.log(`[request] ${JSON.stringify(payload)}`);
     }
   });
 

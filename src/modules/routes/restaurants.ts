@@ -691,7 +691,7 @@ async function hydrateRestaurants(baseRestaurants: any[]) {
   ]);
 
   for (const response of [tagsResp, mediaResp, hoursResp, offersResp, reviewsResp, subscriptionsResp]) {
-    if (response.error) throw response.error;
+    if (response.error) throw new Error(response.error.message ?? JSON.stringify(response.error));
   }
 
   const tagsByRestaurant = new Map<string, Record<string, string[]>>();
