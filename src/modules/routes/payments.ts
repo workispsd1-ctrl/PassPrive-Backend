@@ -42,7 +42,7 @@ import {
 const router = Router();
 
 export const InitiateSchema = z.object({
-  payment_context: z.enum(["BOOKING", "BILL_PAYMENT", "MEMBERSHIP"]),
+  payment_context: z.enum(["BOOKING", "BILL_PAYMENT", "MEMBERSHIP", "GIFT_PURCHASE"]),
   restaurant_id: z.string().uuid().optional(),
   store_id: z.string().uuid().optional(),
   original_amount: z.coerce.number().nonnegative().optional(),
@@ -126,6 +126,27 @@ export const InitiateSchema = z.object({
     }
     if (value.bill_payload) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["bill_payload"], message: "bill_payload is not allowed for MEMBERSHIP" });
+    }
+  }
+
+  if (value.payment_context === "GIFT_PURCHASE") {
+    if (hasRestaurantId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["restaurant_id"], message: "restaurant_id is not allowed for GIFT_PURCHASE" });
+    }
+    if (hasStoreId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["store_id"], message: "store_id is not allowed for GIFT_PURCHASE" });
+    }
+    if (!value.original_amount || value.original_amount <= 0) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["original_amount"], message: "original_amount must be greater than zero for GIFT_PURCHASE" });
+    }
+    if (value.booking_payload) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["booking_payload"], message: "booking_payload is not allowed for GIFT_PURCHASE" });
+    }
+    if (value.bill_payload) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["bill_payload"], message: "bill_payload is not allowed for GIFT_PURCHASE" });
+    }
+    if (value.membership_payload) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["membership_payload"], message: "membership_payload is not allowed for GIFT_PURCHASE" });
     }
   }
 });
@@ -783,6 +804,29 @@ router.post("/iveri/initiate", async (req, res) => {
           unitAmountMajor: billContext.item
             ? Number((originalAmount / billContext.quantity).toFixed(2))
             : originalAmount,
+        },
+      ];
+    } else if (paymentContext === "GIFT_PURCHASE") {
+      amountMajor = parsed.data.original_amount || 0;
+      originalAmount = amountMajor;
+      discountAmount = 0;
+      discountSource = "NONE";
+      cashbackAmount = 0;
+      restaurantId = null;
+      storeId = null;
+
+      contextPayload = {
+        gift_amount: amountMajor,
+      };
+      paymentDetails = {
+        flow: "GIFT_PURCHASE",
+      };
+
+      lineItems = [
+        {
+          description: `Gift Code Purchase - ${amountMajor} MUR`,
+          quantity: 1,
+          unitAmountMajor: amountMajor,
         },
       ];
     } else {
@@ -1635,6 +1679,182 @@ router.post("/iveri/membership/success", async (req, res) => {
       return res.status(err.status).json({ error: err.message });
     }
     return res.status(500).json({ error: err?.message || "Failed to handle membership payment success" });
+  }
+});
+
+async function createGiftCodeWithUniqueness(userId: string, amount: number, sessionId: string) {
+  let attempts = 0;
+  while (attempts < 5) {
+    const code = `GP-${Math.random().toString(36).substring(2, 6).toUpperCase()}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
+    const { data, error } = await supabase
+      .from("gift_codes")
+      .insert({
+        code,
+        amount,
+        created_by: userId,
+        payment_session_id: sessionId,
+        status: "active",
+      })
+      .select()
+      .single();
+
+    if (!error) {
+      return data;
+    }
+    
+    if (error.code === "23505" || String(error.message).includes("duplicate key")) {
+      attempts++;
+      continue;
+    }
+    throw error;
+  }
+  throw new Error("Failed to generate a unique gift code after 5 attempts");
+}
+
+router.post("/iveri/finalize-gift", async (req, res) => {
+  const parsed = FinalizeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid finalize payload", details: parsed.error.flatten() });
+  }
+
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+
+  try {
+    const session = await getPaymentSessionById(parsed.data.session_id);
+    if (!session) {
+      return res.status(404).json({ error: "Payment session not found" });
+    }
+    if (session.user_id !== auth.user.id) {
+      return res.status(403).json({ error: "Access denied" });
+    }
+    if (session.payment_context !== "GIFT_PURCHASE") {
+      return res.status(400).json({ error: "Payment session is not a gift purchase payment" });
+    }
+    if (session.status === "FINALIZED") {
+      const { data: existingGift } = await supabase
+        .from("gift_codes")
+        .select("*")
+        .eq("payment_session_id", session.id)
+        .maybeSingle();
+
+      return res.json({
+        session_id: session.id,
+        tracking_id: session.tracking_id ?? null,
+        finalized: true,
+        gift_code: existingGift?.code ?? null,
+        amount: existingGift?.amount ?? session.amount_major,
+      });
+    }
+    if (session.status !== "VERIFIED_SUCCESS") {
+      return res.status(409).json({ error: "Payment session has not been verified as successful" });
+    }
+
+    const gift = await createGiftCodeWithUniqueness(auth.user.id, session.amount_major, session.id);
+
+    const updated = await updatePaymentSessionIfStatusIn({
+      sessionId: session.id,
+      allowedCurrentStatuses: ["VERIFIED_SUCCESS"],
+      updates: {
+        status: "FINALIZED",
+        context_reference_id: gift.id,
+      },
+    });
+
+    const effectiveSession = updated ?? (await getPaymentSessionById(session.id));
+
+    return res.json({
+      session_id: session.id,
+      tracking_id: effectiveSession?.tracking_id ?? session.tracking_id ?? null,
+      finalized: true,
+      gift_code: gift.code,
+      amount: gift.amount,
+    });
+  } catch (err: any) {
+    console.error("finalize-gift error:", err);
+    return res.status(500).json({ error: err?.message || "Failed to finalize gift purchase" });
+  }
+});
+
+router.post("/iveri/gift/success", async (req, res) => {
+  const parsed = FinalizeSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ error: "Invalid gift success payload", details: parsed.error.flatten() });
+  }
+
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+
+  try {
+    let session = await getPaymentSessionById(parsed.data.session_id);
+    if (!session) {
+      return res.status(404).json({ error: "Payment session not found" });
+    }
+    if (session.user_id !== auth.user.id) {
+      return res.status(403).json({ error: "Access denied" });
+    }
+    if (session.payment_context !== "GIFT_PURCHASE") {
+      return res.status(400).json({ error: "Payment session is not a gift purchase payment" });
+    }
+
+    if (session.status !== "FINALIZED" && session.status !== "VERIFIED_SUCCESS") {
+      const config = getIveriConfig();
+      await verifyPaymentSessionWithIveri({
+        sessionId: session.id,
+        applicationId: config.applicationId,
+        authoriseInfoUrl: config.authoriseInfoUrl,
+      });
+      session = (await getPaymentSessionById(session.id)) ?? session;
+    }
+
+    if (session.status === "FINALIZED") {
+      const { data: existingGift } = await supabase
+        .from("gift_codes")
+        .select("*")
+        .eq("payment_session_id", session.id)
+        .maybeSingle();
+
+      return res.json({
+        session_id: session.id,
+        tracking_id: session.tracking_id ?? null,
+        finalized: true,
+        duplicate: true,
+        gift_code: existingGift?.code ?? null,
+        amount: existingGift?.amount ?? session.amount_major,
+      });
+    }
+
+    if (session.status !== "VERIFIED_SUCCESS") {
+      return res.status(409).json({
+        error: "Payment session has not been verified as successful",
+        status: session.status,
+      });
+    }
+
+    const gift = await createGiftCodeWithUniqueness(auth.user.id, session.amount_major, session.id);
+
+    const updated = await updatePaymentSessionIfStatusIn({
+      sessionId: session.id,
+      allowedCurrentStatuses: ["VERIFIED_SUCCESS"],
+      updates: {
+        status: "FINALIZED",
+        context_reference_id: gift.id,
+      },
+    });
+
+    const effectiveSession = updated ?? (await getPaymentSessionById(session.id));
+
+    return res.json({
+      session_id: session.id,
+      tracking_id: effectiveSession?.tracking_id ?? session.tracking_id ?? null,
+      finalized: true,
+      duplicate: false,
+      gift_code: gift.code,
+      amount: gift.amount,
+    });
+  } catch (err: any) {
+    console.error("gift-success error:", err);
+    return res.status(500).json({ error: err?.message || "Failed to handle gift payment success" });
   }
 });
 
