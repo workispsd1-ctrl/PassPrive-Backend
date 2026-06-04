@@ -99,4 +99,39 @@ router.post("/redeem", async (req, res) => {
   }
 });
 
+// 4. GET /api/gifts/discounts
+router.get("/discounts", async (req, res) => {
+  try {
+    const now = new Date().toISOString();
+    const { data: discounts, error } = await supabase
+      .from("running_discounts")
+      .select("*")
+      .eq("is_active", true);
+
+    if (error) {
+      console.error("Error fetching running discounts:", error);
+      return res.status(500).json({ success: false, error: "Database error" });
+    }
+
+    // Filter discounts based on validity dates if set
+    const activeDiscounts = (discounts || []).filter((discount) => {
+      if (discount.start_date && new Date(discount.start_date) > new Date(now)) {
+        return false;
+      }
+      if (discount.end_date && new Date(discount.end_date) < new Date(now)) {
+        return false;
+      }
+      return true;
+    });
+
+    return res.json({
+      success: true,
+      discounts: activeDiscounts,
+    });
+  } catch (err: any) {
+    console.error("Get discounts unexpected error:", err);
+    return res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
 export default router;
