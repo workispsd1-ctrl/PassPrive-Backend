@@ -4,6 +4,47 @@ import supabase from "../../database/supabase";
 
 const router = Router();
 
+// 0. GET /api/gifts/summary  -> balance + transaction history in one call
+//    (the mobile Gifts view reads this on focus).
+router.get("/summary", async (req, res) => {
+  const customer = await getAuthenticatedCustomer(req, res);
+  if (!customer) return;
+
+  try {
+    const [balanceResult, txResult] = await Promise.all([
+      supabase
+        .from("gift_balances")
+        .select("balance")
+        .eq("user_id", customer.userId)
+        .maybeSingle(),
+      supabase
+        .from("gift_transactions")
+        .select("id, amount, type, gift_code_id, created_at")
+        .eq("user_id", customer.userId)
+        .order("created_at", { ascending: false })
+        .limit(100),
+    ]);
+
+    if (balanceResult.error) {
+      console.error("Error fetching gift balance:", balanceResult.error);
+      return res.status(500).json({ success: false, error: "Database error" });
+    }
+    if (txResult.error) {
+      console.error("Error fetching gift transactions:", txResult.error);
+      return res.status(500).json({ success: false, error: "Database error" });
+    }
+
+    return res.json({
+      success: true,
+      balance: balanceResult.data?.balance ?? 0.0,
+      transactions: txResult.data || [],
+    });
+  } catch (err: any) {
+    console.error("Get summary unexpected error:", err);
+    return res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
 // 1. GET /api/gifts/balance
 router.get("/balance", async (req, res) => {
   const customer = await getAuthenticatedCustomer(req, res);
