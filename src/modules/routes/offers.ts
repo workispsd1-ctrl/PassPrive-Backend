@@ -6,6 +6,55 @@ import supabase from "../../database/supabase";
 
 const router = Router();
 
+class SimpleCache<T> {
+  private cache = new Map<string, { value: T; expiresAt: number }>();
+
+  constructor(private ttlMs: number) {}
+
+  get(key: string): T | null {
+    const cached = this.cache.get(key);
+    if (!cached) return null;
+    if (Date.now() > cached.expiresAt) {
+      this.cache.delete(key);
+      return null;
+    }
+    return cached.value;
+  }
+
+  set(key: string, value: T): void {
+    this.cache.set(key, {
+      value,
+      expiresAt: Date.now() + this.ttlMs,
+    });
+  }
+
+  clear(): void {
+    this.cache.clear();
+  }
+}
+
+interface ActiveOffersBundle {
+  activeOffers: any[];
+  targets: any[];
+  conditions: any[];
+  paymentRules: any[];
+  bins: any[];
+  usageLimits: any[];
+}
+
+const activeOffersCache = new SimpleCache<ActiveOffersBundle>(5 * 60 * 1000); // 5 mins cache TTL
+
+// Middleware to clear configuration cache on mutations
+router.use((req, res, next) => {
+  if (["POST", "PUT", "DELETE"].includes(req.method)) {
+    const isRedemptionPost = req.method === "POST" && req.path.endsWith("/redemptions");
+    if (!isRedemptionPost) {
+      activeOffersCache.clear();
+    }
+  }
+  next();
+});
+
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
 
@@ -224,11 +273,30 @@ function supabaseAuthed(req: any) {
 async function requireAdmin(req: any, res: any) {
   const sb = supabaseAuthed(req);
   if (!sb) {
-    return { sb: supabase, callerId: null };
+    res.status(401).json({ error: "Missing token" });
+    return null;
   }
 
-  const { data: userData } = await sb.auth.getUser();
-  return { sb, callerId: userData?.user?.id ?? null };
+  const { data: userData, error: userErr } = await sb.auth.getUser();
+  if (userErr || !userData?.user) {
+    res.status(401).json({ error: "Invalid session" });
+    return null;
+  }
+
+  const { data: row, error: roleErr } = await sb
+    .from("users")
+    .select("role")
+    .eq("id", userData.user.id)
+    .maybeSingle();
+
+  const role = row?.role?.toLowerCase();
+
+  if (roleErr || !role || !["admin", "superadmin"].includes(role)) {
+    res.status(403).json({ error: "Access denied" });
+    return null;
+  }
+
+  return { sb, callerId: userData.user.id };
 }
 
 function buildNullAwarePayload(payload: Record<string, any>) {
@@ -687,35 +755,49 @@ export async function evaluateApplicableOffers(params: {
     return { status: 404 as const, body: { error: `${params.entityType} not found` } };
   }
 
-  const { data: offers, error } = await supabase
-    .from(OFFER_TABLE)
-    .select("*")
-    .eq("is_active", true);
+  let bundle = activeOffersCache.get("active_offers_bundle");
 
-  if (error) throw error;
+  if (!bundle) {
+    const { data: offers, error } = await supabase
+      .from(OFFER_TABLE)
+      .select("*")
+      .eq("is_active", true);
 
-  const activeOffers = (offers ?? []).filter((offer) => isOfferActiveNow(offer));
-  const offerIds = activeOffers.map((offer) => offer.id);
+    if (error) throw error;
 
-  const [
-    { data: targets, error: targetsError },
-    { data: conditions, error: conditionsError },
-    { data: paymentRules, error: paymentRulesError },
-    { data: bins, error: binsError },
-    { data: usageLimits, error: usageLimitsError },
-  ] = await Promise.all([
-    supabase.from(TARGETS_TABLE).select("*").in("offer_id", offerIds.length > 0 ? offerIds : ["00000000-0000-0000-0000-000000000000"]),
-    supabase.from(CONDITIONS_TABLE).select("*").in("offer_id", offerIds.length > 0 ? offerIds : ["00000000-0000-0000-0000-000000000000"]),
-    supabase.from(PAYMENT_RULES_TABLE).select("*").in("offer_id", offerIds.length > 0 ? offerIds : ["00000000-0000-0000-0000-000000000000"]),
-    supabase.from(BINS_TABLE).select("*").in("offer_id", offerIds.length > 0 ? offerIds : ["00000000-0000-0000-0000-000000000000"]),
-    supabase.from(USAGE_LIMITS_TABLE).select("*").in("offer_id", offerIds.length > 0 ? offerIds : ["00000000-0000-0000-0000-000000000000"]),
-  ]);
+    const activeOffers = (offers ?? []).filter((offer) => isOfferActiveNow(offer));
+    const offerIds = activeOffers.map((offer) => offer.id);
 
-  if (targetsError) throw targetsError;
-  if (conditionsError) throw conditionsError;
-  if (paymentRulesError) throw paymentRulesError;
-  if (binsError) throw binsError;
-  if (usageLimitsError) throw usageLimitsError;
+    const [
+      { data: targets, error: targetsError },
+      { data: conditions, error: conditionsError },
+      { data: paymentRules, error: paymentRulesError },
+      { data: bins, error: binsError },
+      { data: usageLimits, error: usageLimitsError },
+    ] = await Promise.all([
+      supabase.from(TARGETS_TABLE).select("*").in("offer_id", offerIds.length > 0 ? offerIds : ["00000000-0000-0000-0000-000000000000"]),
+      supabase.from(CONDITIONS_TABLE).select("*").in("offer_id", offerIds.length > 0 ? offerIds : ["00000000-0000-0000-0000-000000000000"]),
+      supabase.from(PAYMENT_RULES_TABLE).select("*").in("offer_id", offerIds.length > 0 ? offerIds : ["00000000-0000-0000-0000-000000000000"]),
+      supabase.from(BINS_TABLE).select("*").in("offer_id", offerIds.length > 0 ? offerIds : ["00000000-0000-0000-0000-000000000000"]),
+      supabase.from(USAGE_LIMITS_TABLE).select("*").in("offer_id", offerIds.length > 0 ? offerIds : ["00000000-0000-0000-0000-000000000000"]),
+    ]);
+
+    if (targetsError) throw targetsError;
+    if (conditionsError) throw conditionsError;
+    if (paymentRulesError) throw paymentRulesError;
+    if (binsError) throw binsError;
+    if (usageLimitsError) throw usageLimitsError;
+
+    bundle = {
+      activeOffers,
+      targets: targets ?? [],
+      conditions: conditions ?? [],
+      paymentRules: paymentRules ?? [],
+      bins: bins ?? [],
+      usageLimits: usageLimits ?? [],
+    };
+    activeOffersCache.set("active_offers_bundle", bundle);
+  }
 
   const targetsByOfferId = new Map<string, any[]>();
   const conditionsByOfferId = new Map<string, any[]>();
@@ -723,27 +805,27 @@ export async function evaluateApplicableOffers(params: {
   const binsByOfferId = new Map<string, any[]>();
   const usageByOfferId = new Map<string, any>();
 
-  for (const target of targets ?? []) {
+  for (const target of bundle.targets) {
     const grouped = targetsByOfferId.get(target.offer_id) ?? [];
     grouped.push(target);
     targetsByOfferId.set(target.offer_id, grouped);
   }
-  for (const condition of conditions ?? []) {
+  for (const condition of bundle.conditions) {
     const grouped = conditionsByOfferId.get(condition.offer_id) ?? [];
     grouped.push(condition);
     conditionsByOfferId.set(condition.offer_id, grouped);
   }
-  for (const rule of paymentRules ?? []) {
+  for (const rule of bundle.paymentRules) {
     const grouped = paymentRulesByOfferId.get(rule.offer_id) ?? [];
     grouped.push(rule);
     paymentRulesByOfferId.set(rule.offer_id, grouped);
   }
-  for (const binRule of bins ?? []) {
+  for (const binRule of bundle.bins) {
     const grouped = binsByOfferId.get(binRule.offer_id) ?? [];
     grouped.push(binRule);
     binsByOfferId.set(binRule.offer_id, grouped);
   }
-  for (const usageLimit of usageLimits ?? []) {
+  for (const usageLimit of bundle.usageLimits) {
     usageByOfferId.set(usageLimit.offer_id, usageLimit);
   }
 
@@ -761,32 +843,142 @@ export async function evaluateApplicableOffers(params: {
     couponCode: params.query.coupon_code ?? null,
   };
 
-  const eligibleItems: any[] = [];
+  const candidateOffers: { offer: any; offerPaymentRules: any[] }[] = [];
 
-  for (const offer of activeOffers) {
+  for (const offer of bundle.activeOffers) {
     const offerTargets = targetsByOfferId.get(offer.id) ?? [];
     const offerConditions = conditionsByOfferId.get(offer.id) ?? [];
     const offerPaymentRules = paymentRulesByOfferId.get(offer.id) ?? [];
     const offerBins = binsByOfferId.get(offer.id) ?? [];
-    const usageLimit = usageByOfferId.get(offer.id) ?? null;
 
     if (!matchesAllTargets(offerTargets, evaluationContext)) continue;
     if (!matchesAllConditions(offerConditions, evaluationContext)) continue;
     if (!matchesAllPaymentRules(offerPaymentRules, evaluationContext)) continue;
     if (offer.source_type === "BANK" && !matchesBins(offerBins, evaluationContext)) continue;
 
-    const usageAllowed = await isUsageLimitAvailable(offer, usageLimit, evaluationContext);
-    if (!usageAllowed) continue;
+    candidateOffers.push({
+      offer,
+      offerPaymentRules,
+    });
+  }
 
-    eligibleItems.push(
-      normalizeApplicableOffer(
-        {
-          ...offer,
-          payment_rules: offerPaymentRules,
-        },
-        { is_eligible: true, reason: null }
-      )
-    );
+  const eligibleItems: any[] = [];
+
+  if (candidateOffers.length > 0) {
+    const candidateOfferIds = candidateOffers.map((c) => c.offer.id);
+
+    const startOfDay = new Date();
+    startOfDay.setHours(0, 0, 0, 0);
+
+    const orConditions: string[] = [];
+    if (evaluationContext.userId) {
+      orConditions.push(`user_id.eq.${evaluationContext.userId}`);
+    }
+    if (evaluationContext.entityType === "STORE") {
+      orConditions.push(`store_id.eq.${evaluationContext.entityId}`);
+    } else {
+      orConditions.push(`restaurant_id.eq.${evaluationContext.entityId}`);
+    }
+    orConditions.push(`redeemed_at.gte.${startOfDay.toISOString()}`);
+
+    const orConditionString = orConditions.join(",");
+
+    const [redemptionsResult, ...totalLimitResults] = await Promise.all([
+      supabase
+        .from(REDEMPTIONS_TABLE)
+        .select("offer_id, user_id, store_id, restaurant_id, redeemed_at")
+        .in("offer_id", candidateOfferIds)
+        .or(orConditionString),
+      
+      ...candidateOffers
+        .filter((c) => {
+          const limit = usageByOfferId.get(c.offer.id);
+          return limit && limit.total_redemption_limit !== null && limit.total_redemption_limit !== undefined;
+        })
+        .map((c) =>
+          supabase
+            .from(REDEMPTIONS_TABLE)
+            .select("id", { count: "exact", head: true })
+            .eq("offer_id", c.offer.id)
+            .then(({ count, error }) => {
+              if (error) throw error;
+              return { offerId: c.offer.id, totalCount: count ?? 0 };
+            })
+        ),
+    ]);
+
+    if (redemptionsResult.error) throw redemptionsResult.error;
+    const redemptions = redemptionsResult.data;
+
+    const totalCountsMap = new Map<string, number>();
+    for (const res of totalLimitResults ?? []) {
+      if (res && typeof res === "object" && "offerId" in res) {
+        totalCountsMap.set((res as any).offerId, (res as any).totalCount);
+      }
+    }
+
+    const redemptionsByOffer = new Map<string, any[]>();
+    for (const r of redemptions ?? []) {
+      const list = redemptionsByOffer.get(r.offer_id) ?? [];
+      list.push(r);
+      redemptionsByOffer.set(r.offer_id, list);
+    }
+
+    for (const { offer, offerPaymentRules } of candidateOffers) {
+      const usageLimit = usageByOfferId.get(offer.id);
+      let usageAllowed = true;
+
+      if (usageLimit) {
+        if (usageLimit.total_redemption_limit !== null && usageLimit.total_redemption_limit !== undefined) {
+          const totalCount = totalCountsMap.get(offer.id) ?? 0;
+          if (totalCount >= usageLimit.total_redemption_limit) {
+            usageAllowed = false;
+          }
+        }
+
+        const offerRedemptions = redemptionsByOffer.get(offer.id) ?? [];
+
+        if (usageAllowed && evaluationContext.userId && usageLimit.per_user_redemption_limit) {
+          const userCount = offerRedemptions.filter((r) => r.user_id === evaluationContext.userId).length;
+          if (userCount >= usageLimit.per_user_redemption_limit) {
+            usageAllowed = false;
+          }
+        }
+
+        if (usageAllowed && evaluationContext.entityType === "STORE" && usageLimit.per_store_redemption_limit) {
+          const storeCount = offerRedemptions.filter((r) => r.store_id === evaluationContext.entityId).length;
+          if (storeCount >= usageLimit.per_store_redemption_limit) {
+            usageAllowed = false;
+          }
+        }
+
+        if (usageAllowed && evaluationContext.entityType === "RESTAURANT" && usageLimit.per_restaurant_redemption_limit) {
+          const restCount = offerRedemptions.filter((r) => r.restaurant_id === evaluationContext.entityId).length;
+          if (restCount >= usageLimit.per_restaurant_redemption_limit) {
+            usageAllowed = false;
+          }
+        }
+
+        if (usageAllowed && usageLimit.per_day_redemption_limit) {
+          const dayCount = offerRedemptions.filter((r) => new Date(r.redeemed_at) >= startOfDay).length;
+          if (dayCount >= usageLimit.per_day_redemption_limit) {
+            usageAllowed = false;
+          }
+        }
+      }
+
+      if (usageAllowed) {
+        eligibleItems.push(
+          normalizeApplicableOffer(
+            {
+              ...offer,
+              payment_rules: offerPaymentRules,
+            },
+            { is_eligible: true, reason: null }
+          )
+        );
+      }
+    }
   }
 
   eligibleItems.sort((a, b) => {

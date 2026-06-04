@@ -1,4 +1,26 @@
--- 1. Create gift_codes table
+-- 1. Create running_discounts table
+CREATE TABLE IF NOT EXISTS public.running_discounts (
+  id UUID NOT NULL DEFAULT gen_random_uuid(),
+  title TEXT NOT NULL,
+  description TEXT NULL,
+  discount_percentage NUMERIC(5, 2) NULL, -- e.g., 10.00 for 10%
+  discount_amount NUMERIC(10, 2) NULL,      -- flat discount if percentage is null
+  min_purchase_amount NUMERIC(10, 2) NOT NULL, -- e.g. 5000.00 (the gift card face value)
+  discount_condition TEXT NULL,            -- condition reason/rules set by admin
+  is_active BOOLEAN NOT NULL DEFAULT true,
+  start_date TIMESTAMP WITH TIME ZONE NULL,
+  end_date TIMESTAMP WITH TIME ZONE NULL,
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+  
+  CONSTRAINT running_discounts_pkey PRIMARY KEY (id),
+  CONSTRAINT running_discounts_percentage_or_amount CHECK (discount_percentage IS NOT NULL OR discount_amount IS NOT NULL)
+) TABLESPACE pg_default;
+
+-- Create index for quick active lookup
+CREATE INDEX IF NOT EXISTS running_discounts_active_idx ON public.running_discounts (is_active) WHERE is_active = true;
+
+-- 2. Create gift_codes table
 CREATE TABLE IF NOT EXISTS public.gift_codes (
   id UUID NOT NULL DEFAULT gen_random_uuid(),
   code TEXT NOT NULL,
@@ -19,12 +41,12 @@ CREATE TABLE IF NOT EXISTS public.gift_codes (
   CONSTRAINT gift_codes_status_chk CHECK (status = ANY (ARRAY['active'::text, 'redeemed'::text, 'cancelled'::text]))
 ) TABLESPACE pg_default;
 
--- Create indexes for performance
+-- Create indexes
 CREATE UNIQUE INDEX IF NOT EXISTS gift_codes_code_idx ON public.gift_codes (code);
 CREATE INDEX IF NOT EXISTS gift_codes_created_by_idx ON public.gift_codes (created_by);
 CREATE INDEX IF NOT EXISTS gift_codes_redeemed_by_idx ON public.gift_codes (redeemed_by);
 
--- 2. Create gift_balances table (User Wallet)
+-- 3. Create gift_balances table (User Wallet)
 CREATE TABLE IF NOT EXISTS public.gift_balances (
   user_id UUID NOT NULL,
   balance NUMERIC(10, 2) NOT NULL DEFAULT 0.00,
@@ -36,7 +58,7 @@ CREATE TABLE IF NOT EXISTS public.gift_balances (
   CONSTRAINT gift_balances_balance_chk CHECK (balance >= 0.00)
 ) TABLESPACE pg_default;
 
--- 3. Create gift_transactions table (Audit log)
+-- 4. Create gift_transactions table (Audit log)
 CREATE TABLE IF NOT EXISTS public.gift_transactions (
   id UUID NOT NULL DEFAULT gen_random_uuid(),
   user_id UUID NOT NULL,
@@ -49,6 +71,22 @@ CREATE TABLE IF NOT EXISTS public.gift_transactions (
   CONSTRAINT gift_transactions_user_id_fkey FOREIGN KEY (user_id) REFERENCES public.users (id) ON DELETE CASCADE,
   CONSTRAINT gift_transactions_gift_code_id_fkey FOREIGN KEY (gift_code_id) REFERENCES public.gift_codes (id) ON DELETE SET NULL,
   CONSTRAINT gift_transactions_type_chk CHECK (type = ANY (ARRAY['redemption'::text, 'spend'::text]))
+) TABLESPACE pg_default;
+
+-- 5. Create gift_events table
+CREATE TABLE IF NOT EXISTS public.gift_events (
+  id UUID NOT NULL DEFAULT gen_random_uuid(),
+  title TEXT NOT NULL,
+  description TEXT NULL,
+  image_url TEXT NULL,
+  image_path TEXT NULL,
+  start_date TIMESTAMP WITH TIME ZONE NULL,
+  end_date TIMESTAMP WITH TIME ZONE NULL,
+  is_active BOOLEAN NOT NULL DEFAULT true,
+  created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+  updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT now(),
+  
+  CONSTRAINT gift_events_pkey PRIMARY KEY (id)
 ) TABLESPACE pg_default;
 
 -- Alter payment_sessions constraint to support GIFT_PURCHASE context
@@ -100,9 +138,11 @@ ALTER TABLE public.payment_sessions
     )
   );
 
--- Create trigger for set_updated_at on gift_codes and gift_balances
+-- Create triggers for set_updated_at function
 CREATE TRIGGER trg_gift_codes_set_updated_at BEFORE UPDATE ON gift_codes FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 CREATE TRIGGER trg_gift_balances_set_updated_at BEFORE UPDATE ON gift_balances FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_running_discounts_set_updated_at BEFORE UPDATE ON running_discounts FOR EACH ROW EXECUTE FUNCTION set_updated_at();
+CREATE TRIGGER trg_gift_events_set_updated_at BEFORE UPDATE ON gift_events FOR EACH ROW EXECUTE FUNCTION set_updated_at();
 
 -- Create RPC function to redeem gift codes atomically
 CREATE OR REPLACE FUNCTION public.redeem_gift_code(p_code text, p_user_id uuid)
@@ -160,4 +200,3 @@ BEGIN
   );
 END;
 $$;
-

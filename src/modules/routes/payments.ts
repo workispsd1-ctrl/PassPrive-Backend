@@ -76,6 +76,7 @@ export const InitiateSchema = z.object({
     })
     .optional(),
   membership_payload: MembershipPayloadSchema.optional(),
+  gift_discount_id: z.string().uuid().optional(),
 }).superRefine((value, ctx) => {
   const hasRestaurantId = !!value.restaurant_id;
   const hasStoreId = !!value.store_id;
@@ -601,7 +602,7 @@ router.post("/iveri/initiate", async (req, res) => {
     const merchantTrace = generateMerchantTrace(parsed.data.payment_context);
     const { firstName, lastName } = splitName(customer.fullName);
 
-    let paymentContext: "BOOKING" | "BILL_PAYMENT" | "MEMBERSHIP" = parsed.data.payment_context;
+    let paymentContext: "BOOKING" | "BILL_PAYMENT" | "MEMBERSHIP" | "GIFT_PURCHASE" = parsed.data.payment_context;
     let amountMajor = 0;
     let restaurantId: string | null = null;
     let storeId: string | null = null;
@@ -807,16 +808,54 @@ router.post("/iveri/initiate", async (req, res) => {
         },
       ];
     } else if (paymentContext === "GIFT_PURCHASE") {
-      amountMajor = parsed.data.original_amount || 0;
-      originalAmount = amountMajor;
+      originalAmount = parsed.data.original_amount || 0;
       discountAmount = 0;
       discountSource = "NONE";
       cashbackAmount = 0;
       restaurantId = null;
       storeId = null;
 
+      let giftDiscountId = parsed.data.gift_discount_id;
+      let calculatedPayable = originalAmount;
+
+      if (giftDiscountId) {
+        const { data: discount, error: discountErr } = await supabase
+          .from("running_discounts")
+          .select("*")
+          .eq("id", giftDiscountId)
+          .eq("is_active", true)
+          .maybeSingle();
+
+        if (discountErr || !discount) {
+          return res.status(400).json({ error: "Invalid or inactive running discount offer" });
+        }
+
+        if (Number(discount.min_purchase_amount) !== originalAmount) {
+          return res.status(400).json({ error: `Discount is only valid for gift card value of ${discount.min_purchase_amount}` });
+        }
+
+        if (discount.discount_percentage) {
+          discountAmount = Number(((originalAmount * Number(discount.discount_percentage)) / 100).toFixed(2));
+        } else if (discount.discount_amount) {
+          discountAmount = Number(Number(discount.discount_amount).toFixed(2));
+        }
+
+        discountSource = "PLATFORM";
+        discountCode = discount.id;
+        discountName = discount.title;
+        discountMeta = {
+          discount_id: discount.id,
+          discount_condition: discount.discount_condition,
+        };
+
+        calculatedPayable = Math.max(0, originalAmount - discountAmount);
+      }
+
+      amountMajor = calculatedPayable;
+
       contextPayload = {
-        gift_amount: amountMajor,
+        gift_amount: originalAmount,
+        gift_discount_id: giftDiscountId ?? null,
       };
       paymentDetails = {
         flow: "GIFT_PURCHASE",
@@ -824,9 +863,9 @@ router.post("/iveri/initiate", async (req, res) => {
 
       lineItems = [
         {
-          description: `Gift Code Purchase - ${amountMajor} MUR`,
+          description: `Gift Code Purchase - Value: ${originalAmount} MUR` + (discountAmount > 0 ? ` (Discount: ${discountAmount} MUR)` : ""),
           quantity: 1,
-          unitAmountMajor: amountMajor,
+          unitAmountMajor: originalAmount,
         },
       ];
     } else {
@@ -1750,7 +1789,11 @@ router.post("/iveri/finalize-gift", async (req, res) => {
       return res.status(409).json({ error: "Payment session has not been verified as successful" });
     }
 
-    const gift = await createGiftCodeWithUniqueness(auth.user.id, session.amount_major, session.id);
+    const giftAmount = session.original_amount !== null && session.original_amount !== undefined && Number(session.original_amount) > 0
+      ? Number(session.original_amount)
+      : session.amount_major;
+
+    const gift = await createGiftCodeWithUniqueness(auth.user.id, giftAmount, session.id);
 
     const updated = await updatePaymentSessionIfStatusIn({
       sessionId: session.id,
@@ -1831,7 +1874,11 @@ router.post("/iveri/gift/success", async (req, res) => {
       });
     }
 
-    const gift = await createGiftCodeWithUniqueness(auth.user.id, session.amount_major, session.id);
+    const giftAmount = session.original_amount !== null && session.original_amount !== undefined && Number(session.original_amount) > 0
+      ? Number(session.original_amount)
+      : session.amount_major;
+
+    const gift = await createGiftCodeWithUniqueness(auth.user.id, giftAmount, session.id);
 
     const updated = await updatePaymentSessionIfStatusIn({
       sessionId: session.id,
