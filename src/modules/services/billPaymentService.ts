@@ -302,6 +302,39 @@ export async function buildBillPaymentContext(input: BillContextInput) {
 
   discountAmount = Number(discountAmount.toFixed(2));
   cashbackAmount = Number(cashbackAmount.toFixed(2));
+
+  // ── Repeat-visit reward (restaurants only) ──────────────────────────────
+  // Server-authoritative, STACKS on top of any selected offers. The RPC applies
+  // the tier's conditions (min bill, max-discount cap, day/time, new-user) and
+  // returns the discount. FREE_ITEM tiers come back applicable with discount 0
+  // (recorded on finalize so the merchant gives the item). Computed identically
+  // at initiate + finalize, so the payable-amount match check still holds.
+  let repeatReward:
+    | { tierId: string; visitCount: number | null; rewardType: string; rewardLabel: string | null; discount: number }
+    | null = null;
+  if (entityType === "RESTAURANT" && input.user_id) {
+    const { data: rrData, error: rrError } = await supabase.rpc("repeat_reward_quote", {
+      in_restaurant_id: entityId,
+      in_user_id: input.user_id,
+      in_bill_amount: originalAmount,
+    });
+    if (rrError) throw rrError;
+    const rr = Array.isArray(rrData) ? rrData[0] : rrData;
+    if (rr?.applicable) {
+      const rrDiscount = Number(rr.discount_amount) || 0;
+      repeatReward = {
+        tierId: rr.tier_id,
+        visitCount: rr.tier_visit_count ?? null,
+        rewardType: rr.reward_type,
+        rewardLabel: rr.reward_label ?? null,
+        discount: rrDiscount,
+      };
+      if (rrDiscount > 0) {
+        discountAmount = Number((discountAmount + rrDiscount).toFixed(2));
+      }
+    }
+  }
+
   const payableAmount = Number(Math.max(0, originalAmount - discountAmount).toFixed(2));
   const discountSource = deriveDiscountSourceFromOffers(selectedOffers);
   const primaryOffer = selectedOffers[0] ?? null;
@@ -327,6 +360,7 @@ export async function buildBillPaymentContext(input: BillContextInput) {
     cashbackAmount,
     payableAmount,
     selectedOffers,
+    repeatReward,
     discountSource,
     discountCode: derivedDiscountCode,
     discountName: primaryOffer ? String(primaryOffer.title ?? primaryOffer.offer_type ?? "Offer") : null,
@@ -388,6 +422,23 @@ export async function finalizeBillPayment(params: {
     };
   }
 
+  const offerBreakdown: any[] = recalculated.selectedOffers.map((offer: any) => ({
+    id: offer.id,
+    title: offer.title,
+    offer_type: offer.offer_type,
+  }));
+  if (recalculated.repeatReward) {
+    offerBreakdown.push({
+      id: `repeat_reward:${recalculated.repeatReward.tierId}`,
+      title:
+        recalculated.repeatReward.rewardLabel ||
+        `Repeat visit reward (visit ${recalculated.repeatReward.visitCount})`,
+      offer_type: "REPEAT_REWARD",
+      reward_type: recalculated.repeatReward.rewardType,
+      discount_amount: recalculated.repeatReward.discount,
+    });
+  }
+
   const { data: billPayment, error: billPaymentError } = await supabase
     .from("bill_payments")
     .insert({
@@ -407,16 +458,27 @@ export async function finalizeBillPayment(params: {
       gateway_authorization_code: params.session.authorization_code ?? null,
       gateway_bank_reference: params.session.bank_reference ?? null,
       status: "PAID",
-      offer_breakdown: recalculated.selectedOffers.map((offer: any) => ({
-        id: offer.id,
-        title: offer.title,
-        offer_type: offer.offer_type,
-      })),
+      offer_breakdown: offerBreakdown,
     })
     .select("*")
     .single();
 
   if (billPaymentError) throw billPaymentError;
+
+  // Record the repeat-reward redemption (idempotent per tier). Never fail an
+  // already-successful payment if this hiccups — log for reconciliation.
+  if (recalculated.repeatReward) {
+    const { error: rrRedeemError } = await supabase.rpc("repeat_reward_redeem", {
+      in_restaurant_id: recalculated.restaurant.id,
+      in_user_id: params.userId,
+      in_tier_id: recalculated.repeatReward.tierId,
+      in_bill_payment_id: billPayment.id,
+      in_discount_amount: recalculated.repeatReward.discount,
+    });
+    if (rrRedeemError) {
+      console.error("repeat_reward_redeem failed", rrRedeemError);
+    }
+  }
 
   const redemptions: any[] = [];
   for (const offer of recalculated.selectedOffers) {
