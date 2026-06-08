@@ -75,12 +75,14 @@ function buildConsumerOrderPrefix(consumerOrderId: string) {
   return candidate.slice(0, 8);
 }
 
-function buildUniqueConsumerOrderId(params: { sessionId: string; context: "BOOKING" | "BILL_PAYMENT" | "MEMBERSHIP" }) {
+function buildUniqueConsumerOrderId(params: { sessionId: string; context: "BOOKING" | "BILL_PAYMENT" | "MEMBERSHIP" | "GIFT_PURCHASE" }) {
   const contextPrefix =
     params.context === "BILL_PAYMENT"
       ? "PPBILL"
       : params.context === "MEMBERSHIP"
       ? "PPMEMB"
+      : params.context === "GIFT_PURCHASE"
+      ? "PPGIFT"
       : "PPBOOK";
   const sessionCompact = params.sessionId.replace(/[^A-Za-z0-9]/g, "").toUpperCase();
   // iVeri max is 20 chars for consumer order id; keep this deterministic and unique per session.
@@ -114,7 +116,7 @@ export function buildIveriAuthoriseRequest(params: {
     lastName?: string | null;
     phone?: string | null;
   };
-  context: "BOOKING" | "BILL_PAYMENT" | "MEMBERSHIP";
+  context: "BOOKING" | "BILL_PAYMENT" | "MEMBERSHIP" | "GIFT_PURCHASE";
   lineItems?: Array<{
     description: string;
     quantity: number;

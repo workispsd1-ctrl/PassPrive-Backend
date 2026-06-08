@@ -4,7 +4,46 @@ import supabase from "../../database/supabase";
 
 const router = Router();
 
-// 1. GET /api/gifts/balance
+// 1. GET /api/gifts/summary
+router.get("/summary", async (req, res) => {
+  const customer = await getAuthenticatedCustomer(req, res);
+  if (!customer) return;
+
+  try {
+    const { data: wallet, error: walletError } = await supabase
+      .from("gift_balances")
+      .select("balance")
+      .eq("user_id", customer.userId)
+      .maybeSingle();
+
+    if (walletError) {
+      console.error("Error fetching gift balance:", walletError);
+      return res.status(500).json({ success: false, error: "Database error" });
+    }
+
+    const { data: transactions, error: txError } = await supabase
+      .from("gift_transactions")
+      .select("*")
+      .eq("user_id", customer.userId)
+      .order("created_at", { ascending: false });
+
+    if (txError) {
+      console.error("Error fetching gift transactions:", txError);
+      return res.status(500).json({ success: false, error: "Database error" });
+    }
+
+    return res.json({
+      success: true,
+      balance: wallet?.balance ?? 0.00,
+      transactions: transactions || [],
+    });
+  } catch (err: any) {
+    console.error("Get summary unexpected error:", err);
+    return res.status(500).json({ success: false, error: "Internal server error" });
+  }
+});
+
+// 2. GET /api/gifts/balance
 router.get("/balance", async (req, res) => {
   const customer = await getAuthenticatedCustomer(req, res);
   if (!customer) return;
