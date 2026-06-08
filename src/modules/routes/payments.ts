@@ -778,12 +778,10 @@ router.post("/iveri/initiate", async (req, res) => {
         payment_context: parsed.data.payment_context,
         body: req.body,
       });
-      if (clientBreakdown) {
-        originalAmount = clientBreakdown.originalAmount;
-        discountAmount = clientBreakdown.discountAmount;
-        cashbackAmount = clientBreakdown.cashbackAmount;
-        amountMajor = clientBreakdown.payableAmount;
-      }
+      // Bill payments are SERVER-AUTHORITATIVE: amount/discount come from
+      // buildBillPaymentContext (restaurant_offers + repeat reward), not the
+      // client breakdown. This guarantees the finalize amount-match and stops a
+      // client from dictating the charge. (clientBreakdown kept for logging.)
       console.info("[iVeri initiate][BILL_PAYMENT parsed amounts]", {
         parsed_original_amount: parsed.data.original_amount ?? null,
         parsed_discount_amount: parsed.data.discount_amount ?? null,

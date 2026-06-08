@@ -303,6 +303,41 @@ export async function buildBillPaymentContext(input: BillContextInput) {
   discountAmount = Number(discountAmount.toFixed(2));
   cashbackAmount = Number(cashbackAmount.toFixed(2));
 
+  // ── Merchant offers from restaurant_offers ──────────────────────────────
+  // The unified `offers` table is unused; merchant deals live in
+  // restaurant_offers. Apply the single BEST-value eligible offer (mirrors the
+  // app's pick); the repeat reward then stacks on top.
+  let merchantOffer:
+    | { id: string; title: string; offerType: string; discount: number }
+    | null = null;
+  if (entityType === "RESTAURANT") {
+    const nowMs = Date.now();
+    const { data: roffers, error: roErr } = await supabase
+      .from("restaurant_offers")
+      .select("id,title,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata")
+      .eq("restaurant_id", entityId)
+      .eq("is_active", true);
+    if (roErr) throw roErr;
+    for (const o of roffers ?? []) {
+      if (((o.metadata as any)?.offerKind ?? "") === "VISIT") continue; // reward handled separately
+      if (o.start_at && new Date(o.start_at).getTime() > nowMs) continue;
+      if (o.end_at && new Date(o.end_at).getTime() < nowMs) continue;
+      if (o.min_spend != null && originalAmount < Number(o.min_spend)) continue;
+      let d = 0;
+      if (o.offer_type === "percentage" && o.discount_value != null) {
+        d = Number(((originalAmount * Number(o.discount_value)) / 100).toFixed(2));
+      } else if (o.offer_type === "flat" && o.discount_value != null) {
+        d = Math.min(Number(o.discount_value), originalAmount);
+      }
+      if (d > (merchantOffer?.discount ?? 0)) {
+        merchantOffer = { id: o.id, title: o.title, offerType: o.offer_type, discount: d };
+      }
+    }
+    if (merchantOffer) {
+      discountAmount = Number((discountAmount + merchantOffer.discount).toFixed(2));
+    }
+  }
+
   // ── Repeat-visit reward (restaurants only) ──────────────────────────────
   // Server-authoritative, STACKS on top of any selected offers. The RPC applies
   // the tier's conditions (min bill, max-discount cap, day/time, new-user) and
@@ -361,6 +396,7 @@ export async function buildBillPaymentContext(input: BillContextInput) {
     payableAmount,
     selectedOffers,
     repeatReward,
+    merchantOffer,
     discountSource,
     discountCode: derivedDiscountCode,
     discountName: primaryOffer ? String(primaryOffer.title ?? primaryOffer.offer_type ?? "Offer") : null,
@@ -427,6 +463,15 @@ export async function finalizeBillPayment(params: {
     title: offer.title,
     offer_type: offer.offer_type,
   }));
+  if (recalculated.merchantOffer) {
+    offerBreakdown.push({
+      id: recalculated.merchantOffer.id,
+      title: recalculated.merchantOffer.title,
+      offer_type: recalculated.merchantOffer.offerType,
+      discount_amount: recalculated.merchantOffer.discount,
+      source: "restaurant_offers",
+    });
+  }
   if (recalculated.repeatReward) {
     offerBreakdown.push({
       id: `repeat_reward:${recalculated.repeatReward.tierId}`,
