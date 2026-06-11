@@ -131,14 +131,14 @@ export const InitiateSchema = z.object({
   }
 
   if (value.payment_context === "GIFT_PURCHASE") {
-    if (hasRestaurantId) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["restaurant_id"], message: "restaurant_id is not allowed for GIFT_PURCHASE" });
-    }
-    if (hasStoreId) {
-      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["store_id"], message: "store_id is not allowed for GIFT_PURCHASE" });
+    if (hasRestaurantId && hasStoreId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["restaurant_id"], message: "restaurant_id and store_id cannot both be set for GIFT_PURCHASE" });
     }
     if (!value.original_amount || value.original_amount <= 0) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["original_amount"], message: "original_amount must be greater than zero for GIFT_PURCHASE" });
+    }
+    if (value.original_amount !== undefined && value.original_amount > 2000) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["original_amount"], message: "original_amount cannot exceed 2000 for GIFT_PURCHASE" });
     }
     if (value.booking_payload) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["booking_payload"], message: "booking_payload is not allowed for GIFT_PURCHASE" });
@@ -818,7 +818,69 @@ router.post("/iveri/initiate", async (req, res) => {
       let giftDiscountId = parsed.data.gift_discount_id;
       let calculatedPayable = originalAmount;
 
-      if (giftDiscountId) {
+      let storeIdInput = parsed.data.store_id || null;
+      let restaurantIdInput = parsed.data.restaurant_id || null;
+      let giftingDiscountPercent = 0;
+
+      if (storeIdInput) {
+        const { data: store, error: storeErr } = await supabase
+          .from("stores")
+          .select("id, gifting_enabled, gifting_discount_percentage, gifting_start_date, gifting_end_date")
+          .eq("id", storeIdInput)
+          .eq("is_active", true)
+          .maybeSingle();
+
+        if (storeErr || !store) {
+          return res.status(400).json({ error: "Store not found or inactive" });
+        }
+
+        if (!store.gifting_enabled) {
+          return res.status(400).json({ error: "Gifting is not enabled for this store" });
+        }
+
+        const now = new Date();
+        if (store.gifting_start_date && new Date(store.gifting_start_date) > now) {
+          return res.status(400).json({ error: "Gifting offer is not active yet" });
+        }
+        if (store.gifting_end_date && new Date(store.gifting_end_date) < now) {
+          return res.status(400).json({ error: "Gifting offer has expired" });
+        }
+
+        storeId = store.id;
+        giftingDiscountPercent = Number(store.gifting_discount_percentage || 0);
+      } else if (restaurantIdInput) {
+        const { data: rest, error: restErr } = await supabase
+          .from("restaurants")
+          .select("id, gifting_enabled, gifting_discount_percentage, gifting_start_date, gifting_end_date")
+          .eq("id", restaurantIdInput)
+          .eq("is_active", true)
+          .maybeSingle();
+
+        if (restErr || !rest) {
+          return res.status(400).json({ error: "Restaurant not found or inactive" });
+        }
+
+        if (!rest.gifting_enabled) {
+          return res.status(400).json({ error: "Gifting is not enabled for this restaurant" });
+        }
+
+        const now = new Date();
+        if (rest.gifting_start_date && new Date(rest.gifting_start_date) > now) {
+          return res.status(400).json({ error: "Gifting offer is not active yet" });
+        }
+        if (rest.gifting_end_date && new Date(rest.gifting_end_date) < now) {
+          return res.status(400).json({ error: "Gifting offer has expired" });
+        }
+
+        restaurantId = rest.id;
+        giftingDiscountPercent = Number(rest.gifting_discount_percentage || 0);
+      }
+
+      if (giftingDiscountPercent > 0) {
+        discountAmount = Number(((originalAmount * giftingDiscountPercent) / 100).toFixed(2));
+        discountSource = "PARTNER";
+        calculatedPayable = Math.max(0, originalAmount - discountAmount);
+      } else if (giftDiscountId) {
         const { data: discount, error: discountErr } = await supabase
           .from("running_discounts")
           .select("*")
@@ -1721,7 +1783,13 @@ router.post("/iveri/membership/success", async (req, res) => {
   }
 });
 
-async function createGiftCodeWithUniqueness(userId: string, amount: number, sessionId: string) {
+async function createGiftCodeWithUniqueness(
+  userId: string,
+  amount: number,
+  sessionId: string,
+  storeId?: string | null,
+  restaurantId?: string | null
+) {
   let attempts = 0;
   while (attempts < 5) {
     const code = `GP-${Math.random().toString(36).substring(2, 6).toUpperCase()}-${Math.random().toString(36).substring(2, 6).toUpperCase()}`;
@@ -1733,6 +1801,8 @@ async function createGiftCodeWithUniqueness(userId: string, amount: number, sess
         created_by: userId,
         payment_session_id: sessionId,
         status: "active",
+        store_id: storeId || null,
+        restaurant_id: restaurantId || null,
       })
       .select()
       .single();
@@ -1793,7 +1863,13 @@ router.post("/iveri/finalize-gift", async (req, res) => {
       ? Number(session.original_amount)
       : session.amount_major;
 
-    const gift = await createGiftCodeWithUniqueness(auth.user.id, giftAmount, session.id);
+    const gift = await createGiftCodeWithUniqueness(
+      auth.user.id,
+      giftAmount,
+      session.id,
+      session.store_id,
+      session.restaurant_id
+    );
 
     const updated = await updatePaymentSessionIfStatusIn({
       sessionId: session.id,
@@ -1878,7 +1954,13 @@ router.post("/iveri/gift/success", async (req, res) => {
       ? Number(session.original_amount)
       : session.amount_major;
 
-    const gift = await createGiftCodeWithUniqueness(auth.user.id, giftAmount, session.id);
+    const gift = await createGiftCodeWithUniqueness(
+      auth.user.id,
+      giftAmount,
+      session.id,
+      session.store_id,
+      session.restaurant_id
+    );
 
     const updated = await updatePaymentSessionIfStatusIn({
       sessionId: session.id,
