@@ -266,3 +266,22 @@ test("MEMBERSHIP finalize updates users and is idempotent", async () => {
 
   assert.equal(second.duplicate, true);
 });
+
+test("GIFT_PURCHASE initiate payload remains valid if <= 2000", () => {
+  const result = InitiateSchema.safeParse({
+    payment_context: "GIFT_PURCHASE",
+    original_amount: 1500,
+  });
+  assert.equal(result.success, true);
+});
+
+test("GIFT_PURCHASE initiate payload is rejected if > 2000", () => {
+  const result = InitiateSchema.safeParse({
+    payment_context: "GIFT_PURCHASE",
+    original_amount: 2500,
+  });
+  assert.equal(result.success, false);
+  if (!result.success) {
+    assert.ok(result.error.message.includes("original_amount cannot exceed 2000 for GIFT_PURCHASE"));
+  }
+});

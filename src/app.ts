@@ -30,6 +30,7 @@ import SupportAdmin from "./modules/routes/supportAdmin";
 import ShareLinks from "./modules/routes/shareLinks";
 import Gifts from "./modules/routes/gifts";
 import GiftEvents from "./modules/routes/giftEvents";
+import Cashback from "./modules/routes/cashback";
 import { cacheInvalidationMiddleware, responseCacheMiddleware } from "./modules/middleware/responseCache";
 import { requestTelemetryMiddleware } from "./modules/middleware/requestTelemetry";
 import { rateLimitMiddleware } from "./modules/middleware/rateLimit";
@@ -147,6 +148,7 @@ app.use("/api/share", ShareLinks);
 app.use("/r", ShareLinks);
 app.use("/api/gifts", Gifts);
 app.use("/api/gift-events", GiftEvents);
+app.use("/api/cashback", Cashback);
 
 // 404 Catch-all Logger
 app.use((req, res) => {
