@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS public.tourist_places (
   CONSTRAINT tourist_places_google_place_id_key UNIQUE (google_place_id),
   CONSTRAINT tourist_places_owner_user_id_fkey FOREIGN KEY (owner_user_id) REFERENCES auth.users (id) ON DELETE SET NULL,
   CONSTRAINT tourist_places_payment_option_chk CHECK (
-    payment_option = ANY (ARRAY['free'::text, 'paid_online'::text, 'paid_on_arrival'::text])
+    payment_option = ANY (ARRAY['free'::text, 'ips'::text, 'card'::text, 'mopay'::text, 'mopay_place'::text])
   ),
   CONSTRAINT tourist_places_price_chk CHECK (price >= 0.00),
   CONSTRAINT tourist_places_rating_chk CHECK (rating >= 0.00 AND rating <= 5.00),
