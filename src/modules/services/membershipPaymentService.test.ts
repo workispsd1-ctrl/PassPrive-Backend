@@ -223,6 +223,7 @@ test("MEMBERSHIP finalize updates users and is idempotent", async () => {
       type: "month",
       product_id: "prod_123",
       price_id: "price_123",
+      cashback: 4.5,
     },
   });
 
@@ -245,6 +246,7 @@ test("MEMBERSHIP finalize updates users and is idempotent", async () => {
 
   assert.equal(first.duplicate, false);
   assert.equal(first.user?.membership, "active");
+  assert.equal(first.user?.cashback, 4.5);
   assert.ok(first.user?.membership_expiry);
   assert.ok(db.updates.users);
 

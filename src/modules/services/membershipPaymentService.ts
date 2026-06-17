@@ -391,7 +391,7 @@ export async function finalizeMembershipPayment(params: {
 
   const { data: planRow, error: planError } = await db
     .from("subscription")
-    .select("id, plan_name, type")
+    .select("id, plan_name, type, cashback")
     .eq("id", planId)
     .maybeSingle();
   if (planError) {
@@ -422,11 +422,12 @@ export async function finalizeMembershipPayment(params: {
       membership_started: membershipStarted,
       membership_expiry: membershipExpiry,
       promo_code_used: promoCode,
+      cashback: planRow.cashback !== null && planRow.cashback !== undefined ? Number(planRow.cashback) : 0.5,
       updated_at: new Date().toISOString(),
     })
     .eq("id", params.userId)
     .select(
-      "id,membership,membership_tier,membership_started,membership_expiry,promo_code_used,updated_at"
+      "id,membership,membership_tier,membership_started,membership_expiry,promo_code_used,cashback,updated_at"
     )
     .single();
 

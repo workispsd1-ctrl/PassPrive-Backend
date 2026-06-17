@@ -102,6 +102,7 @@ type CreateUserBody = {
   membership_tier?: string | null;
   membership_started?: string | null;
   membership_expiry?: string | null;
+  cashback?: number | null;
 
   corporate_code?: string | null;
   corporate_code_status?: string | null;
@@ -181,6 +182,7 @@ async function createOneUser(input: CreateUserBody, sb: any) {
       membership_tier: input.membership_tier ?? "none",
       membership_started: input.membership_started ?? null,
       membership_expiry: input.membership_expiry ?? null,
+      cashback: input.cashback !== undefined ? input.cashback : 0.5,
 
       // ✅ corporate details
       corporate_code: input.corporate_code ?? null,
