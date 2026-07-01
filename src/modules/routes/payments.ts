@@ -550,6 +550,36 @@ function deriveClientAmountBreakdown(input: {
   };
 }
 
+// Security: the server's own calculation is the single source of truth for the
+// amount actually charged. A client-supplied amount_breakdown is only accepted
+// as a cross-check — if it disagrees with the server's computed figures (in
+// either direction, beyond a rounding tolerance), the payment is rejected rather
+// than charging the client's number. This prevents a crafted request from
+// lowering the amount authorised at the gateway.
+function reconcileClientBreakdown(params: {
+  context: "BOOKING" | "BILL_PAYMENT";
+  server: { originalAmount: number; discountAmount: number; payableAmount: number };
+  client: { originalAmount: number; discountAmount: number; payableAmount: number } | null;
+}): { ok: boolean; mismatches: string[] } {
+  if (!params.client) return { ok: true, mismatches: [] };
+
+  const TOLERANCE = 0.01;
+  const checks: Array<[string, number, number]> = [
+    ["original_amount", params.client.originalAmount, params.server.originalAmount],
+    ["discount_amount", params.client.discountAmount, params.server.discountAmount],
+    ["payable_amount", params.client.payableAmount, params.server.payableAmount],
+  ];
+
+  const mismatches: string[] = [];
+  for (const [field, clientValue, serverValue] of checks) {
+    if (Math.abs(Number(clientValue) - Number(serverValue)) > TOLERANCE) {
+      mismatches.push(`${field}: app=${clientValue} server=${serverValue}`);
+    }
+  }
+
+  return { ok: mismatches.length === 0, mismatches };
+}
+
 function validateIveriGatewayConfiguration(params: {
   authoriseUrl: string;
   currencyCode: string;
@@ -701,11 +731,18 @@ router.post("/iveri/initiate", async (req, res) => {
       } else {
         discountSource = "NONE";
       }
-      if (clientBreakdown) {
-        originalAmount = clientBreakdown.originalAmount;
-        discountAmount = clientBreakdown.discountAmount;
-        cashbackAmount = clientBreakdown.cashbackAmount;
-        amountMajor = clientBreakdown.payableAmount;
+      const bookingReconciliation = reconcileClientBreakdown({
+        context: "BOOKING",
+        server: { originalAmount, discountAmount, payableAmount: amountMajor },
+        client: clientBreakdown,
+      });
+      if (!bookingReconciliation.ok) {
+        console.warn("[iVeri initiate][BOOKING amount mismatch]", bookingReconciliation.mismatches);
+        return res.status(400).json({
+          error: "Amount mismatch between app and server. Please refresh and try again.",
+          code: "AMOUNT_MISMATCH",
+          details: bookingReconciliation.mismatches,
+        });
       }
       console.info("[iVeri initiate][BOOKING parsed amounts]", {
         parsed_original_amount: parsed.data.original_amount ?? null,
