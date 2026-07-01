@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import type { Response } from "express";
+import { createRemoteJWKSet, jwtVerify } from "jose";
 import supabase from "../../database/supabase";
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
@@ -7,6 +8,46 @@ const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
 
 if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
   throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_KEY in env");
+}
+
+// Supabase signs access tokens with asymmetric keys (ES256) exposed via JWKS.
+// createRemoteJWKSet fetches once and caches/refreshes the keys, so verifying a
+// token below requires no per-request network call to Supabase Auth.
+const SUPABASE_JWKS = createRemoteJWKSet(
+  new URL(`${SUPABASE_URL}/auth/v1/.well-known/jwks.json`)
+);
+
+interface VerifiedToken {
+  userId: string;
+  email: string | null;
+  phone: string | null;
+  userMetadata: Record<string, any>;
+}
+
+/**
+ * Verify a Supabase access token locally against the project JWKS.
+ * Returns null (rather than throwing) so callers can fall back to a remote
+ * getUser() check if local verification is not possible for a given token.
+ */
+async function verifyAccessTokenLocally(token: string): Promise<VerifiedToken | null> {
+  try {
+    const { payload } = await jwtVerify(token, SUPABASE_JWKS, {
+      audience: "authenticated",
+    });
+    if (!payload.sub) return null;
+    const userMetadata =
+      payload.user_metadata && typeof payload.user_metadata === "object"
+        ? (payload.user_metadata as Record<string, any>)
+        : {};
+    return {
+      userId: String(payload.sub),
+      email: typeof payload.email === "string" ? payload.email : null,
+      phone: typeof payload.phone === "string" ? payload.phone : null,
+      userMetadata,
+    };
+  } catch {
+    return null;
+  }
 }
 
 export interface AuthenticatedCustomer {
@@ -48,6 +89,22 @@ export async function requireAuth(req: any, res: Response) {
     return null;
   }
 
+  // Fast path: verify the Supabase access token locally against the project
+  // JWKS (no network call). The token's claims give us everything callers need.
+  const token = getBearerToken(req)!;
+  const verified = await verifyAccessTokenLocally(token);
+  if (verified) {
+    const user = {
+      id: verified.userId,
+      email: verified.email,
+      phone: verified.phone,
+      user_metadata: verified.userMetadata,
+    };
+    return { sb, user };
+  }
+
+  // Fallback: if local verification fails for any reason, fall back to the
+  // remote getUser() introspection so behaviour never regresses.
   const { data: userData, error: userErr } = await sb.auth.getUser();
   if (userErr || !userData?.user) {
     res.status(401).json({ error: "Unauthorized", code: "UNAUTHORIZED" });

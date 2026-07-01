@@ -456,11 +456,33 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
     return { ok: false as const, status: 400, body: { error: "Invalid booking date", code: "INVALID_SLOT" } };
   }
 
-  const { data: restaurant, error: restaurantError } = await supabase
-    .from("restaurants")
-    .select("*")
-    .eq("id", restaurantId)
-    .maybeSingle();
+  // These reads only depend on the restaurantId / slot from the payload, not on
+  // each other's results, so fire them concurrently instead of serially. This
+  // collapses ~5 network round-trips into one.
+  const [
+    { data: restaurant, error: restaurantError },
+    openingHours,
+    existingBooking,
+    activeBookingCount,
+    { data: activeOfferRows, error: activeOfferRowsError },
+  ] = await Promise.all([
+    supabase.from("restaurants").select("*").eq("id", restaurantId).maybeSingle(),
+    loadRestaurantOpeningHours(restaurantId).then((value) => value ?? {}),
+    findRecentDuplicateBooking({
+      restaurantId,
+      customerUserId: customer.userId,
+      bookingDate,
+      bookingTime,
+      partySize,
+    }),
+    getRestaurantSlotBookingCount(restaurantId, bookingDate, bookingTime),
+    supabase
+      .from("restaurant_offers")
+      .select(
+        "id,title,description,badge_text,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata"
+      )
+      .eq("restaurant_id", restaurantId),
+  ]);
 
   if (restaurantError) {
     return { ok: false as const, status: 500, body: { error: restaurantError.message } };
@@ -499,8 +521,6 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
     return { ok: false as const, status: 400, body: { error: "Selected slot is no longer available", code: "INVALID_SLOT" } };
   }
 
-  const openingHours =
-    (await loadRestaurantOpeningHours(restaurantId)) ?? {};
   const openingWindows = getOpeningWindowsForDate(openingHours, bookingDateValue);
   if (openingWindows.length > 0) {
     const bookingTimeMinutes = timeToMinutes(bookingTime);
@@ -522,15 +542,6 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
     }
   }
 
-  const existingBooking = await findRecentDuplicateBooking({
-    restaurantId,
-    customerUserId: customer.userId,
-    bookingDate,
-    bookingTime,
-    partySize,
-  });
-
-  const activeBookingCount = await getRestaurantSlotBookingCount(restaurantId, bookingDate, bookingTime);
   const maxBookingsPerSlot = parseNumericSignal(restaurant.max_bookings_per_slot);
 
   if (maxBookingsPerSlot > 0 && activeBookingCount >= maxBookingsPerSlot) {
@@ -543,10 +554,6 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
     String(selectedOption.type).trim().toLowerCase() === "regular table reservation";
 
   let verifiedOffer: any = null;
-  const { data: activeOfferRows, error: activeOfferRowsError } = await supabase
-    .from("restaurant_offers")
-    .select("id,title,description,badge_text,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata")
-    .eq("restaurant_id", restaurantId);
   if (activeOfferRowsError) {
     return { ok: false as const, status: 500, body: { error: activeOfferRowsError.message } };
   }
@@ -622,7 +629,15 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
 }
 
 export async function confirmRestaurantBooking(body: BookingPayload, customer: AuthenticatedCustomer) {
-  const evaluation = await evaluateBookingPaymentRequirement(body, customer);
+  // The customer_booking_number count only depends on the customer id, so run it
+  // concurrently with the (network-heavy) evaluation phase rather than after it.
+  const [evaluation, customerBookingNumberResp] = await Promise.all([
+    evaluateBookingPaymentRequirement(body, customer),
+    supabase
+      .from("restaurant_bookings")
+      .select("id", { count: "exact", head: true })
+      .eq("customer_user_id", customer.userId),
+  ]);
   if (!evaluation.ok) return evaluation;
 
   const paymentRequired = evaluation.paymentRequired;
@@ -704,11 +719,6 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
       },
     };
   }
-
-  const customerBookingNumberResp = await supabase
-    .from("restaurant_bookings")
-    .select("id", { count: "exact", head: true })
-    .eq("customer_user_id", customer.userId);
 
   if (customerBookingNumberResp.error) {
     return {
