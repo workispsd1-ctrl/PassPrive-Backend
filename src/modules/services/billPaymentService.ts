@@ -1,5 +1,6 @@
 import supabase from "../../database/supabase";
 import { evaluateApplicableOffers } from "../routes/offers";
+import { earnTransactionCashback } from "./cashbackService";
 
 interface BillContextInput {
   restaurant_id?: string | null;
@@ -504,6 +505,10 @@ export async function finalizeBillPayment(params: {
       gateway_bank_reference: params.session.bank_reference ?? null,
       status: "PAID",
       offer_breakdown: offerBreakdown,
+      // Commercial-rate snapshot for CIM MDR invoicing reconciliation.
+      mdr_rate: recalculated.restaurant?.mdr_rate ?? null,
+      merchant_total_rate: recalculated.restaurant?.merchant_total_rate ?? null,
+      merchant_reward_rate: recalculated.restaurant?.merchant_reward_rate ?? null,
     })
     .select("*")
     .single();
@@ -561,9 +566,35 @@ export async function finalizeBillPayment(params: {
     redemptions.push(redemption);
   }
 
+  // Credit the earned cashback to the customer's wallet (membership + any
+  // merchant-funded). Non-fatal: never fail an already-captured payment.
+  // Base = gross bill amount, matching what the app showed via cashback_quote.
+  // ponytail: if this credit fails, the bill is still recorded and the duplicate
+  // short-circuit above means a finalize retry won't re-attempt it — a rare
+  // failed credit is a reconciliation gap (same ceiling as repeat_reward_redeem),
+  // recoverable from cashback_transactions vs bill_payments. Add a sweeper if the
+  // gap ever shows up in practice.
+  let cashbackCredited = { membership: 0, merchantFunded: 0 };
+  if (recalculated.restaurant?.id) {
+    try {
+      cashbackCredited = await earnTransactionCashback({
+        userId: params.userId,
+        restaurantId: recalculated.restaurant.id,
+        baseAmount: recalculated.originalAmount,
+        sessionId: params.session.id,
+      });
+    } catch (cashbackErr: any) {
+      console.error("[finalize bill] cashback credit failed", {
+        session_id: params.session.id,
+        error: cashbackErr?.message,
+      });
+    }
+  }
+
   return {
     billPayment,
     redemptions,
     duplicate: false,
+    cashbackCredited,
   };
 }

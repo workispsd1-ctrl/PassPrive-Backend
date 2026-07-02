@@ -15,6 +15,7 @@ import {
   buildBillPaymentContext,
   finalizeBillPayment,
 } from "../services/billPaymentService";
+import { earnTransactionCashback } from "../services/cashbackService";
 import {
   buildMembershipPaymentContext,
   finalizeMembershipPayment,
@@ -1501,6 +1502,24 @@ router.post("/iveri/finalize-booking", async (req, res) => {
     }
 
     const bookingReferenceId = result.body.booking.id;
+
+    // Credit earned cashback on the cover-charge paid (non-fatal, idempotent).
+    const bookingRestaurantId = result.body.booking?.restaurant_id ?? null;
+    if (bookingRestaurantId && Number(session.amount_major) > 0) {
+      try {
+        await earnTransactionCashback({
+          userId: customer.userId,
+          restaurantId: bookingRestaurantId,
+          baseAmount: Number(session.amount_major),
+          sessionId: session.id,
+        });
+      } catch (cashbackErr: any) {
+        console.error("[finalize booking] cashback credit failed", {
+          session_id: session.id,
+          error: cashbackErr?.message,
+        });
+      }
+    }
     const updated = await updatePaymentSessionIfStatusIn({
       sessionId: session.id,
       allowedCurrentStatuses: ["VERIFIED_SUCCESS"],
