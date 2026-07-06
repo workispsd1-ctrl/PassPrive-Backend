@@ -18,26 +18,19 @@ router.get("/balance", async (req: Request, res: Response) => {
   if (!customer) return;
 
   try {
-    const { data: balanceRows, error: balanceErr } = await supabase
-      .from("cashback_lots")
-      .select("remaining_amount")
-      .eq("user_id", customer.userId)
-      .gt("remaining_amount", 0.00)
-      .gt("expires_at", new Date().toISOString());
+    const { data: balance, error: balanceErr } = await supabase.rpc(
+      "get_or_update_cashback_balance",
+      { p_user_id: customer.userId }
+    );
 
     if (balanceErr) {
       console.error("Error fetching active balance:", balanceErr);
       return res.status(500).json({ success: false, error: "Database error" });
     }
 
-    const balance = (balanceRows ?? []).reduce(
-      (sum, row) => sum + Number(row.remaining_amount),
-      0
-    );
-
     return res.json({
       success: true,
-      balance: Number(balance.toFixed(2)),
+      balance: Number((balance ?? 0).toFixed(2)),
     });
   } catch (err: any) {
     console.error("Get balance unexpected error:", err);
@@ -55,22 +48,15 @@ router.get("/summary", async (req: Request, res: Response) => {
 
   try {
     // 1. Fetch active balance
-    const { data: balanceRows, error: balanceErr } = await supabase
-      .from("cashback_lots")
-      .select("remaining_amount")
-      .eq("user_id", customer.userId)
-      .gt("remaining_amount", 0.00)
-      .gt("expires_at", new Date().toISOString());
+    const { data: balance, error: balanceErr } = await supabase.rpc(
+      "get_or_update_cashback_balance",
+      { p_user_id: customer.userId }
+    );
 
     if (balanceErr) {
       console.error("Error fetching active balance:", balanceErr);
       return res.status(500).json({ success: false, error: "Database error" });
     }
-
-    const balance = (balanceRows ?? []).reduce(
-      (sum, row) => sum + Number(row.remaining_amount),
-      0
-    );
 
     // 2. Fetch transaction history
     const { data: transactions, error: txError } = await supabase
@@ -86,7 +72,7 @@ router.get("/summary", async (req: Request, res: Response) => {
 
     return res.json({
       success: true,
-      balance: Number(balance.toFixed(2)),
+      balance: Number((balance ?? 0).toFixed(2)),
       transactions: transactions || [],
     });
   } catch (err: any) {

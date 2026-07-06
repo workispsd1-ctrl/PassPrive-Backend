@@ -13,6 +13,7 @@ export type PaymentStatus =
   | "ERROR";
 
 export interface CreatePaymentSessionInput {
+  id?: string;
   payment_context: PaymentContext;
   context_reference_id?: string | null;
   user_id: string;
@@ -76,6 +77,7 @@ export async function createPaymentSession(input: CreatePaymentSessionInput) {
   let lastError: any = null;
   for (let attempt = 0; attempt < 5; attempt += 1) {
     const payload = sanitizePayload({
+      id: input.id,
       payment_provider: "IVERI",
       payment_context: input.payment_context,
       context_reference_id: input.context_reference_id ?? null,

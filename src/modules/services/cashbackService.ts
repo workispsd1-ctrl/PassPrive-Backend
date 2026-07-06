@@ -16,54 +16,56 @@ export async function creditCashback(
 ): Promise<{ success: boolean; lot: any; transaction: any; error?: string }> {
   const client = db ?? supabase;
   try {
-    // 1. Fetch current active rule to determine expiration days
-    const { data: rules, error: rulesErr } = await client
-      .from("cashback_rules")
-      .select("expiry_days")
-      .eq("is_active", true)
-      .maybeSingle();
+    const idempotencyKey = paymentSessionId
+      ? `credit_cashback_session_${paymentSessionId}`
+      : `credit_cashback_random_${Math.random().toString(36).substring(2, 15)}`;
 
-    if (rulesErr) {
-      console.error("Error fetching active cashback rules:", rulesErr);
-      return { success: false, lot: null, transaction: null, error: rulesErr.message };
+    const { data: rpcResult, error: rpcErr } = await client.rpc(
+      "credit_cashback_points_secure",
+      {
+        p_user_id: userId,
+        p_amount: amount,
+        p_payment_session_id: paymentSessionId ?? null,
+        p_idempotency_key: idempotencyKey,
+      }
+    );
+
+    if (rpcErr) {
+      console.error("Error executing credit_cashback_points_secure RPC:", rpcErr);
+      return { success: false, lot: null, transaction: null, error: rpcErr.message };
     }
 
-    const expiryDays = rules?.expiry_days ?? 30;
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + expiryDays);
+    const { success, lot_id, transaction_id, message } = rpcResult as {
+      success: boolean;
+      lot_id?: string;
+      transaction_id?: string;
+      message?: string;
+    };
 
-    // 2. Create the cashback lot
-    const { data: lot, error: lotErr } = await client
-      .from("cashback_lots")
-      .insert({
-        user_id: userId,
-        amount,
-        remaining_amount: amount,
-        expires_at: expiresAt.toISOString(),
-      })
-      .select()
-      .single();
-
-    if (lotErr) {
-      console.error("Error creating cashback lot:", lotErr);
-      return { success: false, lot: null, transaction: null, error: lotErr.message };
+    if (!success) {
+      return { success: false, lot: null, transaction: null, error: message || "Failed to credit cashback" };
     }
 
-    // 3. Create the audit transaction log
-    const { data: transaction, error: txErr } = await client
-      .from("cashback_transactions")
-      .insert({
-        user_id: userId,
-        amount,
-        type: "credit",
-        payment_session_id: paymentSessionId ?? null,
-      })
-      .select()
-      .single();
+    // Fetch the inserted lot and transaction for backward compatibility
+    let lot: any = null;
+    let transaction: any = null;
 
-    if (txErr) {
-      console.error("Error logging cashback credit transaction:", txErr);
-      return { success: false, lot, transaction: null, error: txErr.message };
+    if (lot_id) {
+      const { data: lotData } = await client
+        .from("cashback_lots")
+        .select("*")
+        .eq("id", lot_id)
+        .maybeSingle();
+      lot = lotData;
+    }
+
+    if (transaction_id) {
+      const { data: txData } = await client
+        .from("cashback_transactions")
+        .select("*")
+        .eq("id", transaction_id)
+        .maybeSingle();
+      transaction = txData;
     }
 
     return { success: true, lot, transaction };

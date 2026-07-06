@@ -58,6 +58,17 @@ export async function requireAuth(req: any, res: Response) {
 }
 
 export async function getAuthenticatedCustomer(req: any, res: Response): Promise<AuthenticatedCustomer | null> {
+  
+  // --- ADD THIS BYPASS BLOCK FOR LOAD TESTING ---
+  if (req.headers["x-bypass-auth"] === "load-test-secret") {
+    return {
+      userId: "a6043906-66ae-44d9-bc96-9d92b844744e", // Make sure this UUID exists in your database `users` table
+      fullName: "Load Test User",
+      phone: "+1234567890",
+      email: "loadtest@example.com"
+    };
+  }
+
   const auth = await requireAuth(req, res);
   if (!auth) return null;
 

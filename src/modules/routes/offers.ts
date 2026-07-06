@@ -745,8 +745,9 @@ export async function evaluateApplicableOffers(params: {
   entityType: "STORE" | "RESTAURANT";
   entityId: string;
   query: z.infer<typeof ApplicableOfferQuerySchema>;
+  preFetchedEntity?: any;
 }) {
-  const entity = await fetchApplicableContext({
+  const entity = params.preFetchedEntity ?? await fetchApplicableContext({
     entityType: params.entityType,
     entityId: params.entityId,
   });

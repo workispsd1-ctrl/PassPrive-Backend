@@ -211,30 +211,34 @@ export async function buildBillPaymentContext(input: BillContextInput) {
     entityId = restaurant.id;
     entity = restaurant;
   } else {
-    const { data: store, error: storeError } = await supabase
-      .from("stores")
-      .select("*")
-      .eq("id", input.store_id!)
-      .maybeSingle();
+    const [storeResult, itemResult] = await Promise.all([
+      supabase
+        .from("stores")
+        .select("*")
+        .eq("id", input.store_id!)
+        .maybeSingle(),
+      input.item_id
+        ? supabase
+            .from("store_catalogue_items")
+            .select("*")
+            .eq("id", input.item_id)
+            .eq("store_id", input.store_id!)
+            .maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+    ]);
+
+    const { data: store, error: storeError } = storeResult;
+    const { data: storeItem, error: itemError } = itemResult;
 
     if (storeError) throw storeError;
     if (!store) throw new BillPaymentValidationError("Store not found", 404);
 
-
     if (input.item_id) {
-      const { data: storeItem, error: itemError } = await supabase
-        .from("store_catalogue_items")
-        .select("*")
-        .eq("id", input.item_id)
-        .eq("store_id", input.store_id!)
-        .maybeSingle();
-
       if (itemError) throw itemError;
       if (!storeItem) throw new BillPaymentValidationError("Billable item not found", 404);
       if (storeItem.is_billable !== true) {
         throw new BillPaymentValidationError("Selected item is not billable");
       }
-
       item = storeItem;
     }
 
@@ -256,6 +260,7 @@ export async function buildBillPaymentContext(input: BillContextInput) {
       user_id: input.user_id ?? undefined,
       coupon_code: input.coupon_code ?? undefined,
     },
+    preFetchedEntity: entity,
   });
 
   if (offerEvaluation.status !== 200) {

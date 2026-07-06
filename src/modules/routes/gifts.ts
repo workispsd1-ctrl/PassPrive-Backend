@@ -19,7 +19,7 @@ router.get("/summary", async (req, res) => {
   try {
     const { data: wallet, error: walletError } = await supabase
       .from("gift_balances")
-      .select("balance")
+      .select("balance, locked_balance")
       .eq("user_id", customer.userId)
       .maybeSingle();
 
@@ -43,6 +43,7 @@ router.get("/summary", async (req, res) => {
       .from("brand_gift_balances")
       .select(`
         balance,
+        locked_balance,
         store_id,
         restaurant_id,
         stores ( name, logo_url ),
@@ -58,6 +59,7 @@ router.get("/summary", async (req, res) => {
     return res.json({
       success: true,
       balance: wallet?.balance ?? 0.00,
+      locked_balance: wallet?.locked_balance ?? 0.00,
       transactions: transactions || [],
       brand_balances: brandBalances || [],
     });
@@ -75,7 +77,7 @@ router.get("/balance", async (req, res) => {
   try {
     const { data: wallet, error } = await supabase
       .from("gift_balances")
-      .select("balance")
+      .select("balance, locked_balance")
       .eq("user_id", customer.userId)
       .maybeSingle();
 
@@ -87,6 +89,7 @@ router.get("/balance", async (req, res) => {
     return res.json({
       success: true,
       balance: wallet?.balance ?? 0.00,
+      locked_balance: wallet?.locked_balance ?? 0.00,
     });
   } catch (err: any) {
     console.error("Get balance unexpected error:", err);

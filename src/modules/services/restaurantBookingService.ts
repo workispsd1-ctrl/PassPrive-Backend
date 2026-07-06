@@ -456,14 +456,48 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
     return { ok: false as const, status: 400, body: { error: "Invalid booking date", code: "INVALID_SLOT" } };
   }
 
-  const { data: restaurant, error: restaurantError } = await supabase
-    .from("restaurants")
-    .select("*")
-    .eq("id", restaurantId)
-    .maybeSingle();
+  const [
+    restaurantResult,
+    openingHoursResult,
+    existingBooking,
+    activeBookingCount,
+    activeOfferRowsResult,
+    customerBookingCountResult,
+  ] = await Promise.all([
+    supabase
+      .from("restaurants")
+      .select("*")
+      .eq("id", restaurantId)
+      .maybeSingle(),
+    loadRestaurantOpeningHours(restaurantId),
+    findRecentDuplicateBooking({
+      restaurantId,
+      customerUserId: customer.userId,
+      bookingDate,
+      bookingTime,
+      partySize,
+    }),
+    getRestaurantSlotBookingCount(restaurantId, bookingDate, bookingTime),
+    supabase
+      .from("restaurant_offers")
+      .select("id,title,description,badge_text,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata")
+      .eq("restaurant_id", restaurantId),
+    supabase
+      .from("restaurant_bookings")
+      .select("id", { count: "exact", head: true })
+      .eq("customer_user_id", customer.userId),
+  ]);
+
+  const { data: restaurant, error: restaurantError } = restaurantResult;
+  const { data: activeOfferRows, error: activeOfferRowsError } = activeOfferRowsResult;
+  const { count: customerBookingCount, error: customerBookingCountError } = customerBookingCountResult;
+  const openingHours = openingHoursResult ?? {};
 
   if (restaurantError) {
     return { ok: false as const, status: 500, body: { error: restaurantError.message } };
+  }
+  if (activeOfferRowsError) {
+    return { ok: false as const, status: 500, body: { error: activeOfferRowsError.message } };
   }
   if (!restaurant || restaurant.is_active !== true) {
     return { ok: false as const, status: 404, body: { error: "Restaurant not found", code: "RESTAURANT_NOT_FOUND" } };
@@ -499,8 +533,6 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
     return { ok: false as const, status: 400, body: { error: "Selected slot is no longer available", code: "INVALID_SLOT" } };
   }
 
-  const openingHours =
-    (await loadRestaurantOpeningHours(restaurantId)) ?? {};
   const openingWindows = getOpeningWindowsForDate(openingHours, bookingDateValue);
   if (openingWindows.length > 0) {
     const bookingTimeMinutes = timeToMinutes(bookingTime);
@@ -522,15 +554,6 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
     }
   }
 
-  const existingBooking = await findRecentDuplicateBooking({
-    restaurantId,
-    customerUserId: customer.userId,
-    bookingDate,
-    bookingTime,
-    partySize,
-  });
-
-  const activeBookingCount = await getRestaurantSlotBookingCount(restaurantId, bookingDate, bookingTime);
   const maxBookingsPerSlot = parseNumericSignal(restaurant.max_bookings_per_slot);
 
   if (maxBookingsPerSlot > 0 && activeBookingCount >= maxBookingsPerSlot) {
@@ -543,13 +566,7 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
     String(selectedOption.type).trim().toLowerCase() === "regular table reservation";
 
   let verifiedOffer: any = null;
-  const { data: activeOfferRows, error: activeOfferRowsError } = await supabase
-    .from("restaurant_offers")
-    .select("id,title,description,badge_text,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata")
-    .eq("restaurant_id", restaurantId);
-  if (activeOfferRowsError) {
-    return { ok: false as const, status: 500, body: { error: activeOfferRowsError.message } };
-  }
+
 
   const nowTs = new Date().getTime();
   const offers = (activeOfferRows ?? [])
@@ -618,6 +635,8 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
     verifiedCoverChargeAmount,
     paymentRequired: verifiedCoverChargeAmount > 0,
     duplicateBooking: existingBooking ?? null,
+    customerBookingCount: customerBookingCount ?? 0,
+    customerBookingCountError: customerBookingCountError ?? null,
   };
 }
 
@@ -705,18 +724,14 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
     };
   }
 
-  const customerBookingNumberResp = await supabase
-    .from("restaurant_bookings")
-    .select("id", { count: "exact", head: true })
-    .eq("customer_user_id", customer.userId);
-
-  if (customerBookingNumberResp.error) {
+  if (evaluation.customerBookingCountError) {
     return {
       ok: false as const,
       status: 500,
-      body: { error: customerBookingNumberResp.error.message },
+      body: { error: (evaluation.customerBookingCountError as any).message },
     };
   }
+  const customerBookingCount = evaluation.customerBookingCount;
 
   const normalizedPaymentStatus = paymentRequired ? (paymentVerified ? "paid" : "pending") : "paid";
   const bookingCode = generateBookingCode();
@@ -735,7 +750,7 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
     special_request: body.notes ?? null,
     booking_code: bookingCode,
     read: false,
-    customer_booking_number: (customerBookingNumberResp.count ?? 0) + 1,
+    customer_booking_number: customerBookingCount + 1,
     selected_offer: buildSelectedOfferSummary(evaluation.verifiedOffer),
     payment_required: paymentRequired,
     cover_charge_required: paymentRequired,

@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { randomUUID } from "crypto";
 import supabase from "../../database/supabase";
 import {
   getAuthenticatedCustomer,
@@ -976,7 +977,28 @@ router.post("/iveri/initiate", async (req, res) => {
       ];
     }
 
+    const sessionId = randomUUID();
+
+    const gatewayRequest = buildIveriAuthoriseRequest({
+      config,
+      sessionId: sessionId,
+      merchantTrace,
+      amountMajor,
+      discountMajor: discountAmount,
+      currencyCode: "MUR",
+      merchantReference,
+      customer: {
+        email: customer.email ?? "payments@passprive.app",
+        firstName,
+        lastName,
+        phone: customer.phone,
+      },
+      context: paymentContext,
+      lineItems,
+    });
+
     const session = await createPaymentSession({
+      id: sessionId,
       payment_context: paymentContext,
       user_id: customer.userId,
       restaurant_id: restaurantId,
@@ -998,6 +1020,7 @@ router.post("/iveri/initiate", async (req, res) => {
         context_payload: contextPayload,
         payment_details: paymentDetails,
         mode: config.mode,
+        gateway_request: gatewayRequest,
         ...(paymentContext === "MEMBERSHIP"
           ? {
               membership_purchase:
@@ -1006,6 +1029,7 @@ router.post("/iveri/initiate", async (req, res) => {
           : {}),
       },
     });
+
     console.info("[iVeri initiate][persisted session amounts]", {
       session_id: session.id,
       payment_context: session.payment_context,
@@ -1016,69 +1040,45 @@ router.post("/iveri/initiate", async (req, res) => {
       payable_minor: session.amount_minor,
     });
 
-    const gatewayRequest = buildIveriAuthoriseRequest({
-      config,
-      sessionId: session.id,
-      merchantTrace,
-      amountMajor,
-      discountMajor: discountAmount,
-      currencyCode: "MUR",
-      merchantReference,
-      customer: {
-        email: customer.email ?? "payments@passprive.app",
-        firstName,
-        lastName,
-        phone: customer.phone,
-      },
-      context: paymentContext,
-      lineItems,
-    });
-
-    const updatedSession = await updatePaymentSession(session.id, {
-      gateway_payload: {
-        ...(session.gateway_payload ?? {}),
-        gateway_request: gatewayRequest,
-      },
-    });
-    const launchUrl = `${getBackendBaseUrl(req)}/api/payments/iveri/launch/${updatedSession.id}`;
+    const launchUrl = `${getBackendBaseUrl(req)}/api/payments/iveri/launch/${session.id}`;
 
     return res.status(201).json({
-      session_id: updatedSession.id,
-      tracking_id: updatedSession.tracking_id ?? null,
-      merchant_trace: updatedSession.merchant_trace,
+      session_id: session.id,
+      tracking_id: session.tracking_id ?? null,
+      merchant_trace: session.merchant_trace,
       launch_url: launchUrl,
       mobile_redirect_url: launchUrl,
       expected_amount: {
-        major: updatedSession.amount_major,
-        minor: updatedSession.amount_minor,
-        currency_code: updatedSession.currency_code,
+        major: session.amount_major,
+        minor: session.amount_minor,
+        currency_code: session.currency_code,
       },
       amount_breakdown: {
-        original_major: updatedSession.original_amount ?? updatedSession.amount_major,
-        discount_major: updatedSession.discount_amount ?? 0,
-        cashback_major: updatedSession.cashback_amount ?? 0,
-        payable_major: updatedSession.amount_major,
+        original_major: session.original_amount ?? session.amount_major,
+        discount_major: session.discount_amount ?? 0,
+        cashback_major: session.cashback_amount ?? 0,
+        payable_major: session.amount_major,
       },
       benefit_breakdown: {
-        discount_major: updatedSession.discount_amount ?? 0,
-        cashback_major: updatedSession.cashback_amount ?? 0,
+        discount_major: session.discount_amount ?? 0,
+        cashback_major: session.cashback_amount ?? 0,
         total_benefit_major: Number(
           (
-            Number(updatedSession.discount_amount ?? 0) +
-            Number(updatedSession.cashback_amount ?? 0)
+            Number(session.discount_amount ?? 0) +
+            Number(session.cashback_amount ?? 0)
           ).toFixed(2)
         ),
       },
       discount_details: {
-        source: updatedSession.discount_source ?? "NONE",
-        code: updatedSession.discount_code ?? null,
-        name: updatedSession.discount_name ?? null,
-        applied_amount_major: updatedSession.discount_amount ?? 0,
-        meta: updatedSession.discount_meta ?? {},
+        source: session.discount_source ?? "NONE",
+        code: session.discount_code ?? null,
+        name: session.discount_name ?? null,
+        applied_amount_major: session.discount_amount ?? 0,
+        meta: session.discount_meta ?? {},
       },
       membership_purchase:
         paymentContext === "MEMBERSHIP"
-          ? updatedSession.gateway_payload?.membership_purchase ?? null
+          ? session.gateway_payload?.membership_purchase ?? null
           : null,
       gateway: {
         url: gatewayRequest.gatewayUrl,
@@ -1093,9 +1093,9 @@ router.post("/iveri/initiate", async (req, res) => {
         try_later_url: gatewayRequest.fields.Lite_Website_TryLater_Url,
         error_url: gatewayRequest.fields.Lite_Website_Error_Url,
         app_deep_links: {
-          success: buildAppDeepLink("success", updatedSession.id),
-          fail: buildAppDeepLink("fail", updatedSession.id),
-          pending: buildAppDeepLink("pending", updatedSession.id),
+          success: buildAppDeepLink("success", session.id),
+          fail: buildAppDeepLink("fail", session.id),
+          pending: buildAppDeepLink("pending", session.id),
         },
       },
     });
