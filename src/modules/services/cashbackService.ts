@@ -7,14 +7,21 @@ export interface CashbackValidationResult {
 
 /**
  * Credits cashback points to a user by creating a new expiration lot.
+ *
+ * `source` distinguishes the credit ('membership' | 'merchant_funded' | 'manual')
+ * so a single payment session can carry more than one lot (see the
+ * (payment_session_id, source) idempotency index). `expiryDays` overrides the
+ * active cashback_rules expiry (e.g. 14 days for merchant-funded credits).
  */
 export async function creditCashback(
   userId: string,
   amount: number,
   paymentSessionId?: string,
-  db?: any
+  db?: any,
+  opts?: { source?: string; expiryDays?: number }
 ): Promise<{ success: boolean; lot: any; transaction: any; error?: string }> {
   const client = db ?? supabase;
+  const source = opts?.source ?? "membership";
   try {
     const idempotencyKey = paymentSessionId
       ? `credit_cashback_session_${paymentSessionId}`
@@ -73,6 +80,93 @@ export async function creditCashback(
     console.error("Unexpected error in creditCashback:", err);
     return { success: false, lot: null, transaction: null, error: err.message };
   }
+}
+
+/**
+ * Earns cashback for a completed restaurant transaction (bill or booking) and
+ * credits it to the customer's wallet. This is the loop that turns the cashback
+ * the app SHOWS (via the same cashback_quote RPC) into a real wallet credit.
+ *
+ * - Membership cashback: cashback_quote(restaurant, user, base) → 0.5/2/4% by
+ *   tier × merchant_type. Standard (cashback_rules) expiry.
+ * - Merchant-funded cashback (Preferred only): restaurants.merchant_reward_rate %
+ *   of the base, credited as a separate lot with a 14-day expiry.
+ *
+ * Idempotent per (session, source) via the DB unique index and a pre-check, and
+ * NON-FATAL: a hiccup here must never fail an already-captured payment — the
+ * caller logs and moves on (mirrors repeat_reward_redeem).
+ */
+const MERCHANT_FUNDED_EXPIRY_DAYS = 14;
+
+export async function earnTransactionCashback(params: {
+  userId: string;
+  restaurantId: string;
+  baseAmount: number;
+  sessionId: string;
+  db?: any;
+}): Promise<{ membership: number; merchantFunded: number }> {
+  const client = params.db ?? supabase;
+  const credited = { membership: 0, merchantFunded: 0 };
+
+  if (!params.restaurantId || !(params.baseAmount > 0)) return credited;
+
+  // Which sources have already been credited for this session? (retry safety)
+  const { data: existingTx } = await client
+    .from("cashback_transactions")
+    .select("source")
+    .eq("payment_session_id", params.sessionId)
+    .eq("type", "credit");
+  const already = new Set((existingTx ?? []).map((t: any) => t.source));
+
+  // ── Membership cashback (canonical matrix, shown == credited) ──────────────
+  if (!already.has("membership")) {
+    const { data: quote, error: quoteErr } = await client.rpc("cashback_quote", {
+      in_restaurant_id: params.restaurantId,
+      in_user_id: params.userId,
+      in_bill_amount: params.baseAmount,
+    });
+    if (quoteErr) {
+      console.error("[cashback] cashback_quote failed", { sessionId: params.sessionId, error: quoteErr.message });
+    } else {
+      const row = Array.isArray(quote) ? quote[0] : quote;
+      const amount = Number(row?.cashback_amount) || 0;
+      if (row?.applicable && amount > 0) {
+        const res = await creditCashback(params.userId, amount, params.sessionId, client, {
+          source: "membership",
+        });
+        if (res.success) credited.membership = amount;
+        else console.error("[cashback] membership credit failed", { sessionId: params.sessionId, error: res.error });
+      }
+    }
+  }
+
+  // ── Merchant-funded cashback (Preferred partners, 14-day expiry) ───────────
+  if (!already.has("merchant_funded")) {
+    const { data: rest, error: restErr } = await client
+      .from("restaurants")
+      .select("merchant_type, merchant_reward_rate")
+      .eq("id", params.restaurantId)
+      .maybeSingle();
+    if (restErr) {
+      console.error("[cashback] merchant lookup failed", { sessionId: params.sessionId, error: restErr.message });
+    } else {
+      const mtype = String(rest?.merchant_type ?? "").trim().toLowerCase();
+      const rewardRate = Number(rest?.merchant_reward_rate) || 0;
+      if (mtype === "preferred" && rewardRate > 0) {
+        const amount = Number(((params.baseAmount * rewardRate) / 100).toFixed(2));
+        if (amount > 0) {
+          const res = await creditCashback(params.userId, amount, params.sessionId, client, {
+            source: "merchant_funded",
+            expiryDays: MERCHANT_FUNDED_EXPIRY_DAYS,
+          });
+          if (res.success) credited.merchantFunded = amount;
+          else console.error("[cashback] merchant-funded credit failed", { sessionId: params.sessionId, error: res.error });
+        }
+      }
+    }
+  }
+
+  return credited;
 }
 
 /**

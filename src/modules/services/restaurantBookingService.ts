@@ -456,6 +456,9 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
     return { ok: false as const, status: 400, body: { error: "Invalid booking date", code: "INVALID_SLOT" } };
   }
 
+  // These reads only depend on the restaurantId / slot from the payload, not on
+  // each other's results, so fire them concurrently instead of serially. This
+  // collapses network round-trips into one.
   const [
     restaurantResult,
     openingHoursResult,
@@ -464,12 +467,8 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
     activeOfferRowsResult,
     customerBookingCountResult,
   ] = await Promise.all([
-    supabase
-      .from("restaurants")
-      .select("*")
-      .eq("id", restaurantId)
-      .maybeSingle(),
-    loadRestaurantOpeningHours(restaurantId),
+    supabase.from("restaurants").select("*").eq("id", restaurantId).maybeSingle(),
+    loadRestaurantOpeningHours(restaurantId).then((value) => value ?? {}),
     findRecentDuplicateBooking({
       restaurantId,
       customerUserId: customer.userId,
@@ -480,7 +479,9 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
     getRestaurantSlotBookingCount(restaurantId, bookingDate, bookingTime),
     supabase
       .from("restaurant_offers")
-      .select("id,title,description,badge_text,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata")
+      .select(
+        "id,title,description,badge_text,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata"
+      )
       .eq("restaurant_id", restaurantId),
     supabase
       .from("restaurant_bookings")
@@ -491,7 +492,7 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
   const { data: restaurant, error: restaurantError } = restaurantResult;
   const { data: activeOfferRows, error: activeOfferRowsError } = activeOfferRowsResult;
   const { count: customerBookingCount, error: customerBookingCountError } = customerBookingCountResult;
-  const openingHours = openingHoursResult ?? {};
+  const openingHours = openingHoursResult;
 
   if (restaurantError) {
     return { ok: false as const, status: 500, body: { error: restaurantError.message } };
@@ -567,7 +568,6 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
 
   let verifiedOffer: any = null;
 
-
   const nowTs = new Date().getTime();
   const offers = (activeOfferRows ?? [])
     .filter((row: any) => row?.is_active !== false)
@@ -641,7 +641,15 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
 }
 
 export async function confirmRestaurantBooking(body: BookingPayload, customer: AuthenticatedCustomer) {
-  const evaluation = await evaluateBookingPaymentRequirement(body, customer);
+  // The customer_booking_number count only depends on the customer id, so run it
+  // concurrently with the (network-heavy) evaluation phase rather than after it.
+  const [evaluation, customerBookingNumberResp] = await Promise.all([
+    evaluateBookingPaymentRequirement(body, customer),
+    supabase
+      .from("restaurant_bookings")
+      .select("id", { count: "exact", head: true })
+      .eq("customer_user_id", customer.userId),
+  ]);
   if (!evaluation.ok) return evaluation;
 
   const paymentRequired = evaluation.paymentRequired;

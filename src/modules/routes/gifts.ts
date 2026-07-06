@@ -11,57 +11,57 @@ const upload = multer({
 
 const BRAND_ASSETS_BUCKET = "brand-gifting-assets";
 
-// 1. GET /api/gifts/summary
+// 1. GET /api/gifts/summary  -> balance + transactions + brand balances in one call
+//    (the mobile Gifts view reads this on focus).
 router.get("/summary", async (req, res) => {
   const customer = await getAuthenticatedCustomer(req, res);
   if (!customer) return;
 
   try {
-    const { data: wallet, error: walletError } = await supabase
-      .from("gift_balances")
-      .select("balance, locked_balance")
-      .eq("user_id", customer.userId)
-      .maybeSingle();
+    const [balanceResult, txResult, brandResult] = await Promise.all([
+      supabase
+        .from("gift_balances")
+        .select("balance, locked_balance")
+        .eq("user_id", customer.userId)
+        .maybeSingle(),
+      supabase
+        .from("gift_transactions")
+        .select("*")
+        .eq("user_id", customer.userId)
+        .order("created_at", { ascending: false })
+        .limit(100),
+      supabase
+        .from("brand_gift_balances")
+        .select(`
+          balance,
+          locked_balance,
+          store_id,
+          restaurant_id,
+          stores ( name, logo_url ),
+          restaurants ( name, cover_image )
+        `)
+        .eq("user_id", customer.userId),
+    ]);
 
-    if (walletError) {
-      console.error("Error fetching gift balance:", walletError);
+    if (balanceResult.error) {
+      console.error("Error fetching gift balance:", balanceResult.error);
       return res.status(500).json({ success: false, error: "Database error" });
     }
-
-    const { data: transactions, error: txError } = await supabase
-      .from("gift_transactions")
-      .select("*")
-      .eq("user_id", customer.userId)
-      .order("created_at", { ascending: false });
-
-    if (txError) {
-      console.error("Error fetching gift transactions:", txError);
+    if (txResult.error) {
+      console.error("Error fetching gift transactions:", txResult.error);
       return res.status(500).json({ success: false, error: "Database error" });
     }
-
-    const { data: brandBalances, error: brandError } = await supabase
-      .from("brand_gift_balances")
-      .select(`
-        balance,
-        locked_balance,
-        store_id,
-        restaurant_id,
-        stores ( name, logo_url ),
-        restaurants ( name, cover_image )
-      `)
-      .eq("user_id", customer.userId);
-
-    if (brandError) {
-      console.error("Error fetching brand balances:", brandError);
+    if (brandResult.error) {
+      console.error("Error fetching brand balances:", brandResult.error);
       return res.status(500).json({ success: false, error: "Database error" });
     }
 
     return res.json({
       success: true,
-      balance: wallet?.balance ?? 0.00,
-      locked_balance: wallet?.locked_balance ?? 0.00,
-      transactions: transactions || [],
-      brand_balances: brandBalances || [],
+      balance: balanceResult.data?.balance ?? 0.00,
+      locked_balance: balanceResult.data?.locked_balance ?? 0.00,
+      transactions: txResult.data || [],
+      brand_balances: brandResult.data || [],
     });
   } catch (err: any) {
     console.error("Get summary unexpected error:", err);

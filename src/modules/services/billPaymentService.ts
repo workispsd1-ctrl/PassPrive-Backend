@@ -1,5 +1,6 @@
 import supabase from "../../database/supabase";
 import { evaluateApplicableOffers } from "../routes/offers";
+import { earnTransactionCashback } from "./cashbackService";
 
 interface BillContextInput {
   restaurant_id?: string | null;
@@ -307,6 +308,74 @@ export async function buildBillPaymentContext(input: BillContextInput) {
 
   discountAmount = Number(discountAmount.toFixed(2));
   cashbackAmount = Number(cashbackAmount.toFixed(2));
+
+  // ── Merchant offers from restaurant_offers ──────────────────────────────
+  // The unified `offers` table is unused; merchant deals live in
+  // restaurant_offers. Apply the single BEST-value eligible offer (mirrors the
+  // app's pick); the repeat reward then stacks on top.
+  let merchantOffer:
+    | { id: string; title: string; offerType: string; discount: number }
+    | null = null;
+  if (entityType === "RESTAURANT") {
+    const nowMs = Date.now();
+    const { data: roffers, error: roErr } = await supabase
+      .from("restaurant_offers")
+      .select("id,title,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata")
+      .eq("restaurant_id", entityId)
+      .eq("is_active", true);
+    if (roErr) throw roErr;
+    for (const o of roffers ?? []) {
+      if (((o.metadata as any)?.offerKind ?? "") === "VISIT") continue; // reward handled separately
+      if (o.start_at && new Date(o.start_at).getTime() > nowMs) continue;
+      if (o.end_at && new Date(o.end_at).getTime() < nowMs) continue;
+      if (o.min_spend != null && originalAmount < Number(o.min_spend)) continue;
+      let d = 0;
+      if (o.offer_type === "percentage" && o.discount_value != null) {
+        d = Number(((originalAmount * Number(o.discount_value)) / 100).toFixed(2));
+      } else if (o.offer_type === "flat" && o.discount_value != null) {
+        d = Math.min(Number(o.discount_value), originalAmount);
+      }
+      if (d > (merchantOffer?.discount ?? 0)) {
+        merchantOffer = { id: o.id, title: o.title, offerType: o.offer_type, discount: d };
+      }
+    }
+    if (merchantOffer) {
+      discountAmount = Number((discountAmount + merchantOffer.discount).toFixed(2));
+    }
+  }
+
+  // ── Repeat-visit reward (restaurants only) ──────────────────────────────
+  // Server-authoritative, STACKS on top of any selected offers. The RPC applies
+  // the tier's conditions (min bill, max-discount cap, day/time, new-user) and
+  // returns the discount. FREE_ITEM tiers come back applicable with discount 0
+  // (recorded on finalize so the merchant gives the item). Computed identically
+  // at initiate + finalize, so the payable-amount match check still holds.
+  let repeatReward:
+    | { tierId: string; visitCount: number | null; rewardType: string; rewardLabel: string | null; discount: number }
+    | null = null;
+  if (entityType === "RESTAURANT" && input.user_id) {
+    const { data: rrData, error: rrError } = await supabase.rpc("repeat_reward_quote", {
+      in_restaurant_id: entityId,
+      in_user_id: input.user_id,
+      in_bill_amount: originalAmount,
+    });
+    if (rrError) throw rrError;
+    const rr = Array.isArray(rrData) ? rrData[0] : rrData;
+    if (rr?.applicable) {
+      const rrDiscount = Number(rr.discount_amount) || 0;
+      repeatReward = {
+        tierId: rr.tier_id,
+        visitCount: rr.tier_visit_count ?? null,
+        rewardType: rr.reward_type,
+        rewardLabel: rr.reward_label ?? null,
+        discount: rrDiscount,
+      };
+      if (rrDiscount > 0) {
+        discountAmount = Number((discountAmount + rrDiscount).toFixed(2));
+      }
+    }
+  }
+
   const payableAmount = Number(Math.max(0, originalAmount - discountAmount).toFixed(2));
   const discountSource = deriveDiscountSourceFromOffers(selectedOffers);
   const primaryOffer = selectedOffers[0] ?? null;
@@ -332,6 +401,8 @@ export async function buildBillPaymentContext(input: BillContextInput) {
     cashbackAmount,
     payableAmount,
     selectedOffers,
+    repeatReward,
+    merchantOffer,
     discountSource,
     discountCode: derivedDiscountCode,
     discountName: primaryOffer ? String(primaryOffer.title ?? primaryOffer.offer_type ?? "Offer") : null,
@@ -393,6 +464,32 @@ export async function finalizeBillPayment(params: {
     };
   }
 
+  const offerBreakdown: any[] = recalculated.selectedOffers.map((offer: any) => ({
+    id: offer.id,
+    title: offer.title,
+    offer_type: offer.offer_type,
+  }));
+  if (recalculated.merchantOffer) {
+    offerBreakdown.push({
+      id: recalculated.merchantOffer.id,
+      title: recalculated.merchantOffer.title,
+      offer_type: recalculated.merchantOffer.offerType,
+      discount_amount: recalculated.merchantOffer.discount,
+      source: "restaurant_offers",
+    });
+  }
+  if (recalculated.repeatReward) {
+    offerBreakdown.push({
+      id: `repeat_reward:${recalculated.repeatReward.tierId}`,
+      title:
+        recalculated.repeatReward.rewardLabel ||
+        `Repeat visit reward (visit ${recalculated.repeatReward.visitCount})`,
+      offer_type: "REPEAT_REWARD",
+      reward_type: recalculated.repeatReward.rewardType,
+      discount_amount: recalculated.repeatReward.discount,
+    });
+  }
+
   const { data: billPayment, error: billPaymentError } = await supabase
     .from("bill_payments")
     .insert({
@@ -412,16 +509,31 @@ export async function finalizeBillPayment(params: {
       gateway_authorization_code: params.session.authorization_code ?? null,
       gateway_bank_reference: params.session.bank_reference ?? null,
       status: "PAID",
-      offer_breakdown: recalculated.selectedOffers.map((offer: any) => ({
-        id: offer.id,
-        title: offer.title,
-        offer_type: offer.offer_type,
-      })),
+      offer_breakdown: offerBreakdown,
+      // Commercial-rate snapshot for CIM MDR invoicing reconciliation.
+      mdr_rate: recalculated.restaurant?.mdr_rate ?? null,
+      merchant_total_rate: recalculated.restaurant?.merchant_total_rate ?? null,
+      merchant_reward_rate: recalculated.restaurant?.merchant_reward_rate ?? null,
     })
     .select("*")
     .single();
 
   if (billPaymentError) throw billPaymentError;
+
+  // Record the repeat-reward redemption (idempotent per tier). Never fail an
+  // already-successful payment if this hiccups — log for reconciliation.
+  if (recalculated.repeatReward) {
+    const { error: rrRedeemError } = await supabase.rpc("repeat_reward_redeem", {
+      in_restaurant_id: recalculated.restaurant.id,
+      in_user_id: params.userId,
+      in_tier_id: recalculated.repeatReward.tierId,
+      in_bill_payment_id: billPayment.id,
+      in_discount_amount: recalculated.repeatReward.discount,
+    });
+    if (rrRedeemError) {
+      console.error("repeat_reward_redeem failed", rrRedeemError);
+    }
+  }
 
   const redemptions: any[] = [];
   for (const offer of recalculated.selectedOffers) {
@@ -459,9 +571,35 @@ export async function finalizeBillPayment(params: {
     redemptions.push(redemption);
   }
 
+  // Credit the earned cashback to the customer's wallet (membership + any
+  // merchant-funded). Non-fatal: never fail an already-captured payment.
+  // Base = gross bill amount, matching what the app showed via cashback_quote.
+  // ponytail: if this credit fails, the bill is still recorded and the duplicate
+  // short-circuit above means a finalize retry won't re-attempt it — a rare
+  // failed credit is a reconciliation gap (same ceiling as repeat_reward_redeem),
+  // recoverable from cashback_transactions vs bill_payments. Add a sweeper if the
+  // gap ever shows up in practice.
+  let cashbackCredited = { membership: 0, merchantFunded: 0 };
+  if (recalculated.restaurant?.id) {
+    try {
+      cashbackCredited = await earnTransactionCashback({
+        userId: params.userId,
+        restaurantId: recalculated.restaurant.id,
+        baseAmount: recalculated.originalAmount,
+        sessionId: params.session.id,
+      });
+    } catch (cashbackErr: any) {
+      console.error("[finalize bill] cashback credit failed", {
+        session_id: params.session.id,
+        error: cashbackErr?.message,
+      });
+    }
+  }
+
   return {
     billPayment,
     redemptions,
     duplicate: false,
+    cashbackCredited,
   };
 }
