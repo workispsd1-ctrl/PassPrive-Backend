@@ -43,3 +43,6 @@ temp/
 .claude/
 CLAUDE.local.md
 .mcp.json
+
+# Local testing scripts
+scripts/loadtest_autocannon.js
