@@ -445,7 +445,16 @@ export async function finalizeBillPayment(params: {
     user_id: params.userId,
   });
 
-  if (Number(recalculated.payableAmount.toFixed(2)) !== Number(params.session.amount_major)) {
+  // Privé Credits recorded at initiate reduce the gateway charge, so the
+  // recalculated payable must be compared net of the session's wallet spend.
+  const walletSpendAmount = Math.max(
+    0,
+    Number(contextPayload.wallet_spend?.amount ?? 0)
+  );
+  const expectedChargedAmount = Number(
+    (recalculated.payableAmount - walletSpendAmount).toFixed(2)
+  );
+  if (expectedChargedAmount !== Number(params.session.amount_major)) {
     throw new Error("Verified bill amount does not match the initiated payment session");
   }
 
