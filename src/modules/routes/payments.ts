@@ -16,7 +16,7 @@ import {
   buildBillPaymentContext,
   finalizeBillPayment,
 } from "../services/billPaymentService";
-import { earnTransactionCashback } from "../services/cashbackService";
+import { earnTransactionCashback, validateCashbackSpend, spendCashback } from "../services/cashbackService";
 import {
   buildMembershipPaymentContext,
   finalizeMembershipPayment,
@@ -75,6 +75,7 @@ export const InitiateSchema = z.object({
       issuer_bank_name: z.string().trim().nullable().optional(),
       bin: z.string().trim().nullable().optional(),
       coupon_code: z.string().trim().nullable().optional(),
+      wallet_spend_amount: z.coerce.number().nonnegative().optional(),
     })
     .optional(),
   membership_payload: MembershipPayloadSchema.optional(),
@@ -645,6 +646,7 @@ router.post("/iveri/initiate", async (req, res) => {
     let discountMeta: Record<string, any> = {};
     let cashbackAmount = 0;
     let originalAmount = 0;
+    let walletSpendAmount = 0;
     let contextPayload: Record<string, any> = {};
     let paymentDetails: Record<string, any> = {};
     let merchantReference = merchantTrace.slice(-20);
@@ -786,10 +788,64 @@ router.post("/iveri/initiate", async (req, res) => {
       cashbackAmount = billContext.cashbackAmount;
       restaurantId = billContext.restaurant?.id ?? null;
       storeId = billContext.store?.id ?? null;
+
+      // Wallet (Privé Credits) spend — server-authoritative. The requested
+      // amount is validated against the live cashback rules (merchant
+      // whitelist, min purchase, per-transaction and monthly caps) and capped
+      // so at least 1.00 is still charged through the gateway. The validated
+      // amount reduces the charge here; the actual balance deduction happens
+      // idempotently at finalize-bill via redeem_cashback_points keyed on this
+      // payment session.
+      const walletSpendRequested = roundMoney(
+        Number(parsed.data.bill_payload.wallet_spend_amount ?? 0)
+      );
+      if (walletSpendRequested > 0) {
+        const merchantUserId =
+          billContext.restaurant?.owner_user_id ??
+          billContext.store?.owner_user_id ??
+          null;
+        if (!merchantUserId) {
+          return res.status(400).json({
+            error: "Privé Credits are not supported for this merchant yet",
+            code: "WALLET_NOT_SUPPORTED",
+          });
+        }
+        const maxSpendable = roundMoney(Math.max(0, amountMajor - 1));
+        walletSpendAmount = Math.min(walletSpendRequested, maxSpendable);
+        if (walletSpendAmount > 0) {
+          const validation = await validateCashbackSpend(
+            customer.userId,
+            walletSpendAmount,
+            merchantUserId,
+            originalAmount
+          );
+          if (!validation.valid) {
+            return res.status(400).json({
+              error: validation.error || "Privé Credits cannot be applied to this bill",
+              code: "WALLET_SPEND_INVALID",
+            });
+          }
+          amountMajor = roundMoney(amountMajor - walletSpendAmount);
+        } else {
+          walletSpendAmount = 0;
+        }
+      }
+
       contextPayload = {
         restaurant_id: parsed.data.restaurant_id ?? null,
         store_id: parsed.data.store_id ?? null,
         bill_payload: parsed.data.bill_payload,
+        ...(walletSpendAmount > 0
+          ? {
+              wallet_spend: {
+                amount: walletSpendAmount,
+                merchant_user_id:
+                  billContext.restaurant?.owner_user_id ??
+                  billContext.store?.owner_user_id,
+                bill_amount: originalAmount,
+              },
+            }
+          : {}),
       };
       paymentDetails = {
         flow: "BILL_PAYMENT",
@@ -1020,7 +1076,9 @@ router.post("/iveri/initiate", async (req, res) => {
       sessionId: sessionId,
       merchantTrace,
       amountMajor,
-      discountMajor: discountAmount,
+      // iVeri validates line-item total = amount + discount, so the wallet
+      // spend must ride in the gateway discount; the session keeps them split.
+      discountMajor: roundMoney(discountAmount + walletSpendAmount),
       currencyCode: "MUR",
       merchantReference,
       customer: {
@@ -1634,6 +1692,29 @@ router.post("/iveri/finalize-bill", async (req, res) => {
       });
     }
 
+    // Privé Credits: the validated wallet spend recorded at initiate is
+    // deducted here, after payment success. redeem_cashback_points is
+    // idempotent per payment session, so finalize retries cannot double-spend.
+    let walletSpendResult: any = null;
+    const walletSpend = session.gateway_payload?.context_payload?.wallet_spend;
+    if (walletSpend?.amount > 0 && walletSpend?.merchant_user_id) {
+      walletSpendResult = await spendCashback(
+        auth.user.id,
+        Number(walletSpend.amount),
+        String(walletSpend.merchant_user_id),
+        Number(walletSpend.bill_amount ?? session.original_amount ?? 0),
+        session.id
+      );
+      if (!walletSpendResult?.success) {
+        console.error("[finalize bill] wallet spend failed after payment capture", {
+          session_id: session.id,
+          user_id: auth.user.id,
+          requested: walletSpend.amount,
+          result: walletSpendResult,
+        });
+      }
+    }
+
     const updated = await updatePaymentSessionIfStatusIn({
       sessionId: session.id,
       allowedCurrentStatuses: ["VERIFIED_SUCCESS"],
@@ -1643,6 +1724,7 @@ router.post("/iveri/finalize-bill", async (req, res) => {
         gateway_payload: {
           ...(session.gateway_payload ?? {}),
           finalized_bill_payment: result.billPayment,
+          ...(walletSpendResult ? { wallet_spend_result: walletSpendResult } : {}),
         },
       },
     });
@@ -1657,6 +1739,7 @@ router.post("/iveri/finalize-bill", async (req, res) => {
       duplicate: result.duplicate,
       bill_payment_reference_id: effectiveSession?.context_reference_id ?? result.billPayment.id,
       linked_booking: linkedBooking,
+      wallet_spend: walletSpendResult,
     });
   } catch (err: any) {
     if (err instanceof BillPaymentValidationError) {
