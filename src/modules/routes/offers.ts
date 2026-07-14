@@ -100,6 +100,7 @@ const ApplicableOfferQuerySchema = z.object({
   bin: z.string().trim().optional(),
   user_id: z.string().uuid().optional(),
   coupon_code: z.string().trim().optional(),
+  selected_offer_ids: z.array(z.string().uuid()).optional(),
 });
 
 const OfferBaseSchema = z
@@ -756,48 +757,126 @@ export async function evaluateApplicableOffers(params: {
     return { status: 404 as const, body: { error: `${params.entityType} not found` } };
   }
 
-  let bundle = activeOffersCache.get("active_offers_bundle");
+  const selectedOfferIds = params.query.selected_offer_ids ?? [];
+  const couponCode = params.query.coupon_code ?? null;
+  const isFilterApplied = selectedOfferIds.length > 0 || !!couponCode;
 
-  if (!bundle) {
-    const { data: offers, error } = await supabase
-      .from(OFFER_TABLE)
-      .select("*")
-      .eq("is_active", true);
+  let activeOffers: any[] = [];
+  let targets: any[] = [];
+  let conditions: any[] = [];
+  let paymentRules: any[] = [];
+  let bins: any[] = [];
+  let usageLimits: any[] = [];
 
-    if (error) throw error;
+  if (isFilterApplied) {
+    // 1. Resolve offer IDs via index search
+    let targetOfferIds: string[] = [];
 
-    const activeOffers = (offers ?? []).filter((offer) => isOfferActiveNow(offer));
-    const offerIds = activeOffers.map((offer) => offer.id);
+    if (selectedOfferIds.length > 0) {
+      targetOfferIds = selectedOfferIds;
+    } else if (couponCode) {
+      const { data: rules, error: rulesErr } = await supabase
+        .from(PAYMENT_RULES_TABLE)
+        .select("offer_id")
+        .eq("coupon_code", couponCode);
 
-    const [
-      { data: targets, error: targetsError },
-      { data: conditions, error: conditionsError },
-      { data: paymentRules, error: paymentRulesError },
-      { data: bins, error: binsError },
-      { data: usageLimits, error: usageLimitsError },
-    ] = await Promise.all([
-      supabase.from(TARGETS_TABLE).select("*").in("offer_id", offerIds.length > 0 ? offerIds : ["00000000-0000-0000-0000-000000000000"]),
-      supabase.from(CONDITIONS_TABLE).select("*").in("offer_id", offerIds.length > 0 ? offerIds : ["00000000-0000-0000-0000-000000000000"]),
-      supabase.from(PAYMENT_RULES_TABLE).select("*").in("offer_id", offerIds.length > 0 ? offerIds : ["00000000-0000-0000-0000-000000000000"]),
-      supabase.from(BINS_TABLE).select("*").in("offer_id", offerIds.length > 0 ? offerIds : ["00000000-0000-0000-0000-000000000000"]),
-      supabase.from(USAGE_LIMITS_TABLE).select("*").in("offer_id", offerIds.length > 0 ? offerIds : ["00000000-0000-0000-0000-000000000000"]),
-    ]);
+      if (rulesErr) throw rulesErr;
+      targetOfferIds = (rules ?? []).map((r: any) => r.offer_id).filter(Boolean);
+    }
 
-    if (targetsError) throw targetsError;
-    if (conditionsError) throw conditionsError;
-    if (paymentRulesError) throw paymentRulesError;
-    if (binsError) throw binsError;
-    if (usageLimitsError) throw usageLimitsError;
+    if (targetOfferIds.length > 0) {
+      // 2. Fetch only the matching active offers (Index Search on offers)
+      const { data: offers, error: offersErr } = await supabase
+        .from(OFFER_TABLE)
+        .select("*")
+        .eq("is_active", true)
+        .in("id", targetOfferIds);
 
-    bundle = {
-      activeOffers,
-      targets: targets ?? [],
-      conditions: conditions ?? [],
-      paymentRules: paymentRules ?? [],
-      bins: bins ?? [],
-      usageLimits: usageLimits ?? [],
-    };
-    activeOffersCache.set("active_offers_bundle", bundle);
+      if (offersErr) throw offersErr;
+      activeOffers = (offers ?? []).filter((offer) => isOfferActiveNow(offer));
+      const activeIds = activeOffers.map((o) => o.id);
+
+      if (activeIds.length > 0) {
+        // 3. Fetch targets, conditions, payment rules, bins, and usage limits ONLY for these offers
+        const [
+          targetsRes,
+          conditionsRes,
+          paymentRulesRes,
+          binsRes,
+          usageLimitsRes,
+        ] = await Promise.all([
+          supabase.from(TARGETS_TABLE).select("*").in("offer_id", activeIds),
+          supabase.from(CONDITIONS_TABLE).select("*").in("offer_id", activeIds),
+          supabase.from(PAYMENT_RULES_TABLE).select("*").in("offer_id", activeIds),
+          supabase.from(BINS_TABLE).select("*").in("offer_id", activeIds),
+          supabase.from(USAGE_LIMITS_TABLE).select("*").in("offer_id", activeIds),
+        ]);
+
+        if (targetsRes.error) throw targetsRes.error;
+        if (conditionsRes.error) throw conditionsRes.error;
+        if (paymentRulesRes.error) throw paymentRulesRes.error;
+        if (binsRes.error) throw binsRes.error;
+        if (usageLimitsRes.error) throw usageLimitsRes.error;
+
+        targets = targetsRes.data ?? [];
+        conditions = conditionsRes.data ?? [];
+        paymentRules = paymentRulesRes.data ?? [];
+        bins = binsRes.data ?? [];
+        usageLimits = usageLimitsRes.data ?? [];
+      }
+    }
+  } else {
+    // Standard flow: Use the global cache or load all active offers
+    let bundle = activeOffersCache.get("active_offers_bundle");
+
+    if (!bundle) {
+      const { data: offers, error } = await supabase
+        .from(OFFER_TABLE)
+        .select("*")
+        .eq("is_active", true);
+
+      if (error) throw error;
+
+      const allActive = (offers ?? []).filter((offer) => isOfferActiveNow(offer));
+      const allActiveIds = allActive.map((offer) => offer.id);
+
+      const [
+        targetsRes,
+        conditionsRes,
+        paymentRulesRes,
+        binsRes,
+        usageLimitsRes,
+      ] = await Promise.all([
+        supabase.from(TARGETS_TABLE).select("*").in("offer_id", allActiveIds.length > 0 ? allActiveIds : ["00000000-0000-0000-0000-000000000000"]),
+        supabase.from(CONDITIONS_TABLE).select("*").in("offer_id", allActiveIds.length > 0 ? allActiveIds : ["00000000-0000-0000-0000-000000000000"]),
+        supabase.from(PAYMENT_RULES_TABLE).select("*").in("offer_id", allActiveIds.length > 0 ? allActiveIds : ["00000000-0000-0000-0000-000000000000"]),
+        supabase.from(BINS_TABLE).select("*").in("offer_id", allActiveIds.length > 0 ? allActiveIds : ["00000000-0000-0000-0000-000000000000"]),
+        supabase.from(USAGE_LIMITS_TABLE).select("*").in("offer_id", allActiveIds.length > 0 ? allActiveIds : ["00000000-0000-0000-0000-000000000000"]),
+      ]);
+
+      if (targetsRes.error) throw targetsRes.error;
+      if (conditionsRes.error) throw conditionsRes.error;
+      if (paymentRulesRes.error) throw paymentRulesRes.error;
+      if (binsRes.error) throw binsRes.error;
+      if (usageLimitsRes.error) throw usageLimitsRes.error;
+
+      bundle = {
+        activeOffers: allActive,
+        targets: targetsRes.data ?? [],
+        conditions: conditionsRes.data ?? [],
+        paymentRules: paymentRulesRes.data ?? [],
+        bins: binsRes.data ?? [],
+        usageLimits: usageLimitsRes.data ?? [],
+      };
+      activeOffersCache.set("active_offers_bundle", bundle);
+    }
+
+    activeOffers = bundle.activeOffers;
+    targets = bundle.targets;
+    conditions = bundle.conditions;
+    paymentRules = bundle.paymentRules;
+    bins = bundle.bins;
+    usageLimits = bundle.usageLimits;
   }
 
   const targetsByOfferId = new Map<string, any[]>();
@@ -806,27 +885,27 @@ export async function evaluateApplicableOffers(params: {
   const binsByOfferId = new Map<string, any[]>();
   const usageByOfferId = new Map<string, any>();
 
-  for (const target of bundle.targets) {
+  for (const target of targets) {
     const grouped = targetsByOfferId.get(target.offer_id) ?? [];
     grouped.push(target);
     targetsByOfferId.set(target.offer_id, grouped);
   }
-  for (const condition of bundle.conditions) {
+  for (const condition of conditions) {
     const grouped = conditionsByOfferId.get(condition.offer_id) ?? [];
     grouped.push(condition);
     conditionsByOfferId.set(condition.offer_id, grouped);
   }
-  for (const rule of bundle.paymentRules) {
+  for (const rule of paymentRules) {
     const grouped = paymentRulesByOfferId.get(rule.offer_id) ?? [];
     grouped.push(rule);
     paymentRulesByOfferId.set(rule.offer_id, grouped);
   }
-  for (const binRule of bundle.bins) {
+  for (const binRule of bins) {
     const grouped = binsByOfferId.get(binRule.offer_id) ?? [];
     grouped.push(binRule);
     binsByOfferId.set(binRule.offer_id, grouped);
   }
-  for (const usageLimit of bundle.usageLimits) {
+  for (const usageLimit of usageLimits) {
     usageByOfferId.set(usageLimit.offer_id, usageLimit);
   }
 
@@ -846,7 +925,7 @@ export async function evaluateApplicableOffers(params: {
 
   const candidateOffers: { offer: any; offerPaymentRules: any[] }[] = [];
 
-  for (const offer of bundle.activeOffers) {
+  for (const offer of activeOffers) {
     const offerTargets = targetsByOfferId.get(offer.id) ?? [];
     const offerConditions = conditionsByOfferId.get(offer.id) ?? [];
     const offerPaymentRules = paymentRulesByOfferId.get(offer.id) ?? [];

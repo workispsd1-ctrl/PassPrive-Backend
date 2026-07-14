@@ -260,6 +260,7 @@ export async function buildBillPaymentContext(input: BillContextInput) {
       bin: input.bin ?? undefined,
       user_id: input.user_id ?? undefined,
       coupon_code: input.coupon_code ?? undefined,
+      selected_offer_ids: input.selected_offer_ids ?? undefined,
     },
     preFetchedEntity: entity,
   });
