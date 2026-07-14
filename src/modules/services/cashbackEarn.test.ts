@@ -43,7 +43,12 @@ function createClientMock(cfg: {
   }
   return {
     from: (table: string) => builder(table),
-    rpc: async (_fn: string, _args: any) => ({ data: cfg.quote, error: null }),
+    rpc: async (fn: string, _args: any) => {
+      if (fn === "credit_cashback_points_secure") {
+        return { data: { success: true, lot_id: "lot1", transaction_id: "tx1" }, error: null };
+      }
+      return { data: cfg.quote, error: null };
+    },
   };
 }
 

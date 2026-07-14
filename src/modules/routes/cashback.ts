@@ -47,23 +47,23 @@ router.get("/summary", async (req: Request, res: Response) => {
   if (!customer) return;
 
   try {
-    // 1. Fetch active balance
-    const { data: balance, error: balanceErr } = await supabase.rpc(
-      "get_or_update_cashback_balance",
-      { p_user_id: customer.userId }
-    );
+    // Fetch active balance and transaction history in parallel
+    const [balanceResult, txResult] = await Promise.all([
+      supabase.rpc("get_or_update_cashback_balance", { p_user_id: customer.userId }),
+      supabase
+        .from("cashback_transactions")
+        .select("*")
+        .eq("user_id", customer.userId)
+        .order("created_at", { ascending: false }),
+    ]);
+
+    const { data: balance, error: balanceErr } = balanceResult;
+    const { data: transactions, error: txError } = txResult;
 
     if (balanceErr) {
       console.error("Error fetching active balance:", balanceErr);
       return res.status(500).json({ success: false, error: "Database error" });
     }
-
-    // 2. Fetch transaction history
-    const { data: transactions, error: txError } = await supabase
-      .from("cashback_transactions")
-      .select("*")
-      .eq("user_id", customer.userId)
-      .order("created_at", { ascending: false });
 
     if (txError) {
       console.error("Error fetching cashback transactions:", txError);

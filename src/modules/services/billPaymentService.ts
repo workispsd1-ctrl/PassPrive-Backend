@@ -309,6 +309,33 @@ export async function buildBillPaymentContext(input: BillContextInput) {
   discountAmount = Number(discountAmount.toFixed(2));
   cashbackAmount = Number(cashbackAmount.toFixed(2));
 
+  // ── Merchant offers and Repeat-visit reward fetches (concurrently) ───────────
+  let roffers: any[] = [];
+  let rrData: any = null;
+
+  if (entityType === "RESTAURANT") {
+    const [roffersResult, rrResult] = await Promise.all([
+      supabase
+        .from("restaurant_offers")
+        .select("id,title,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata")
+        .eq("restaurant_id", entityId)
+        .eq("is_active", true),
+      input.user_id
+        ? supabase.rpc("repeat_reward_quote", {
+            in_restaurant_id: entityId,
+            in_user_id: input.user_id,
+            in_bill_amount: originalAmount,
+          })
+        : Promise.resolve({ data: null, error: null }),
+    ]);
+
+    if (roffersResult.error) throw roffersResult.error;
+    if (rrResult.error) throw rrResult.error;
+
+    roffers = roffersResult.data ?? [];
+    rrData = rrResult.data;
+  }
+
   // ── Merchant offers from restaurant_offers ──────────────────────────────
   // The unified `offers` table is unused; merchant deals live in
   // restaurant_offers. Apply the single BEST-value eligible offer (mirrors the
@@ -318,13 +345,7 @@ export async function buildBillPaymentContext(input: BillContextInput) {
     | null = null;
   if (entityType === "RESTAURANT") {
     const nowMs = Date.now();
-    const { data: roffers, error: roErr } = await supabase
-      .from("restaurant_offers")
-      .select("id,title,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata")
-      .eq("restaurant_id", entityId)
-      .eq("is_active", true);
-    if (roErr) throw roErr;
-    for (const o of roffers ?? []) {
+    for (const o of roffers) {
       if (((o.metadata as any)?.offerKind ?? "") === "VISIT") continue; // reward handled separately
       if (o.start_at && new Date(o.start_at).getTime() > nowMs) continue;
       if (o.end_at && new Date(o.end_at).getTime() < nowMs) continue;
@@ -353,13 +374,7 @@ export async function buildBillPaymentContext(input: BillContextInput) {
   let repeatReward:
     | { tierId: string; visitCount: number | null; rewardType: string; rewardLabel: string | null; discount: number }
     | null = null;
-  if (entityType === "RESTAURANT" && input.user_id) {
-    const { data: rrData, error: rrError } = await supabase.rpc("repeat_reward_quote", {
-      in_restaurant_id: entityId,
-      in_user_id: input.user_id,
-      in_bill_amount: originalAmount,
-    });
-    if (rrError) throw rrError;
+  if (entityType === "RESTAURANT" && input.user_id && rrData) {
     const rr = Array.isArray(rrData) ? rrData[0] : rrData;
     if (rr?.applicable) {
       const rrDiscount = Number(rr.discount_amount) || 0;

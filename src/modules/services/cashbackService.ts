@@ -53,27 +53,18 @@ export async function creditCashback(
       return { success: false, lot: null, transaction: null, error: message || "Failed to credit cashback" };
     }
 
-    // Fetch the inserted lot and transaction for backward compatibility
-    let lot: any = null;
-    let transaction: any = null;
+    // Fetch the inserted lot and transaction for backward compatibility in parallel
+    const [lotResult, txResult] = await Promise.all([
+      lot_id
+        ? client.from("cashback_lots").select("*").eq("id", lot_id).maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+      transaction_id
+        ? client.from("cashback_transactions").select("*").eq("id", transaction_id).maybeSingle()
+        : Promise.resolve({ data: null, error: null }),
+    ]);
 
-    if (lot_id) {
-      const { data: lotData } = await client
-        .from("cashback_lots")
-        .select("*")
-        .eq("id", lot_id)
-        .maybeSingle();
-      lot = lotData;
-    }
-
-    if (transaction_id) {
-      const { data: txData } = await client
-        .from("cashback_transactions")
-        .select("*")
-        .eq("id", transaction_id)
-        .maybeSingle();
-      transaction = txData;
-    }
+    const lot = lotResult.data;
+    const transaction = txResult.data;
 
     return { success: true, lot, transaction };
   } catch (err: any) {
@@ -118,52 +109,71 @@ export async function earnTransactionCashback(params: {
     .eq("type", "credit");
   const already = new Set((existingTx ?? []).map((t: any) => t.source));
 
+  const tasks: Array<Promise<void>> = [];
+
   // ── Membership cashback (canonical matrix, shown == credited) ──────────────
   if (!already.has("membership")) {
-    const { data: quote, error: quoteErr } = await client.rpc("cashback_quote", {
-      in_restaurant_id: params.restaurantId,
-      in_user_id: params.userId,
-      in_bill_amount: params.baseAmount,
-    });
-    if (quoteErr) {
-      console.error("[cashback] cashback_quote failed", { sessionId: params.sessionId, error: quoteErr.message });
-    } else {
-      const row = Array.isArray(quote) ? quote[0] : quote;
-      const amount = Number(row?.cashback_amount) || 0;
-      if (row?.applicable && amount > 0) {
-        const res = await creditCashback(params.userId, amount, params.sessionId, client, {
-          source: "membership",
-        });
-        if (res.success) credited.membership = amount;
-        else console.error("[cashback] membership credit failed", { sessionId: params.sessionId, error: res.error });
-      }
-    }
+    tasks.push(
+      client
+        .rpc("cashback_quote", {
+          in_restaurant_id: params.restaurantId,
+          in_user_id: params.userId,
+          in_bill_amount: params.baseAmount,
+        })
+        .then(async (res: any) => {
+          const quote = res.data;
+          const quoteErr = res.error;
+          if (quoteErr) {
+            console.error("[cashback] cashback_quote failed", { sessionId: params.sessionId, error: quoteErr.message });
+            return;
+          }
+          const row = Array.isArray(quote) ? quote[0] : quote;
+          const amount = Number(row?.cashback_amount) || 0;
+          if (row?.applicable && amount > 0) {
+            const resCredit = await creditCashback(params.userId, amount, params.sessionId, client, {
+              source: "membership",
+            });
+            if (resCredit.success) credited.membership = amount;
+            else console.error("[cashback] membership credit failed", { sessionId: params.sessionId, error: resCredit.error });
+          }
+        })
+    );
   }
 
   // ── Merchant-funded cashback (Preferred partners, 14-day expiry) ───────────
   if (!already.has("merchant_funded")) {
-    const { data: rest, error: restErr } = await client
-      .from("restaurants")
-      .select("merchant_type, merchant_reward_rate")
-      .eq("id", params.restaurantId)
-      .maybeSingle();
-    if (restErr) {
-      console.error("[cashback] merchant lookup failed", { sessionId: params.sessionId, error: restErr.message });
-    } else {
-      const mtype = String(rest?.merchant_type ?? "").trim().toLowerCase();
-      const rewardRate = Number(rest?.merchant_reward_rate) || 0;
-      if (mtype === "preferred" && rewardRate > 0) {
-        const amount = Number(((params.baseAmount * rewardRate) / 100).toFixed(2));
-        if (amount > 0) {
-          const res = await creditCashback(params.userId, amount, params.sessionId, client, {
-            source: "merchant_funded",
-            expiryDays: MERCHANT_FUNDED_EXPIRY_DAYS,
-          });
-          if (res.success) credited.merchantFunded = amount;
-          else console.error("[cashback] merchant-funded credit failed", { sessionId: params.sessionId, error: res.error });
-        }
-      }
-    }
+    tasks.push(
+      client
+        .from("restaurants")
+        .select("merchant_type, merchant_reward_rate")
+        .eq("id", params.restaurantId)
+        .maybeSingle()
+        .then(async (res: any) => {
+          const rest = res.data;
+          const restErr = res.error;
+          if (restErr) {
+            console.error("[cashback] merchant lookup failed", { sessionId: params.sessionId, error: restErr.message });
+            return;
+          }
+          const mtype = String(rest?.merchant_type ?? "").trim().toLowerCase();
+          const rewardRate = Number(rest?.merchant_reward_rate) || 0;
+          if (mtype === "preferred" && rewardRate > 0) {
+            const amount = Number(((params.baseAmount * rewardRate) / 100).toFixed(2));
+            if (amount > 0) {
+              const resCredit = await creditCashback(params.userId, amount, params.sessionId, client, {
+                source: "merchant_funded",
+                expiryDays: MERCHANT_FUNDED_EXPIRY_DAYS,
+              });
+              if (resCredit.success) credited.merchantFunded = amount;
+              else console.error("[cashback] merchant-funded credit failed", { sessionId: params.sessionId, error: resCredit.error });
+            }
+          }
+        })
+    );
+  }
+
+  if (tasks.length > 0) {
+    await Promise.all(tasks);
   }
 
   return credited;
@@ -181,29 +191,49 @@ export async function validateCashbackSpend(
 ): Promise<CashbackValidationResult> {
   const client = db ?? supabase;
   try {
-    // 1. Get current active config rules
-    const { data: rules, error: rulesErr } = await client
-      .from("cashback_rules")
-      .select("*")
-      .eq("is_active", true)
-      .maybeSingle();
+    const startOfMonth = new Date();
+    startOfMonth.setDate(1);
+    startOfMonth.setHours(0, 0, 0, 0);
+
+    // Fetch all validation data concurrently
+    const [rulesResult, merchantResult, txsResult, balanceResult] = await Promise.all([
+      client
+        .from("cashback_rules")
+        .select("*")
+        .eq("is_active", true)
+        .maybeSingle(),
+      client
+        .from("users")
+        .select("cashback_enabled")
+        .eq("id", merchantUserId)
+        .maybeSingle(),
+      client
+        .from("cashback_transactions")
+        .select("amount")
+        .eq("user_id", userId)
+        .eq("type", "spend")
+        .gte("created_at", startOfMonth.toISOString()),
+      client
+        .from("cashback_lots")
+        .select("remaining_amount")
+        .eq("user_id", userId)
+        .gt("remaining_amount", 0.00)
+        .gt("expires_at", new Date().toISOString()),
+    ]);
+
+    const { data: rules, error: rulesErr } = rulesResult;
+    const { data: merchant, error: merchantErr } = merchantResult;
+    const { data: txs, error: txsErr } = txsResult;
+    const { data: balanceRows, error: balanceErr } = balanceResult;
 
     if (rulesErr || !rules) {
       return { valid: false, error: "Active cashback rules configuration not found" };
     }
 
-    // 2. Validate merchant applicability
-    const { data: merchant, error: merchantErr } = await client
-      .from("users")
-      .select("cashback_enabled")
-      .eq("id", merchantUserId)
-      .maybeSingle();
-
     if (merchantErr || !merchant || !merchant.cashback_enabled) {
       return { valid: false, error: "Merchant is not whitelisted or eligible for cashback" };
     }
 
-    // 3. Validate minimum purchase amount
     if (billAmount < Number(rules.min_purchase_amount)) {
       return {
         valid: false,
@@ -211,25 +241,12 @@ export async function validateCashbackSpend(
       };
     }
 
-    // 4. Validate transaction single-use limit
     if (amount > Number(rules.max_use_per_transaction)) {
       return {
         valid: false,
         error: `Requested cashback amount ${amount} exceeds single transaction limit of ${rules.max_use_per_transaction}`,
       };
     }
-
-    // 5. Validate user's monthly limits (monthly usage count and total amount used)
-    const startOfMonth = new Date();
-    startOfMonth.setDate(1);
-    startOfMonth.setHours(0, 0, 0, 0);
-
-    const { data: txs, error: txsErr } = await client
-      .from("cashback_transactions")
-      .select("amount")
-      .eq("user_id", userId)
-      .eq("type", "spend")
-      .gte("created_at", startOfMonth.toISOString());
 
     if (txsErr) {
       console.error("Error fetching monthly transactions:", txsErr);
@@ -252,14 +269,6 @@ export async function validateCashbackSpend(
         error: `Monthly cashback spend limit of ${rules.max_use_per_month} has been exceeded (already used ${monthlyAmount} this month)`,
       };
     }
-
-    // 6. Check user's available active balance
-    const { data: balanceRows, error: balanceErr } = await client
-      .from("cashback_lots")
-      .select("remaining_amount")
-      .eq("user_id", userId)
-      .gt("remaining_amount", 0.00)
-      .gt("expires_at", new Date().toISOString());
 
     if (balanceErr) {
       console.error("Error fetching active balance rows:", balanceErr);

@@ -185,11 +185,26 @@ export async function buildMembershipPaymentContext(params: {
   db?: any;
 }) {
   const db = params.db ?? supabase;
-  const { data: planRow, error: planError } = await db
-    .from("subscription")
-    .select("id, plan_name, amount, type, product_id, price_id, sort_order")
-    .eq("id", params.payload.plan_id)
-    .maybeSingle();
+  const promoCode = String(params.payload.promo_code ?? "").trim();
+
+  // Load both subscription plan and promo code in parallel
+  const [planResult, promoResult] = await Promise.all([
+    db
+      .from("subscription")
+      .select("id, plan_name, amount, type, product_id, price_id, sort_order")
+      .eq("id", params.payload.plan_id)
+      .maybeSingle(),
+    promoCode
+      ? db
+          .from("promos")
+          .select("*")
+          .eq("code", promoCode)
+          .maybeSingle()
+      : Promise.resolve({ data: null, error: null }),
+  ]);
+
+  const { data: planRow, error: planError } = planResult;
+  const { data: promoRow, error: promoError } = promoResult;
 
   if (planError) {
     throw new MembershipPaymentValidationError(500, planError.message);
@@ -219,7 +234,6 @@ export async function buildMembershipPaymentContext(params: {
     throw new MembershipPaymentValidationError(400, "Provided product_id does not match selected plan");
   }
 
-  const promoCode = String(params.payload.promo_code ?? "").trim();
   let promo: MembershipPaymentContext["promo"] = null;
   let discountAmount = 0;
   let discountSource: "NONE" | "BANK" | "PLATFORM" | "PARTNER" = "NONE";
@@ -227,12 +241,6 @@ export async function buildMembershipPaymentContext(params: {
   let discountMeta: Record<string, any> = {};
 
   if (promoCode) {
-    const { data: promoRow, error: promoError } = await db
-      .from("promos")
-      .select("*")
-      .eq("code", promoCode)
-      .maybeSingle();
-
     if (promoError) {
       throw new MembershipPaymentValidationError(500, promoError.message);
     }
