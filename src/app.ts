@@ -31,7 +31,6 @@ import ShareLinks from "./modules/routes/shareLinks";
 import Gifts from "./modules/routes/gifts";
 import GiftEvents from "./modules/routes/giftEvents";
 import Cashback from "./modules/routes/cashback";
-import { cacheInvalidationMiddleware, responseCacheMiddleware } from "./modules/middleware/responseCache";
 import { requestTelemetryMiddleware } from "./modules/middleware/requestTelemetry";
 import { rateLimitMiddleware } from "./modules/middleware/rateLimit";
 
@@ -95,8 +94,6 @@ app.options(/.*/, cors(corsOptions));
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(rateLimitMiddleware);
-app.use(cacheInvalidationMiddleware);
-app.use(responseCacheMiddleware);
 app.use(requestTelemetryMiddleware);
 
 app.get("/", (req, res) => {
