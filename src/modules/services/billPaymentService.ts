@@ -598,7 +598,8 @@ export async function finalizeBillPayment(params: {
 
   // Credit the earned cashback to the customer's wallet (membership + any
   // merchant-funded). Non-fatal: never fail an already-captured payment.
-  // Base = gross bill amount, matching what the app showed via cashback_quote.
+  // Base = bill amount net of Privé Credits redeemed — you don't earn fresh
+  // credits on the portion paid with credits.
   // ponytail: if this credit fails, the bill is still recorded and the duplicate
   // short-circuit above means a finalize retry won't re-attempt it — a rare
   // failed credit is a reconciliation gap (same ceiling as repeat_reward_redeem),
@@ -610,7 +611,7 @@ export async function finalizeBillPayment(params: {
       cashbackCredited = await earnTransactionCashback({
         userId: params.userId,
         restaurantId: recalculated.restaurant.id,
-        baseAmount: recalculated.originalAmount,
+        baseAmount: Math.max(0, recalculated.originalAmount - walletSpendAmount),
         sessionId: params.session.id,
       });
     } catch (cashbackErr: any) {

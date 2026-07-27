@@ -172,6 +172,9 @@ async function createOneUser(input: CreateUserBody, sb: any) {
       phone: phone || null,
       role,
 
+      // ✅ merchants (restaurant/store partners) are cashback-whitelisted on onboarding
+      cashback_enabled: ["restaurantpartner", "storepartner"].includes(role),
+
       profile_image: null,
       gender: null,
       dob: null,
