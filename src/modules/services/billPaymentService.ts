@@ -606,11 +606,12 @@ export async function finalizeBillPayment(params: {
   // recoverable from cashback_transactions vs bill_payments. Add a sweeper if the
   // gap ever shows up in practice.
   let cashbackCredited = { membership: 0, merchantFunded: 0 };
-  if (recalculated.restaurant?.id) {
+  if (recalculated.restaurant?.id || recalculated.store?.id) {
     try {
       cashbackCredited = await earnTransactionCashback({
         userId: params.userId,
-        restaurantId: recalculated.restaurant.id,
+        restaurantId: recalculated.restaurant?.id ?? undefined,
+        storeId: recalculated.store?.id ?? undefined,
         baseAmount: Math.max(0, recalculated.originalAmount - walletSpendAmount),
         sessionId: params.session.id,
       });

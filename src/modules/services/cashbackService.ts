@@ -91,7 +91,8 @@ const MERCHANT_FUNDED_EXPIRY_DAYS = 14;
 
 export async function earnTransactionCashback(params: {
   userId: string;
-  restaurantId: string;
+  restaurantId?: string;
+  storeId?: string;
   baseAmount: number;
   sessionId: string;
   db?: any;
@@ -99,7 +100,15 @@ export async function earnTransactionCashback(params: {
   const client = params.db ?? supabase;
   const credited = { membership: 0, merchantFunded: 0 };
 
-  if (!params.restaurantId || !(params.baseAmount > 0)) return credited;
+  // Entity-agnostic: restaurants and stores share the same cashback shape,
+  // just different quote RPCs and merchant tables.
+  const isStore = !params.restaurantId && !!params.storeId;
+  const entityId = isStore ? params.storeId! : params.restaurantId!;
+  const membershipRpc = isStore ? "store_cashback_quote" : "cashback_quote";
+  const membershipArg = isStore ? "in_store_id" : "in_restaurant_id";
+  const merchantTable = isStore ? "stores" : "restaurants";
+
+  if (!entityId || !(params.baseAmount > 0)) return credited;
 
   // Which sources have already been credited for this session? (retry safety)
   const { data: existingTx } = await client
@@ -115,8 +124,8 @@ export async function earnTransactionCashback(params: {
   if (!already.has("membership")) {
     tasks.push(
       client
-        .rpc("cashback_quote", {
-          in_restaurant_id: params.restaurantId,
+        .rpc(membershipRpc, {
+          [membershipArg]: entityId,
           in_user_id: params.userId,
           in_bill_amount: params.baseAmount,
         })
@@ -144,9 +153,9 @@ export async function earnTransactionCashback(params: {
   if (!already.has("merchant_funded")) {
     tasks.push(
       client
-        .from("restaurants")
+        .from(merchantTable)
         .select("merchant_type, merchant_reward_rate")
-        .eq("id", params.restaurantId)
+        .eq("id", entityId)
         .maybeSingle()
         .then(async (res: any) => {
           const rest = res.data;
