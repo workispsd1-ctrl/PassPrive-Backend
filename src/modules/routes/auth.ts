@@ -1,5 +1,8 @@
 import express, { Request, Response } from "express";
 import { createClient } from "@supabase/supabase-js";
+import supabase from "../../database/supabase";
+import { EmtelProvider } from "../services/smsService";
+import { OtpService } from "../services/otpService";
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_KEY =
@@ -240,6 +243,73 @@ router.post("/create-user", async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error(err);
     return res.status(500).json({ error: err?.message || "Server error" });
+  }
+});
+
+router.post("/send-otp", async (req: Request, res: Response) => {
+  const { phone } = req.body;
+  if (!phone) {
+    return res.status(400).json({ success: false, error: "Phone number is required." });
+  }
+
+  try {
+    const otp = await OtpService.generateAndSaveOtp(phone);
+
+    const message = `Your PassPrive verification code is ${otp}.\n\nThis code is valid for 5 minutes.\n\nDo not share this code with anyone.`;
+    const smsProvider = new EmtelProvider();
+    const smsResult = await smsProvider.send(phone, message);
+
+    if (smsResult.success) {
+      console.log(`[OTP] SMS sent successfully to ${phone}. Provider response: ${smsResult.message}`);
+      return res.status(200).json({ success: true, message: "OTP sent successfully." });
+    } else {
+      console.error(`[OTP] SMS delivery failed for ${phone}. Provider status: ${smsResult.statusCode}. Response: ${smsResult.message}`);
+      return res.status(502).json({
+        success: false,
+        error: "Failed to deliver OTP via SMS provider.",
+        details: smsResult.message,
+      });
+    }
+  } catch (err: any) {
+    console.error(`[OTP] Error in /send-otp for ${phone}:`, err);
+    return res.status(400).json({ success: false, error: err.message || "Failed to send OTP." });
+  }
+});
+
+router.post("/verify-otp", async (req: Request, res: Response) => {
+  const { phone, code } = req.body;
+  if (!phone || !code) {
+    return res.status(400).json({ success: false, error: "Phone number and OTP code are required." });
+  }
+
+  try {
+    const verification = await OtpService.verifyOtp(phone, code);
+    if (!verification.success) {
+      return res.status(400).json({ success: false, error: verification.message });
+    }
+
+    // Check if the user is registered in the database
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select("id")
+      .eq("phone", phone.trim())
+      .maybeSingle();
+
+    if (userError) {
+      console.error(`[OTP] Error checking user registration:`, userError);
+      return res.status(500).json({ success: false, error: "Database error checking registration status." });
+    }
+
+    const registered = !!user;
+
+    return res.status(200).json({
+      success: true,
+      message: "OTP verified successfully.",
+      registered,
+    });
+  } catch (err: any) {
+    console.error(`[OTP] Error in /verify-otp for ${phone}:`, err);
+    return res.status(500).json({ success: false, error: err.message || "Failed to verify OTP." });
   }
 });
 
