@@ -1,6 +1,8 @@
 import { z } from "zod";
+import crypto from "crypto";
 import supabase from "../../database/supabase";
 import type { AuthenticatedCustomer } from "./authService";
+import { FulleService } from "./fulleService";
 
 const NON_CANCELLED_STATUSES = ["pending", "confirmed", "seated", "completed"];
 const WEEKDAY_NAMES = [
@@ -640,6 +642,41 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
   };
 }
 
+async function resolveFulleServiceId(
+  mutualKey: string,
+  externalRestaurantId: number,
+  dateStr: string,
+  timeStr: string
+): Promise<number | null> {
+  try {
+    const date = new Date(`${dateStr}T00:00:00`);
+    const day = date.getDay();
+    const services = await FulleService.getBookingServices(mutualKey, externalRestaurantId, day);
+    if (!services || services.length === 0) return null;
+
+    const [bHours, bMinutes] = timeStr.split(":").map(Number);
+    const bookingMinutes = bHours * 60 + bMinutes;
+
+    for (const service of services) {
+      if (!service.start || !service.end) continue;
+      const [sHours, sMinutes] = service.start.split(":").map(Number);
+      const [eHours, eMinutes] = service.end.split(":").map(Number);
+      const startMinutes = sHours * 60 + sMinutes;
+      let endMinutes = eHours * 60 + eMinutes;
+      if (endMinutes < startMinutes) endMinutes += 24 * 60;
+
+      if (bookingMinutes >= startMinutes && bookingMinutes <= endMinutes) {
+        return Number(service.id);
+      }
+    }
+
+    return Number(services[0].id);
+  } catch (err) {
+    console.error("[Fulle Integration] Failed to resolve service ID:", err);
+    return null;
+  }
+}
+
 export async function confirmRestaurantBooking(body: BookingPayload, customer: AuthenticatedCustomer) {
   // The customer_booking_number count only depends on the customer id, so run it
   // concurrently with the (network-heavy) evaluation phase rather than after it.
@@ -672,7 +709,7 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
       const nextPaymentReference = payment?.reference ?? existingBooking.payment_reference ?? null;
       const nextPaymentMethod = payment?.method ?? existingBooking.payment_method ?? null;
       const shouldSyncPaidState =
-        currentPaymentStatus !== "paid" ||
+         currentPaymentStatus !== "paid" ||
         existingBooking.payment_reference !== nextPaymentReference ||
         existingBooking.payment_method !== nextPaymentMethod;
 
@@ -726,6 +763,8 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
           payment_status: existingBooking.payment_status ?? null,
           payment_method: existingBooking.payment_method ?? null,
           payment_reference: existingBooking.payment_reference ?? null,
+          external_pos_id: existingBooking.external_pos_id ?? null,
+          external_pos_reference: existingBooking.external_pos_reference ?? null,
         },
         duplicate: true,
       },
@@ -743,7 +782,89 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
 
   const normalizedPaymentStatus = paymentRequired ? (paymentVerified ? "paid" : "pending") : "paid";
   const bookingCode = generateBookingCode();
+  
+  // Generate local booking ID (UUID)
+  const localBookingId = crypto.randomUUID();
+
+  // Check if Fulle is enabled for this restaurant to sync POS booking in real-time
+  let externalPosId: string | null = null;
+  let externalPosReference: string | null = null;
+
+  try {
+    const { data: posProvider } = await supabase
+      .from("restaurant_till_providers")
+      .select("*")
+      .eq("restaurant_id", evaluation.restaurantId)
+      .eq("provider_name", "fulle")
+      .eq("is_enabled", true)
+      .maybeSingle();
+
+    if (posProvider) {
+      const mutualKey = posProvider.config?.mutualKey ?? posProvider.config?.mutual_key;
+      const externalRestaurantId = Number(posProvider.external_restaurant_id);
+
+      if (mutualKey && !Number.isNaN(externalRestaurantId)) {
+        // 1. Resolve client on Fulle
+        let fulleClientId: number | null = null;
+        const clientSearch = await FulleService.getClientByEmail(mutualKey, customer.email || "");
+        if (clientSearch && clientSearch.list && clientSearch.list.length > 0) {
+          fulleClientId = Number(clientSearch.list[0].id);
+        } else {
+          const clientCreate = await FulleService.createClient(mutualKey, {
+            name: customer.fullName || "Guest",
+            mail: customer.email || "",
+            phone: customer.phone || "",
+          });
+          fulleClientId = Number(clientCreate.object?.id);
+        }
+
+        // 2. Resolve service ID matching booking execution time
+        const fulleServiceId = await resolveFulleServiceId(
+          mutualKey,
+          externalRestaurantId,
+          evaluation.bookingDate,
+          evaluation.bookingTime
+        );
+
+        // 3. Register booking on Fulle
+        const fulleBookingPayload = {
+          id_extern: localBookingId,
+          date_creation: new Date().toISOString(),
+          date_execution: evaluation.bookingDate,
+          hour_execution: evaluation.bookingTime,
+          n_people: evaluation.partySize,
+          origin: 1,
+          booking_level: { id: 1 },
+          client: fulleClientId ? { id: fulleClientId } : undefined,
+          booking_service: fulleServiceId ? { id: fulleServiceId } : undefined,
+          point_of_sale: { id: externalRestaurantId },
+          comment: body.notes || "",
+          notify: 1,
+        };
+
+        const fulleBookingRes = await FulleService.createBooking(mutualKey, fulleBookingPayload);
+        if (fulleBookingRes) {
+          externalPosId = String(fulleBookingRes.id || "");
+          externalPosReference = String(fulleBookingRes.reference || "");
+        }
+      }
+    }
+  } catch (err) {
+    console.error("[Fulle Integration] Failed during Fulle booking creation sync:", err);
+    return {
+      ok: false as const,
+      status: 500,
+      body: {
+        error: `POS Sync failed: ${err instanceof Error ? err.message : String(err)}`,
+        code: "POS_SYNC_FAILED",
+      },
+    };
+  }
+
   const insertPayload = {
+    id: localBookingId,
+    external_pos_id: externalPosId,
+    external_pos_reference: externalPosReference,
     restaurant_id: evaluation.restaurantId,
     customer_user_id: customer.userId,
     customer_name: customer.fullName || "Guest",
@@ -800,6 +921,8 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
         selected_offer: booking.selected_offer ?? null,
         cover_charge_amount: booking.cover_charge_amount ?? null,
         payment_status: booking.payment_status ?? null,
+        external_pos_id: booking.external_pos_id ?? null,
+        external_pos_reference: booking.external_pos_reference ?? null,
       },
     },
   };
