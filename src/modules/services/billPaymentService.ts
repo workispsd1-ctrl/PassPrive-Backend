@@ -314,8 +314,10 @@ export async function buildBillPaymentContext(input: BillContextInput) {
   let roffers: any[] = [];
   let rrData: any = null;
 
+  let merchantSharePct = 100;
+
   if (entityType === "RESTAURANT") {
-    const [roffersResult, rrResult] = await Promise.all([
+    const [roffersResult, rrResult, shareResult] = await Promise.all([
       supabase
         .from("restaurant_offers")
         .select("id,title,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata")
@@ -328,6 +330,7 @@ export async function buildBillPaymentContext(input: BillContextInput) {
             in_bill_amount: originalAmount,
           })
         : Promise.resolve({ data: null, error: null }),
+      supabase.rpc("merchant_discount_share", { in_user_id: input.user_id ?? null }),
     ]);
 
     if (roffersResult.error) throw roffersResult.error;
@@ -335,6 +338,20 @@ export async function buildBillPaymentContext(input: BillContextInput) {
 
     roffers = roffersResult.data ?? [];
     rrData = rrResult.data;
+
+    // Share of the merchant's discount this membership tier receives
+    // (membership_discount_caps, superadmin configured). A failed read must not
+    // grant the full discount, so fall back to the lowest configured tier.
+    if (shareResult.error) {
+      console.error("[bill] merchant_discount_share failed", {
+        entity_id: entityId,
+        error: shareResult.error.message,
+      });
+      merchantSharePct = 0;
+    } else {
+      const pct = Number(Array.isArray(shareResult.data) ? shareResult.data[0] : shareResult.data);
+      merchantSharePct = Number.isFinite(pct) ? Math.min(Math.max(pct, 0), 100) : 0;
+    }
   }
 
   // ── Merchant offers from restaurant_offers ──────────────────────────────
@@ -357,6 +374,8 @@ export async function buildBillPaymentContext(input: BillContextInput) {
       } else if (o.offer_type === "flat" && o.discount_value != null) {
         d = Math.min(Number(o.discount_value), originalAmount);
       }
+      // The member receives only their tier's share of the merchant's discount.
+      d = Number(((d * merchantSharePct) / 100).toFixed(2));
       if (d > (merchantOffer?.discount ?? 0)) {
         merchantOffer = { id: o.id, title: o.title, offerType: o.offer_type, discount: d };
       }
