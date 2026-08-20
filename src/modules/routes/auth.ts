@@ -291,7 +291,7 @@ router.post("/verify-otp", async (req: Request, res: Response) => {
     // Check if the user is registered in the database
     const { data: user, error: userError } = await supabase
       .from("users")
-      .select("id")
+      .select("id,email")
       .eq("phone", phone.trim())
       .maybeSingle();
 
@@ -302,10 +302,62 @@ router.post("/verify-otp", async (req: Request, res: Response) => {
 
     const registered = !!user;
 
+    // Verifying the OTP is what proves ownership of the phone, but on its own it
+    // leaves the caller unauthenticated: every RLS policy and every
+    // supabase.auth.getUser() in the app keys off a real session. Mint one here
+    // so "OTP verified" and "signed in" are the same event.
+    let sessionToken: string | null = null;
+    let session: { access_token: string; refresh_token: string } | null = null;
+    if (registered && user?.email) {
+      const { data: link, error: linkError } = await supabase.auth.admin.generateLink({
+        type: "magiclink",
+        email: user.email,
+      });
+
+      if (linkError) {
+        console.error(`[OTP] Could not mint a session for ${phone}:`, linkError);
+        return res.status(500).json({
+          success: false,
+          error: "Verified, but could not sign you in. Please try again.",
+        });
+      }
+
+      sessionToken = link?.properties?.hashed_token ?? null;
+
+      // Redeem the hash here rather than making the phone do it. That turns two
+      // sequential round-trips from the device into one, and the server->Supabase
+      // hop is far cheaper than mobile->Supabase. A throwaway client keeps the
+      // resulting session off the shared admin singleton.
+      if (sessionToken) {
+        const exchangeClient = createClient(
+          process.env.SUPABASE_URL!,
+          process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY!,
+          { auth: { persistSession: false, autoRefreshToken: false } },
+        );
+
+        const { data: verified, error: exchangeError } = await exchangeClient.auth.verifyOtp({
+          token_hash: sessionToken,
+          type: "magiclink",
+        });
+
+        if (!exchangeError && verified?.session) {
+          session = {
+            access_token: verified.session.access_token,
+            refresh_token: verified.session.refresh_token,
+          };
+          sessionToken = null; // spent — don't hand a dead hash to the client
+        }
+      }
+    }
+
     return res.status(200).json({
       success: true,
       message: "OTP verified successfully.",
       registered,
+      // Preferred: ready-to-use tokens, applied locally with setSession().
+      session,
+      // Fallback for clients that still redeem the hash themselves.
+      session_token: sessionToken,
     });
   } catch (err: any) {
     console.error(`[OTP] Error in /verify-otp for ${phone}:`, err);
