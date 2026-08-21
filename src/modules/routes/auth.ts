@@ -288,18 +288,29 @@ router.post("/verify-otp", async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: verification.message });
     }
 
-    // Check if the user is registered in the database
-    const { data: user, error: userError } = await supabase
+    // Match on the significant digits, not the exact string. 28 stored numbers
+    // have no country code while the app always sends one, so equality reported
+    // existing users as brand new. Nine numbers are duplicated, which made
+    // .maybeSingle() fail and surfaced a raw database error on the OTP screen.
+    const digits = String(phone).replace(/\D/g, "");
+    const localPart = digits.slice(-8);
+
+    const { data: matches, error: userError } = await supabase
       .from("users")
-      .select("id,email")
-      .eq("phone", phone.trim())
-      .maybeSingle();
+      .select("id,email,phone")
+      .ilike("phone", `%${localPart}`)
+      .limit(5);
 
     if (userError) {
       console.error(`[OTP] Error checking user registration:`, userError);
-      return res.status(500).json({ success: false, error: "Database error checking registration status." });
+      return res.status(500).json({
+        success: false,
+        error: "Something went wrong. Please try again.",
+      });
     }
 
+    // Prefer a row with an email — that is what the session is minted from.
+    const user = (matches ?? []).find(m => m?.email) ?? (matches ?? [])[0] ?? null;
     const registered = !!user;
 
     // Verifying the OTP is what proves ownership of the phone, but on its own it
