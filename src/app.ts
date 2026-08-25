@@ -110,6 +110,7 @@ app.use("/api/homeherooffers", HomeHeroOffers);
 app.use("/api/dineinhomebanners", DineinHomeBanners);
 app.use("/api/inyourpassprive", InYourPassPrive);
 app.use("/api/offers", Offers);
+app.use("/api/passprive-offers", Offers);
 app.use("/api/storesinyourpassprive", StoreInYourPassPrive);
 app.use("/api/storeinyourpassprive", StoreInYourPassPrive);
 app.use("/api/storeshomebanners", StoresHomeBanners);

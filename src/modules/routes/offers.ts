@@ -1074,7 +1074,7 @@ export async function evaluateApplicableOffers(params: {
   return { status: 200 as const, body: { items: eligibleItems } };
 }
 
-router.get("/", async (req, res) => {
+router.get(["/", "/active"], async (req, res) => {
   const parsed = ListOffersQuerySchema.safeParse(req.query);
   if (!parsed.success) {
     return res.status(400).json({ error: "Invalid query", details: parsed.error.flatten() });
@@ -1084,7 +1084,8 @@ router.get("/", async (req, res) => {
 
   let query = supabase.from(OFFER_TABLE).select("*");
 
-  if (!includeInactive) {
+  const isActivePath = req.path.endsWith("/active");
+  if (isActivePath || !includeInactive) {
     query = query.eq("is_active", true);
   } else {
     const admin = await requireAdmin(req, res);
@@ -1252,7 +1253,7 @@ router.delete("/:id", async (req, res) => {
   return res.json({ ok: true, id: parsed.data });
 });
 
-router.get("/:id/targets", async (req, res) => {
+router.get(["/:id/targets", "/:id/store-targets", "/:id/plan-targets"], async (req, res) => {
   const parsed = IdSchema.safeParse(req.params.id);
   if (!parsed.success) return res.status(400).json({ error: "Invalid offer id" });
 
