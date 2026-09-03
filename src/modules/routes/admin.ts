@@ -1,26 +1,7 @@
 import { Router } from "express";
-import { createClient } from "@supabase/supabase-js";
+import { supabaseServiceRole as supabaseService, supabaseAuthed } from "../../database/supabase";
 
 const router = Router();
-
-const SUPABASE_URL = process.env.SUPABASE_URL!;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
-
-function supabaseAuthed(req: any) {
-  const h = req.headers.authorization || "";
-  const [type, token] = h.split(" ");
-  if (type !== "Bearer" || !token) return null;
-
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  });
-}
-
-// Dedicated service account client for auth.admin operations
-const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false },
-});
 
 function normalizeRoleValue(role?: string | null) {
   const raw = String(role || "").trim().toLowerCase();

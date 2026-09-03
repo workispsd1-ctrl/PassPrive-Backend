@@ -1,8 +1,7 @@
 // src/modules/routes/restaurants.ts
 import { Router } from "express";
 import { z } from "zod";
-import { createClient } from "@supabase/supabase-js";
-import supabase from "../../database/supabase";
+import supabase, { supabaseAuthed } from "../../database/supabase";
 
 const router = Router();
 
@@ -91,16 +90,7 @@ function getBearerToken(req: any) {
   return token;
 }
 
-// JWT-scoped client (RLS applies as logged-in user)
-function supabaseAuthed(req: any) {
-  const token = getBearerToken(req);
-  if (!token) return null;
 
-  return createClient(SUPABASE_URL, SUPABASE_ANON_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  });
-}
 
 async function requireAuth(req: any, res: any) {
   const sb = supabaseAuthed(req);

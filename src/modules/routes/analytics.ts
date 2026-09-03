@@ -1,16 +1,8 @@
 import { Router } from "express";
 import { z } from "zod";
-import { createClient } from "@supabase/supabase-js";
-import supabase from "../../database/supabase";
+import supabase, { supabaseServiceRole as supabaseService } from "../../database/supabase";
 
 const router = Router();
-
-const SUPABASE_URL = process.env.SUPABASE_URL!;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
-
-const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false },
-});
 
 const EventSchema = z.object({
   entity_type: z.enum(["RESTAURANT", "STORE"]),

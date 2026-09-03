@@ -1,8 +1,7 @@
 import { randomUUID } from "crypto";
 import { Router } from "express";
-import { createClient } from "@supabase/supabase-js";
 import { z } from "zod";
-import supabase from "../../database/supabase";
+import supabase, { supabaseAuthed } from "../../database/supabase";
 
 const router = Router();
 
@@ -78,15 +77,7 @@ function getBearerToken(req: any) {
   return token;
 }
 
-function supabaseAuthed(req: any) {
-  const token = getBearerToken(req);
-  if (!token) return null;
 
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  });
-}
 
 async function requireAdmin(req: any, res: any) {
   const sb = supabaseAuthed(req);

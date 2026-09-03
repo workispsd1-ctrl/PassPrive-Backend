@@ -1,33 +1,12 @@
 import express, { Request, Response } from "express";
-import { createClient } from "@supabase/supabase-js";
-import supabase from "../../database/supabase";
+import supabase, { supabaseServiceRole as supabaseService, supabaseAuthed } from "../../database/supabase";
 import { EmtelProvider } from "../services/smsService";
 import { OtpService } from "../services/otpService";
-
-const SUPABASE_URL = process.env.SUPABASE_URL!;
-const SUPABASE_SERVICE_KEY =
-  process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY!;
 
 function getProjectRef(url: string | undefined) {
   const match = String(url ?? "").match(/^https:\/\/([^.]+)\.supabase\.co$/i);
   return match?.[1] ?? "unknown";
 }
-
-function supabaseAuthed(req: any) {
-  const h = req.headers.authorization || "";
-  const [type, token] = h.split(" ");
-  if (type !== "Bearer" || !token) return null;
-
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  });
-}
-
-// Dedicated service account client for auth.admin operations
-const supabaseService = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-  auth: { persistSession: false, autoRefreshToken: false },
-});
 
 function normalizeAdminRole(value: any) {
   const raw = String(value ?? "").trim().toLowerCase();
@@ -46,8 +25,8 @@ async function requireAdmin(req: any, res: any) {
     hasAuthorizationHeader: Boolean(authHeader),
     authorizationType: authType || null,
     bearerTokenExtracted: Boolean(authType === "Bearer" && authToken),
-    backendSupabaseUrl: SUPABASE_URL,
-    backendSupabaseProjectRef: getProjectRef(SUPABASE_URL),
+    backendSupabaseUrl: process.env.SUPABASE_URL,
+    backendSupabaseProjectRef: getProjectRef(process.env.SUPABASE_URL),
   });
 
   const sb = supabaseAuthed(req);
@@ -340,11 +319,7 @@ router.post("/verify-otp", async (req: Request, res: Response) => {
       // hop is far cheaper than mobile->Supabase. A throwaway client keeps the
       // resulting session off the shared admin singleton.
       if (sessionToken) {
-        const exchangeClient = createClient(
-          process.env.SUPABASE_URL!,
-          process.env.SUPABASE_ANON_KEY || process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE_KEY!,
-          { auth: { persistSession: false, autoRefreshToken: false } },
-        );
+        const exchangeClient = supabase;
 
         const { data: verified, error: exchangeError } = await exchangeClient.auth.verifyOtp({
           token_hash: sessionToken,

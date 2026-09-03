@@ -1,8 +1,7 @@
 import { Router } from "express";
-import { createClient } from "@supabase/supabase-js";
 import multer from "multer";
 import { z } from "zod";
-import supabase from "../../database/supabase";
+import supabase, { supabaseAuthed } from "../../database/supabase";
 
 const router = Router();
 
@@ -254,22 +253,7 @@ const RedemptionBodySchema = z
   })
   .strict();
 
-function getBearerToken(req: any) {
-  const header = req.headers.authorization || "";
-  const [type, token] = header.split(" ");
-  if (type !== "Bearer" || !token) return null;
-  return token;
-}
 
-function supabaseAuthed(req: any) {
-  const token = getBearerToken(req);
-  if (!token) return null;
-
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  });
-}
 
 async function requireAdmin(req: any, res: any) {
   const sb = supabaseAuthed(req);

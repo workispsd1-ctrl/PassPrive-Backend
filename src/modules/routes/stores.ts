@@ -1,7 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { createClient } from "@supabase/supabase-js";
-import supabase from "../../database/supabase";
+import supabase, { supabaseAuthed } from "../../database/supabase";
 import {
   buildStoreSlotConfig,
   getProductCataloguePayload,
@@ -11,21 +10,8 @@ import { hydrateStoreRow, hydrateStoreRows, STORE_BASE_SELECT } from "../service
 
 const router = Router();
 
-const SUPABASE_URL = process.env.SUPABASE_URL!;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
 const LIST_QUERY_TIMEOUT_MS = Number(process.env.LIST_QUERY_TIMEOUT_MS ?? 5000);
 const STORE_ROUTE_DEBUG = String(process.env.STORE_ROUTE_DEBUG ?? "false").trim().toLowerCase() === "true";
-
-function supabaseAuthed(req: any) {
-  const h = req.headers.authorization || "";
-  const [type, token] = h.split(" ");
-  if (type !== "Bearer" || !token) return null;
-
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  });
-}
 
 async function requireAdmin(req: any, res: any) {
   const sb = supabaseAuthed(req);

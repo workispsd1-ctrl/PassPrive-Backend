@@ -1,7 +1,6 @@
-import { createClient } from "@supabase/supabase-js";
 import type { Response } from "express";
 import { createRemoteJWKSet, jwtVerify } from "jose";
-import supabase from "../../database/supabase";
+import supabase, { getSupabaseAuthed } from "../../database/supabase";
 
 const SUPABASE_URL = process.env.SUPABASE_URL!;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
@@ -75,11 +74,7 @@ export function getBearerToken(req: any) {
 export function supabaseAuthed(req: any) {
   const token = getBearerToken(req);
   if (!token) return null;
-
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  });
+  return getSupabaseAuthed(token);
 }
 
 export async function requireAuth(req: any, res: Response) {

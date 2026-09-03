@@ -1,33 +1,8 @@
 import { Router } from "express";
 import { z } from "zod";
-import { createClient } from "@supabase/supabase-js";
+import { supabaseAuthed } from "../../database/supabase";
 
 const router = Router();
-
-const SUPABASE_URL = process.env.SUPABASE_URL!;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY!;
-
-if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY) {
-  throw new Error("Missing SUPABASE_URL or SUPABASE_SERVICE_KEY in env");
-}
-
-/* ---------------------------------------------
-   HELPERS & AUTH
---------------------------------------------- */
-
-/**
- * Builds a Supabase client that uses the user's JWT for RLS checks.
- */
-function supabaseAuthed(req: any) {
-  const h = req.headers.authorization || "";
-  const [type, token] = h.split(" ");
-  if (type !== "Bearer" || !token) return null;
-
-  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
-    auth: { persistSession: false, autoRefreshToken: false },
-    global: { headers: { Authorization: `Bearer ${token}` } },
-  });
-}
 
 /**
  * Validates that the caller is an admin or superadmin.
