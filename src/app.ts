@@ -21,6 +21,7 @@ import StoresHomeBanners from "./modules/routes/storesHomeBanners";
 import corporatesRouter from "./modules/routes/corporates";
 import Payments from "./modules/routes/payments";
 import PublicMenuPayments from "./modules/routes/publicMenuPayments";
+import IveriMerchantPayments from "./modules/routes/iveriMerchantPayments";
 import EditorialCollections from "./modules/routes/editorialCollections";
 import Editorials from "./modules/routes/editorials";
 import NowTrending from "./modules/routes/nowTrending";
@@ -130,6 +131,7 @@ app.use("/api/store-catalogue", StoreCatalogue);
 app.use("/api/store-catalog", StoreCatalogue); // Alias for clients using US spelling
 app.use("/api/payments", Payments);
 app.use("/api/public-menu/payments", PublicMenuPayments);
+app.use("/api/payments/iveri-merchant", IveriMerchantPayments);
 app.use("/api/editorial-collections", EditorialCollections);
 app.use("/api/editorials", Editorials);
 app.use("/api/now-trending", NowTrending);
