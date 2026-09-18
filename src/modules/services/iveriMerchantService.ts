@@ -25,7 +25,7 @@ export function getIveriMerchantConfig(): IveriMerchantConfig {
   const baseUrl = configuredBaseUrl || "https://portal.merchant.cim.mu";
 
   const enterpriseAuthoriseUrl =
-    process.env.IVERI_ENTERPRISE_AUTHORISE_URL?.trim() || `${baseUrl}/Enterprise/Authorise.aspx`;
+    process.env.IVERI_ENTERPRISE_AUTHORISE_URL?.trim() || `${baseUrl}/Lite/Authorise.aspx`;
 
   return {
     mode,
