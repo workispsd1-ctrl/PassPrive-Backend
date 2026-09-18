@@ -2,6 +2,7 @@ import { postForm } from "./iveriService";
 import { normalizeIveriPayload } from "./iveriPayloadService";
 import { supabaseServiceRole } from "./supabaseServiceRole";
 import { generateMerchantTrace } from "./iveriService";
+import { generatePublicTrackingId } from "./publicMenuPaymentUtils";
 
 export interface IveriMerchantConfig {
   mode: "TEST" | "LIVE";
@@ -287,6 +288,7 @@ export async function executeIveriMerchantCharge(params: {
   const currencyCode = (params.currencyCode ?? "MUR").trim().toUpperCase();
   const amountMinor = toMinor(params.amountMajor);
   const merchantTrace = generateMerchantTrace("MERCHANT_CHARGE");
+  const trackingId = generatePublicTrackingId();
 
   // Create payment session
   const { data: session, error: sessionErr } = await supabaseServiceRole
@@ -299,6 +301,7 @@ export async function executeIveriMerchantCharge(params: {
       store_id: params.partnerType === "STORE" ? params.storeId ?? tokenRecord.store_id : null,
       merchant_trace: merchantTrace,
       merchant_application_id: config.applicationId,
+      tracking_id: trackingId,
       amount_major: params.amountMajor,
       amount_minor: amountMinor,
       currency_code: currencyCode,
