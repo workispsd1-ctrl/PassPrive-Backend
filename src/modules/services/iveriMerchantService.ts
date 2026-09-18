@@ -3,11 +3,13 @@ import { normalizeIveriPayload } from "./iveriPayloadService";
 import { supabaseServiceRole } from "./supabaseServiceRole";
 import { generateMerchantTrace } from "./iveriService";
 import { generatePublicTrackingId } from "./publicMenuPaymentUtils";
+import { verifyPaymentSessionWithIveri } from "./paymentVerificationService";
 
 export interface IveriMerchantConfig {
   mode: "TEST" | "LIVE";
   applicationId: string;
   enterpriseAuthoriseUrl: string;
+  authoriseInfoUrl: string;
 }
 
 export function getIveriMerchantConfig(): IveriMerchantConfig {
@@ -27,10 +29,14 @@ export function getIveriMerchantConfig(): IveriMerchantConfig {
   const enterpriseAuthoriseUrl =
     process.env.IVERI_ENTERPRISE_AUTHORISE_URL?.trim() || `${baseUrl}/Lite/Authorise.aspx`;
 
+  const authoriseInfoUrl =
+    process.env.IVERI_AUTHORISE_INFO_URL?.trim() || `${baseUrl}/Lite/AuthoriseInfo.aspx`;
+
   return {
     mode,
     applicationId,
     enterpriseAuthoriseUrl,
+    authoriseInfoUrl,
   };
 }
 
@@ -232,33 +238,6 @@ export async function syncPartnerSubscription(params: {
   return null;
 }
 
-function extractEnterpriseFields(body: string): Record<string, string> {
-  const fields: Record<string, string> = {};
-  if (!body) return fields;
-
-  try {
-    const json = JSON.parse(body);
-    for (const [key, value] of Object.entries(json)) {
-      if (value !== undefined && value !== null) {
-        fields[key] = String(value);
-      }
-    }
-    return fields;
-  } catch {
-    // Fallback URLSearchParams & KV parsing
-    const queryParams = new URLSearchParams(body);
-    for (const [key, value] of queryParams.entries()) {
-      fields[key] = value;
-    }
-
-    const kvRegex = /(Lite_[A-Za-z0-9_]+|MerchantReference|Ecom_[A-Za-z0-9_]+|TransactionIndex|Status|StatusCode|ResultDescription)\s*[:=]\s*([^\r\n<]+)/g;
-    for (const match of body.matchAll(kvRegex)) {
-      fields[match[1]] = match[2].trim();
-    }
-    return fields;
-  }
-}
-
 export async function executeIveriMerchantCharge(params: {
   userId: string;
   tokenId: string;
@@ -322,99 +301,108 @@ export async function executeIveriMerchantCharge(params: {
     throw sessionErr ?? new Error("Failed to create payment session for merchant charge");
   }
 
-  // Construct iVeri Enterprise Server-to-Server Request
+  const consumerOrderPrefix = "PPRE";
+  const consumerOrderId = `${consumerOrderPrefix}${session.id.replace(/[^A-Za-z0-9]/g, "").toUpperCase()}`.slice(0, 20);
+  const backendBase = process.env.backend_url?.trim() || "https://api.passprive.com";
+  const returnUrl = `${backendBase.replace(/\/+$/, "")}/api/payments/iveri/return?session_id=${session.id}`;
+
+  // Construct complete iVeri tokenized request payload
   const formPayload: Record<string, string> = {
-    Command: "Debit",
+    Lite_Version: "4.0",
+    Lite_PanFormat: "TransactionIndex",
+    Lite_TransactionIndex: tokenRecord.transaction_index,
+    Ecom_Payment_Card_Number: tokenRecord.masked_pan,
     Lite_Merchant_ApplicationId: config.applicationId,
     Lite_Order_Amount: String(amountMinor),
     Lite_Currency_AlphaCode: currencyCode,
     Lite_Merchant_Trace: merchantTrace,
     MerchantReference: session.id.slice(0, 20),
-    Lite_PanFormat: "TransactionIndex",
-    Lite_TransactionIndex: tokenRecord.transaction_index,
-    Ecom_Payment_Card_Number: tokenRecord.masked_pan,
-    Ecom_Payment_Card_Protocols: "IVERI",
-    Lite_Version: "4.0",
+    Ecom_ConsumerOrderID: consumerOrderId,
+    Lite_ConsumerOrderID_PreFix: consumerOrderPrefix,
     Ecom_SchemaVersion: "1.0",
+    Ecom_TransactionComplete: "False",
+    Ecom_Payment_Card_Protocols: "IVERI",
+    Ecom_BillTo_Online_Email: "merchant.recurring@passprive.local",
+    Ecom_BillTo_Postal_Name_First: "Guest",
+    Ecom_BillTo_Postal_Name_Last: "Customer",
+    Lite_Order_LineItems_Product_1: (params.description || "Partner Subscription").slice(0, 255),
+    Lite_Order_LineItems_Quantity_1: "1",
+    Lite_Order_LineItems_Amount_1: String(amountMinor),
+    Lite_Website_Successful_Url: `${returnUrl}&outcome=success`,
+    Lite_Website_Success_Url: `${returnUrl}&outcome=success`,
+    Lite_Website_Fail_Url: `${returnUrl}&outcome=fail`,
+    Lite_Website_TryLater_Url: `${returnUrl}&outcome=pending`,
+    Lite_Website_Error_Url: `${returnUrl}&outcome=error`,
   };
 
-  const response = await postForm(config.enterpriseAuthoriseUrl, formPayload);
-  const fields = extractEnterpriseFields(response.body);
-  const normalized = normalizeIveriPayload(fields);
+  // 1. Submit tokenized payload to gateway
+  const initResponse = await postForm(config.enterpriseAuthoriseUrl, formPayload);
 
-  const cardStatus = fields.StatusCode ?? fields.Lite_Payment_Card_Status ?? normalized.canonical.card_status ?? "";
-  const isApproved = cardStatus === "0" || cardStatus === "00" || response.statusCode === 200;
-
-  const newTransactionIndex = fields.TransactionIndex ?? fields.Lite_TransactionIndex ?? normalized.canonical.transaction_index;
-
-  if (isApproved) {
-    // 1. Update session to VERIFIED_SUCCESS
-    const { data: updatedSession, error: updateErr } = await supabaseServiceRole
-      .from("payment_sessions")
-      .update({
-        status: "VERIFIED_SUCCESS",
-        gateway_status: cardStatus,
-        transaction_index: newTransactionIndex || tokenRecord.transaction_index,
-        verified_at: new Date().toISOString(),
-        gateway_payload: {
-          ...(session.gateway_payload ?? {}),
-          enterprise_response: fields,
-          raw_status_code: response.statusCode,
-        },
-      })
-      .eq("id", session.id)
-      .select("*")
-      .single();
-
-    if (updateErr) throw updateErr;
-
-    // 2. Daisy-chain token in user_card_tokens with the new TransactionIndex GUID
-    if (newTransactionIndex && newTransactionIndex !== tokenRecord.transaction_index) {
-      await supabaseServiceRole
-        .from("user_card_tokens")
-        .update({
-          transaction_index: newTransactionIndex,
-          last_used_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", tokenRecord.id);
-    } else {
-      await supabaseServiceRole
-        .from("user_card_tokens")
-        .update({
-          last_used_at: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", tokenRecord.id);
-    }
-
-    // 3. Update single-row subscription cells
-    const subscriptionResult = await syncPartnerSubscription({
-      partnerType: params.partnerType,
-      restaurantId: session.restaurant_id,
-      storeId: session.store_id,
-      planCode: params.planCode,
-      durationMonths: params.durationMonths,
+  // 2. Perform server inquiry check via AuthoriseInfo.aspx
+  try {
+    const verification = await verifyPaymentSessionWithIveri({
+      sessionId: session.id,
+      applicationId: config.applicationId,
+      authoriseInfoUrl: config.authoriseInfoUrl,
     });
 
-    return {
-      ok: true,
-      session: updatedSession,
-      subscription: subscriptionResult,
-      transaction_index: newTransactionIndex || tokenRecord.transaction_index,
-    };
-  } else {
-    // Declined / Failure
+    const isVerifiedSuccess = verification.verification.verified;
+    const newTransactionIndex =
+      verification.verification.fields?.TransactionIndex ||
+      verification.verification.fields?.Lite_TransactionIndex ||
+      verification.session.transaction_index;
+
+    if (isVerifiedSuccess) {
+      // Update daisy-chained token
+      if (newTransactionIndex && newTransactionIndex !== tokenRecord.transaction_index) {
+        await supabaseServiceRole
+          .from("user_card_tokens")
+          .update({
+            transaction_index: newTransactionIndex,
+            last_used_at: new Date().toISOString(),
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", tokenRecord.id);
+      }
+
+      // Update single-row subscription cells
+      const subscriptionResult = await syncPartnerSubscription({
+        partnerType: params.partnerType,
+        restaurantId: session.restaurant_id,
+        storeId: session.store_id,
+        planCode: params.planCode,
+        durationMonths: params.durationMonths,
+      });
+
+      return {
+        ok: true,
+        session: verification.session,
+        subscription: subscriptionResult,
+        transaction_index: newTransactionIndex || tokenRecord.transaction_index,
+      };
+    } else {
+      return {
+        ok: false,
+        session: verification.session,
+        error:
+          verification.session.gateway_result_description ||
+          "Gateway verification declined the tokenized transaction",
+      };
+    }
+  } catch (verifyErr: any) {
+    // Return structured failure response
     const { data: failedSession } = await supabaseServiceRole
       .from("payment_sessions")
       .update({
         status: "VERIFIED_FAILED",
-        gateway_status: cardStatus,
-        gateway_result_description: fields.ResultDescription ?? fields.Lite_Result_Description ?? "Enterprise Charge Refused",
+        gateway_result_description: verifyErr?.message || "Tokenized charge failed verification",
         gateway_payload: {
           ...(session.gateway_payload ?? {}),
-          enterprise_response: fields,
-          raw_status_code: response.statusCode,
+          init_response: {
+            status_code: initResponse.statusCode,
+            body_preview: String(initResponse.body ?? "").slice(0, 500),
+          },
+          verification_error: verifyErr?.message || "Unknown error",
         },
       })
       .eq("id", session.id)
@@ -424,7 +412,7 @@ export async function executeIveriMerchantCharge(params: {
     return {
       ok: false,
       session: failedSession || session,
-      error: fields.ResultDescription ?? fields.Lite_Result_Description ?? "Enterprise charge refused",
+      error: verifyErr?.message || "Gateway token charge failed verification",
     };
   }
 }
