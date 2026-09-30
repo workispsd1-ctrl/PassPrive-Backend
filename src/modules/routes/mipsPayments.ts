@@ -2,7 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { randomUUID } from "crypto";
 import { requireAuth } from "../services/authService";
-import { validateCashbackSpend, spendCashback } from "../services/cashbackService";
+import { validateCashbackSpend, spendCashback, earnTransactionCashback } from "../services/cashbackService";
 import { createPaymentSession, getPaymentSessionById, updatePaymentSession } from "../services/paymentSessionService";
 import { decryptMiPSIMN, getMiPSConfig, loadMiPSPaymentZone } from "../services/mipsService";
 
@@ -230,7 +230,23 @@ router.post("/imn", async (req, res) => {
       }
     }
 
-    // 4. Update session to VERIFIED_SUCCESS
+    // 4. Earn fresh cashback for user on net cash amount (paidAmount)
+    let cashbackCredited = null;
+    if (session.user_id && (session.restaurant_id || session.store_id) && paidAmount > 0) {
+      try {
+        cashbackCredited = await earnTransactionCashback({
+          userId: session.user_id,
+          restaurantId: session.restaurant_id || undefined,
+          storeId: session.store_id || undefined,
+          baseAmount: paidAmount,
+          sessionId: session.id,
+        });
+      } catch (earnErr: any) {
+        console.error("[mipsPayments] Error earning cashback:", earnErr);
+      }
+    }
+
+    // 5. Update session to VERIFIED_SUCCESS
     await updatePaymentSession(session.id, {
       status: "VERIFIED_SUCCESS",
       gateway_status: mipsStatus,
@@ -238,6 +254,7 @@ router.post("/imn", async (req, res) => {
       gateway_payload: {
         ...(session.gateway_payload ?? {}),
         imn_decrypted: decryptedData,
+        cashback_credited: cashbackCredited,
       },
     });
 
