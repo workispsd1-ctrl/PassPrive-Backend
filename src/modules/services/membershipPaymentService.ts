@@ -193,6 +193,7 @@ export async function buildMembershipPaymentContext(params: {
       .from("subscription")
       .select("id, plan_name, amount, type, product_id, price_id, sort_order")
       .eq("id", params.payload.plan_id)
+      .eq("is_active", true)
       .maybeSingle(),
     promoCode
       ? db

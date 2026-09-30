@@ -2,7 +2,7 @@ import { z } from "zod";
 import crypto from "crypto";
 import supabase from "../../database/supabase";
 import type { AuthenticatedCustomer } from "./authService";
-import { FulleService } from "./fulleService";
+import { syncBookingNow } from "./posSyncService";
 
 const NON_CANCELLED_STATUSES = ["pending", "confirmed", "seated", "completed"];
 const WEEKDAY_NAMES = [
@@ -642,41 +642,6 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
   };
 }
 
-async function resolveFulleServiceId(
-  mutualKey: string,
-  externalRestaurantId: number,
-  dateStr: string,
-  timeStr: string
-): Promise<number | null> {
-  try {
-    const date = new Date(`${dateStr}T00:00:00`);
-    const day = date.getDay();
-    const services = await FulleService.getBookingServices(mutualKey, externalRestaurantId, day);
-    if (!services || services.length === 0) return null;
-
-    const [bHours, bMinutes] = timeStr.split(":").map(Number);
-    const bookingMinutes = bHours * 60 + bMinutes;
-
-    for (const service of services) {
-      if (!service.start || !service.end) continue;
-      const [sHours, sMinutes] = service.start.split(":").map(Number);
-      const [eHours, eMinutes] = service.end.split(":").map(Number);
-      const startMinutes = sHours * 60 + sMinutes;
-      let endMinutes = eHours * 60 + eMinutes;
-      if (endMinutes < startMinutes) endMinutes += 24 * 60;
-
-      if (bookingMinutes >= startMinutes && bookingMinutes <= endMinutes) {
-        return Number(service.id);
-      }
-    }
-
-    return Number(services[0].id);
-  } catch (err) {
-    console.error("[Fulle Integration] Failed to resolve service ID:", err);
-    return null;
-  }
-}
-
 export async function confirmRestaurantBooking(body: BookingPayload, customer: AuthenticatedCustomer) {
   // The customer_booking_number count only depends on the customer id, so run it
   // concurrently with the (network-heavy) evaluation phase rather than after it.
@@ -786,85 +751,8 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
   // Generate local booking ID (UUID)
   const localBookingId = crypto.randomUUID();
 
-  // Check if Fulle is enabled for this restaurant to sync POS booking in real-time
-  let externalPosId: string | null = null;
-  let externalPosReference: string | null = null;
-
-  try {
-    const { data: posProvider } = await supabase
-      .from("restaurant_till_providers")
-      .select("*")
-      .eq("restaurant_id", evaluation.restaurantId)
-      .eq("provider_name", "fulle")
-      .eq("is_enabled", true)
-      .maybeSingle();
-
-    if (posProvider) {
-      const mutualKey = posProvider.config?.mutualKey ?? posProvider.config?.mutual_key;
-      const externalRestaurantId = Number(posProvider.external_restaurant_id);
-
-      if (mutualKey && !Number.isNaN(externalRestaurantId)) {
-        // 1. Resolve client on Fulle
-        let fulleClientId: number | null = null;
-        const clientSearch = await FulleService.getClientByEmail(mutualKey, customer.email || "");
-        if (clientSearch && clientSearch.list && clientSearch.list.length > 0) {
-          fulleClientId = Number(clientSearch.list[0].id);
-        } else {
-          const clientCreate = await FulleService.createClient(mutualKey, {
-            name: customer.fullName || "Guest",
-            mail: customer.email || "",
-            phone: customer.phone || "",
-          });
-          fulleClientId = Number(clientCreate.object?.id);
-        }
-
-        // 2. Resolve service ID matching booking execution time
-        const fulleServiceId = await resolveFulleServiceId(
-          mutualKey,
-          externalRestaurantId,
-          evaluation.bookingDate,
-          evaluation.bookingTime
-        );
-
-        // 3. Register booking on Fulle
-        const fulleBookingPayload = {
-          id_extern: localBookingId,
-          date_creation: new Date().toISOString(),
-          date_execution: evaluation.bookingDate,
-          hour_execution: evaluation.bookingTime,
-          n_people: evaluation.partySize,
-          origin: 1,
-          booking_level: { id: 1 },
-          client: fulleClientId ? { id: fulleClientId } : undefined,
-          booking_service: fulleServiceId ? { id: fulleServiceId } : undefined,
-          point_of_sale: { id: externalRestaurantId },
-          comment: body.notes || "",
-          notify: 1,
-        };
-
-        const fulleBookingRes = await FulleService.createBooking(mutualKey, fulleBookingPayload);
-        if (fulleBookingRes) {
-          externalPosId = String(fulleBookingRes.id || "");
-          externalPosReference = String(fulleBookingRes.reference || "");
-        }
-      }
-    }
-  } catch (err) {
-    console.error("[Fulle Integration] Failed during Fulle booking creation sync:", err);
-    return {
-      ok: false as const,
-      status: 500,
-      body: {
-        error: `POS Sync failed: ${err instanceof Error ? err.message : String(err)}`,
-        code: "POS_SYNC_FAILED",
-      },
-    };
-  }
-
   const insertPayload = {
     id: localBookingId,
-    external_pos_id: externalPosId,
-    external_pos_reference: externalPosReference,
     restaurant_id: evaluation.restaurantId,
     customer_user_id: customer.userId,
     customer_name: customer.fullName || "Guest",
@@ -905,6 +793,19 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
     };
   }
 
+  // The insert trigger queued a CashMag sync if the restaurant uses XL-ENT. Try it
+  // now so the response carries the POS reference; a POS outage never blocks the
+  // booking — the background worker retries. (RETURNING doesn't see the trigger's
+  // pos_sync_status update, so this is attempted for every booking; it's a no-op
+  // claim for restaurants without XL-ENT.)
+  await syncBookingNow(booking.id);
+  const { data: synced } = await supabase
+    .from("restaurant_bookings")
+    .select("external_pos_id, external_pos_reference, pos_sync_status")
+    .eq("id", booking.id)
+    .maybeSingle();
+  if (synced) Object.assign(booking, synced);
+
   return {
     ok: true as const,
     status: 201,
@@ -923,6 +824,7 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
         payment_status: booking.payment_status ?? null,
         external_pos_id: booking.external_pos_id ?? null,
         external_pos_reference: booking.external_pos_reference ?? null,
+        pos_sync_status: booking.pos_sync_status ?? null,
       },
     },
   };
