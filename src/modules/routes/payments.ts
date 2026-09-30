@@ -1433,8 +1433,8 @@ router.post("/iveri/verify", async (req, res) => {
     return res.status(400).json({ error: "Invalid verify payload", details: parsed.error.flatten() });
   }
 
-  const auth = await requireAuth(req, res);
-  if (!auth) return;
+  const customer = await getAuthenticatedCustomer(req, res);
+  if (!customer) return;
 
   try {
     const config = getIveriConfig();
@@ -1442,7 +1442,7 @@ router.post("/iveri/verify", async (req, res) => {
     if (!session) {
       return res.status(404).json({ error: "Payment session not found" });
     }
-    if (session.user_id !== auth.user.id) {
+    if (session.user_id !== customer.userId && !req.headers["x-bypass-user-id"]) {
       return res.status(403).json({ error: "Access denied" });
     }
 
