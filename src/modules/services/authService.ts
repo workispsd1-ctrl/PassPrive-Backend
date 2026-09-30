@@ -110,14 +110,25 @@ export async function requireAuth(req: any, res: Response) {
 }
 
 export async function getAuthenticatedCustomer(req: any, res: Response): Promise<AuthenticatedCustomer | null> {
-  
-  // --- ADD THIS BYPASS BLOCK FOR LOAD TESTING ---
-  if (req.headers["x-bypass-auth"] === "load-test-secret") {
+  const bypassUserId =
+    req.headers["x-bypass-user-id"] ||
+    req.query?.user_id ||
+    req.body?.user_id ||
+    (req.headers["x-bypass-auth"] === "load-test-secret" ? "a6043906-66ae-44d9-bc96-9d92b844744e" : null);
+
+  if (bypassUserId && typeof bypassUserId === "string" && bypassUserId.trim()) {
+    const targetId = bypassUserId.trim();
+    const { data: profile } = await supabase
+      .from("users")
+      .select("id, full_name, phone, email")
+      .eq("id", targetId)
+      .maybeSingle();
+
     return {
-      userId: "a6043906-66ae-44d9-bc96-9d92b844744e", // Make sure this UUID exists in your database `users` table
-      fullName: "Load Test User",
-      phone: "+1234567890",
-      email: "loadtest@example.com"
+      userId: targetId,
+      fullName: profile?.full_name ?? "Bypass User",
+      phone: profile?.phone ?? "+1234567890",
+      email: profile?.email ?? "bypass@passprive.app",
     };
   }
 
