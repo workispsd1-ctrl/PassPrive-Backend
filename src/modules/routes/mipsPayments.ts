@@ -31,10 +31,13 @@ async function getEffectiveAuth(req: any, res: any) {
     req.headers["x-bypass-user-id"] ||
     req.query?.user_id ||
     req.body?.user_id ||
-    process.env.PUBLIC_MENU_SYSTEM_USER_ID ||
-    "00000000-0000-0000-0000-000000000000";
+    process.env.PUBLIC_MENU_SYSTEM_USER_ID;
 
-  return { user: { id: String(bypassUserId).trim() } };
+  if (bypassUserId && typeof bypassUserId === "string" && bypassUserId.trim()) {
+    return { user: { id: bypassUserId.trim() } };
+  }
+
+  return await requireAuth(req, res);
 }
 
 /**
@@ -82,20 +85,21 @@ router.post("/initiate", async (req, res) => {
   try {
     const merchantId = effectiveRestaurantId || effectiveStoreId || auth.user.id;
 
-    // 1. If coins are used, validate cashback spend eligibility (soft fail for bypass test mode)
+    // 1. If coins are used, validate cashback spend eligibility strictly
     if (coins_amount > 0) {
-      try {
-        const validation = await validateCashbackSpend(
-          auth.user.id,
-          coins_amount,
-          merchantId,
-          total_amount
-        );
-        if (!validation.valid) {
-          console.warn("[mipsPayments] Coin validation warning (bypassed for testing):", validation.error);
-        }
-      } catch (valErr: any) {
-        console.warn("[mipsPayments] Coin validation error (bypassed for testing):", valErr?.message);
+      const validation = await validateCashbackSpend(
+        auth.user.id,
+        coins_amount,
+        merchantId,
+        total_amount
+      );
+
+      if (!validation.valid) {
+        return res.status(400).json({
+          ok: false,
+          error: "COIN_SPEND_INVALID",
+          message: validation.error || "Requested coin amount cannot be applied to this purchase",
+        });
       }
     }
 
