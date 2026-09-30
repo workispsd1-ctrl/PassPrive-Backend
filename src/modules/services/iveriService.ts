@@ -132,6 +132,12 @@ export function buildIveriAuthoriseRequest(params: {
   const consumerOrderPrefix = buildConsumerOrderPrefix(consumerOrderId);
   const fields: Record<string, string> = {
     Lite_Merchant_ApplicationId: params.config.applicationId,
+    ...(process.env.IVERI_CERTIFICATE_ID?.trim()
+      ? {
+          Lite_Merchant_CertificateId: process.env.IVERI_CERTIFICATE_ID.trim(),
+          CertificateID: process.env.IVERI_CERTIFICATE_ID.trim(),
+        }
+      : {}),
     Lite_Order_Amount: String(amountMinor),
     Lite_Currency_AlphaCode: params.currencyCode,
     Lite_Merchant_Trace: params.merchantTrace,
