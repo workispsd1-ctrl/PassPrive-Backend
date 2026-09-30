@@ -1,4 +1,21 @@
-const FULLE_BASE_URL = "https://api.fulleapps.io";
+const FULLE_BASE_URL = (process.env.FULLE_API_BASE_URL || "https://api.fulleapps.io").replace(/\/+$/, "");
+const FULLE_TIMEOUT_MS = 15000;
+const FULLE_CODE_UNAUTHORIZED = -10;
+
+/**
+ * Partner identifier issued by Fulle/CashMag when PassPrive joins their partner
+ * programme. Sent as the X-Api-Key header on every request.
+ */
+function getPartnerId(): string | undefined {
+  return process.env.FULLE_PARTNER_ID?.trim() || undefined;
+}
+
+export class FulleApiError extends Error {
+  constructor(message: string, readonly status: number, readonly body: unknown) {
+    super(message);
+    this.name = "FulleApiError";
+  }
+}
 
 export interface FullePOSResponse {
   list?: any[];
@@ -97,6 +114,10 @@ async function fulleRequest(
     "Authorization": `Mutual ${mutualKey}`,
     "Accept": "application/json",
   };
+  const partnerId = getPartnerId();
+  if (partnerId) {
+    headers["X-Api-Key"] = partnerId;
+  }
 
   if (body) {
     headers["Content-Type"] = "application/json";
@@ -106,6 +127,7 @@ async function fulleRequest(
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(FULLE_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -116,18 +138,32 @@ async function fulleRequest(
     } catch {
       parsedError = errorText;
     }
-    throw new Error(
+    throw new FulleApiError(
       `Fulle API request failed: Status ${response.status} - ${
         typeof parsedError === "object" ? JSON.stringify(parsedError) : parsedError
-      }`
+      }`,
+      response.status,
+      parsedError
     );
   }
 
   const contentType = response.headers.get("content-type");
-  if (contentType && contentType.includes("application/json")) {
-    return response.json();
+  if (!contentType || !contentType.includes("application/json")) {
+    return response.text();
   }
-  return response.text();
+
+  // Fulle reports many errors with HTTP 200 and a negative "code" in the body,
+  // e.g. {"code":-10,"message":"CODE_ERR_UNAUTHORIZED","info":"API partner key unknown"}.
+  const json = await response.json();
+  if (json && typeof json === "object" && !Array.isArray(json) && typeof json.code === "number" && json.code < 0) {
+    const detail = [json.message, json.info].filter(Boolean).join(": ");
+    throw new FulleApiError(
+      `Fulle API error ${json.code}${detail ? ` - ${detail}` : ""}`,
+      json.code === FULLE_CODE_UNAUTHORIZED ? 401 : 400,
+      json
+    );
+  }
+  return json;
 }
 
 export class FulleService {
@@ -151,6 +187,16 @@ export class FulleService {
       params.day = day;
     }
     return fulleRequest("GET", "/booking_settings/services", mutualKey, params);
+  }
+
+  /**
+   * Fetch bookings for a date range (used to find a booking by id_extern).
+   */
+  static async getBookings(
+    mutualKey: string,
+    params: { from_date: string; to_date: string; id_point_of_sale?: number }
+  ): Promise<any> {
+    return fulleRequest("GET", "/bookings", mutualKey, params);
   }
 
   /**
@@ -180,7 +226,19 @@ export class FulleService {
     if (comment !== undefined) {
       payload.comment = comment;
     }
-    return fulleRequest("POST", `/bookings/level/${externalBookingId}`, mutualKey, undefined, payload);
+    try {
+      return await fulleRequest("POST", `/bookings/level/${externalBookingId}`, mutualKey, undefined, payload);
+    } catch (err) {
+      // On cancel, Fulle updates the booking and then tries to cancel a linked
+      // Klixi online order; with no such order it answers
+      // {"affected_rows":1,"klixi_response":"order not found","code":-3}.
+      // The booking itself was updated, so that is a success for us.
+      const body = err instanceof FulleApiError ? (err.body as Record<string, unknown> | null) : null;
+      if (body && Number(body.affected_rows) >= 1) {
+        return body;
+      }
+      throw err;
+    }
   }
 
   /**
