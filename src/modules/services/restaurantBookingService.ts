@@ -2,7 +2,6 @@ import { z } from "zod";
 import crypto from "crypto";
 import supabase from "../../database/supabase";
 import type { AuthenticatedCustomer } from "./authService";
-import { syncBookingNow } from "./posSyncService";
 
 const NON_CANCELLED_STATUSES = ["pending", "confirmed", "seated", "completed"];
 const WEEKDAY_NAMES = [
@@ -793,19 +792,6 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
     };
   }
 
-  // The insert trigger queued a CashMag sync if the restaurant uses XL-ENT. Try it
-  // now so the response carries the POS reference; a POS outage never blocks the
-  // booking — the background worker retries. (RETURNING doesn't see the trigger's
-  // pos_sync_status update, so this is attempted for every booking; it's a no-op
-  // claim for restaurants without XL-ENT.)
-  await syncBookingNow(booking.id);
-  const { data: synced } = await supabase
-    .from("restaurant_bookings")
-    .select("external_pos_id, external_pos_reference, pos_sync_status")
-    .eq("id", booking.id)
-    .maybeSingle();
-  if (synced) Object.assign(booking, synced);
-
   return {
     ok: true as const,
     status: 201,
@@ -824,7 +810,6 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
         payment_status: booking.payment_status ?? null,
         external_pos_id: booking.external_pos_id ?? null,
         external_pos_reference: booking.external_pos_reference ?? null,
-        pos_sync_status: booking.pos_sync_status ?? null,
       },
     },
   };
