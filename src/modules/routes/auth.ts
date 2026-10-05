@@ -421,6 +421,9 @@ router.post("/register-phone", async (req: Request, res: Response) => {
     });
     if (insertError) {
       await supabaseService.auth.admin.deleteUser(created.user.id).catch(() => {});
+      if ((insertError as any).code === "23505") {
+        return res.status(409).json({ success: false, error: "This number already has an account. Please log in again." });
+      }
       throw insertError;
     }
 
@@ -436,6 +439,51 @@ router.post("/register-phone", async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error(`[OTP] Error in /register-phone for ${phone}:`, err);
     return res.status(500).json({ success: false, error: "Could not create your account. Please try again." });
+  }
+});
+
+router.post("/change-phone", async (req: Request, res: Response) => {
+  const sb = supabaseAuthed(req);
+  const { data: authData } = sb ? await sb.auth.getUser() : { data: { user: null } };
+  const user = authData?.user;
+  if (!user) {
+    return res.status(401).json({ success: false, error: "Your session has expired. Please log in again." });
+  }
+
+  const phone = String(req.body?.phone ?? "").trim();
+  const code = String(req.body?.code ?? "").trim();
+  const digits = phone.replace(/\D/g, "");
+  if (!code || digits.length < 7 || digits.length > 15) {
+    return res.status(400).json({ success: false, error: "Phone number and OTP code are required." });
+  }
+
+  try {
+    const { data: matches, error: lookupError } = await findUsersByPhone(phone);
+    if (lookupError) throw lookupError;
+    if ((matches ?? []).some(m => m.id !== user.id)) {
+      return res.status(409).json({ success: false, error: "This phone number is already linked to another account." });
+    }
+
+    const verification = await OtpService.verifyOtp(phone, code);
+    if (!verification.success) {
+      return res.status(400).json({ success: false, error: verification.message });
+    }
+
+    const { error: updateError } = await supabaseService
+      .from("users")
+      .update({ phone, updated_at: new Date().toISOString() })
+      .eq("id", user.id);
+    if (updateError) {
+      if ((updateError as any).code === "23505") {
+        return res.status(409).json({ success: false, error: "This phone number is already linked to another account." });
+      }
+      throw updateError;
+    }
+
+    return res.status(200).json({ success: true, phone });
+  } catch (err: any) {
+    console.error(`[OTP] Error in /change-phone for ${user.id}:`, err);
+    return res.status(500).json({ success: false, error: "Could not update your phone number. Please try again." });
   }
 });
 
