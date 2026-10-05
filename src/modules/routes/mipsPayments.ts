@@ -27,6 +27,10 @@ const MiPSInitiateSchema = z.object({
  * Helper to authenticate either via header/query or requireAuth
  */
 async function getEffectiveAuth(req: any, res: any) {
+  if (req.headers.authorization) {
+    return await requireAuth(req, res);
+  }
+
   const bypassUserId =
     req.headers["x-bypass-user-id"] ||
     req.query?.user_id ||

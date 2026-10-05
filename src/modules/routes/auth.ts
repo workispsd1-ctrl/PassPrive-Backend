@@ -1,4 +1,5 @@
 import express, { Request, Response } from "express";
+import crypto from "crypto";
 import supabase, { supabaseServiceRole as supabaseService, supabaseAuthed } from "../../database/supabase";
 import { EmtelProvider } from "../services/smsService";
 import { OtpService } from "../services/otpService";
@@ -72,6 +73,67 @@ async function requireAdmin(req: any, res: any) {
 }
 
 const router = express.Router();
+
+const SIGNUP_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
+const SIGNUP_SECRET =
+  process.env.OTP_SIGNUP_SECRET?.trim() ||
+  process.env.SUPABASE_SERVICE_KEY?.trim() ||
+  process.env.SUPABASE_SERVICE_ROLE_KEY?.trim() ||
+  "";
+
+function signSignupToken(phone: string): string | null {
+  if (!SIGNUP_SECRET) return null;
+  const body = Buffer.from(JSON.stringify({ phone, exp: Date.now() + SIGNUP_TOKEN_TTL_MS })).toString("base64url");
+  const sig = crypto.createHmac("sha256", SIGNUP_SECRET).update(body).digest("base64url");
+  return `${body}.${sig}`;
+}
+
+function readSignupToken(token: unknown): string | null {
+  if (!SIGNUP_SECRET || typeof token !== "string") return null;
+  const [body, sig] = token.split(".");
+  if (!body || !sig) return null;
+  const expected = crypto.createHmac("sha256", SIGNUP_SECRET).update(body).digest("base64url");
+  const a = Buffer.from(sig);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
+  try {
+    const { phone, exp } = JSON.parse(Buffer.from(body, "base64url").toString());
+    if (typeof phone !== "string" || typeof exp !== "number" || exp < Date.now()) return null;
+    return phone;
+  } catch {
+    return null;
+  }
+}
+
+async function findUsersByPhone(phone: string) {
+  const localPart = String(phone).replace(/\D/g, "").slice(-8);
+  return supabase.from("users").select("id,email,phone").ilike("phone", `%${localPart}`).limit(5);
+}
+
+async function mintSession(email: string) {
+  const { data: link, error: linkError } = await supabase.auth.admin.generateLink({
+    type: "magiclink",
+    email,
+  });
+  if (linkError) return { error: linkError, session: null, sessionToken: null };
+
+  let sessionToken: string | null = link?.properties?.hashed_token ?? null;
+  let session: { access_token: string; refresh_token: string } | null = null;
+  if (sessionToken) {
+    const { data: verified, error: exchangeError } = await supabase.auth.verifyOtp({
+      token_hash: sessionToken,
+      type: "magiclink",
+    });
+    if (!exchangeError && verified?.session) {
+      session = {
+        access_token: verified.session.access_token,
+        refresh_token: verified.session.refresh_token,
+      };
+      sessionToken = null;
+    }
+  }
+  return { error: null, session, sessionToken };
+}
 
 type CreateUserBody = {
   email: string;
@@ -267,18 +329,7 @@ router.post("/verify-otp", async (req: Request, res: Response) => {
       return res.status(400).json({ success: false, error: verification.message });
     }
 
-    // Match on the significant digits, not the exact string. 28 stored numbers
-    // have no country code while the app always sends one, so equality reported
-    // existing users as brand new. Nine numbers are duplicated, which made
-    // .maybeSingle() fail and surfaced a raw database error on the OTP screen.
-    const digits = String(phone).replace(/\D/g, "");
-    const localPart = digits.slice(-8);
-
-    const { data: matches, error: userError } = await supabase
-      .from("users")
-      .select("id,email,phone")
-      .ilike("phone", `%${localPart}`)
-      .limit(5);
+    const { data: matches, error: userError } = await findUsersByPhone(phone);
 
     if (userError) {
       console.error(`[OTP] Error checking user registration:`, userError);
@@ -288,52 +339,22 @@ router.post("/verify-otp", async (req: Request, res: Response) => {
       });
     }
 
-    // Prefer a row with an email — that is what the session is minted from.
     const user = (matches ?? []).find(m => m?.email) ?? (matches ?? [])[0] ?? null;
     const registered = !!user;
 
-    // Verifying the OTP is what proves ownership of the phone, but on its own it
-    // leaves the caller unauthenticated: every RLS policy and every
-    // supabase.auth.getUser() in the app keys off a real session. Mint one here
-    // so "OTP verified" and "signed in" are the same event.
     let sessionToken: string | null = null;
     let session: { access_token: string; refresh_token: string } | null = null;
     if (registered && user?.email) {
-      const { data: link, error: linkError } = await supabase.auth.admin.generateLink({
-        type: "magiclink",
-        email: user.email,
-      });
-
-      if (linkError) {
-        console.error(`[OTP] Could not mint a session for ${phone}:`, linkError);
+      const minted = await mintSession(user.email);
+      if (minted.error) {
+        console.error(`[OTP] Could not mint a session for ${phone}:`, minted.error);
         return res.status(500).json({
           success: false,
           error: "Verified, but could not sign you in. Please try again.",
         });
       }
-
-      sessionToken = link?.properties?.hashed_token ?? null;
-
-      // Redeem the hash here rather than making the phone do it. That turns two
-      // sequential round-trips from the device into one, and the server->Supabase
-      // hop is far cheaper than mobile->Supabase. A throwaway client keeps the
-      // resulting session off the shared admin singleton.
-      if (sessionToken) {
-        const exchangeClient = supabase;
-
-        const { data: verified, error: exchangeError } = await exchangeClient.auth.verifyOtp({
-          token_hash: sessionToken,
-          type: "magiclink",
-        });
-
-        if (!exchangeError && verified?.session) {
-          session = {
-            access_token: verified.session.access_token,
-            refresh_token: verified.session.refresh_token,
-          };
-          sessionToken = null; // spent — don't hand a dead hash to the client
-        }
-      }
+      session = minted.session;
+      sessionToken = minted.sessionToken;
     }
 
     return res.status(200).json({
@@ -344,10 +365,77 @@ router.post("/verify-otp", async (req: Request, res: Response) => {
       session,
       // Fallback for clients that still redeem the hash themselves.
       session_token: sessionToken,
+      signup_token: registered ? null : signSignupToken(phone),
     });
   } catch (err: any) {
     console.error(`[OTP] Error in /verify-otp for ${phone}:`, err);
     return res.status(500).json({ success: false, error: err.message || "Failed to verify OTP." });
+  }
+});
+
+router.post("/register-phone", async (req: Request, res: Response) => {
+  const phone = readSignupToken(req.body?.signup_token);
+  if (!phone) {
+    return res.status(401).json({ success: false, error: "Your verification has expired. Please verify your number again." });
+  }
+
+  const fullName = String(req.body?.full_name ?? "").trim();
+  const email = String(req.body?.email ?? "").trim().toLowerCase();
+  if (fullName.length < 2) {
+    return res.status(400).json({ success: false, error: "Please enter your full name." });
+  }
+  if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    return res.status(400).json({ success: false, error: "Please enter a valid email address." });
+  }
+
+  try {
+    const { data: existing, error: lookupError } = await findUsersByPhone(phone);
+    if (lookupError) throw lookupError;
+    if ((existing ?? []).length) {
+      return res.status(409).json({ success: false, error: "This number already has an account. Please log in again." });
+    }
+
+    const { data: emailTaken } = await supabaseService.from("users").select("id").ilike("email", email.replace(/[%_\\]/g, "\\$&")).limit(1);
+    if ((emailTaken ?? []).length) {
+      return res.status(409).json({ success: false, error: "This email is already in use. Try another email or continue with Google." });
+    }
+
+    const { data: created, error: createError } = await supabaseService.auth.admin.createUser({
+      email,
+      email_confirm: true,
+      user_metadata: { role: "user", full_name: fullName, phone },
+    });
+    if (createError || !created?.user?.id) {
+      if (/already/i.test(createError?.message ?? "")) {
+        return res.status(409).json({ success: false, error: "This email is already in use. Try another email or continue with Google." });
+      }
+      throw createError ?? new Error("User not returned from admin.createUser");
+    }
+
+    const { error: insertError } = await supabaseService.from("users").insert({
+      id: created.user.id,
+      email,
+      full_name: fullName,
+      phone,
+      role: "user",
+    });
+    if (insertError) {
+      await supabaseService.auth.admin.deleteUser(created.user.id).catch(() => {});
+      throw insertError;
+    }
+
+    const minted = await mintSession(email);
+    if (minted.error) throw minted.error;
+
+    return res.status(201).json({
+      success: true,
+      user_id: created.user.id,
+      session: minted.session,
+      session_token: minted.sessionToken,
+    });
+  } catch (err: any) {
+    console.error(`[OTP] Error in /register-phone for ${phone}:`, err);
+    return res.status(500).json({ success: false, error: "Could not create your account. Please try again." });
   }
 });
 
