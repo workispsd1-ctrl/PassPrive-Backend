@@ -33,6 +33,7 @@ import ShareLinks from "./modules/routes/shareLinks";
 import Gifts from "./modules/routes/gifts";
 import GiftEvents from "./modules/routes/giftEvents";
 import Cashback from "./modules/routes/cashback";
+import posIntegrationsRouter from "./modules/routes/posIntegrations";
 import { requestTelemetryMiddleware } from "./modules/middleware/requestTelemetry";
 import { rateLimitMiddleware } from "./modules/middleware/rateLimit";
 
@@ -151,6 +152,7 @@ app.use("/r", ShareLinks);
 app.use("/api/gifts", Gifts);
 app.use("/api/gift-events", GiftEvents);
 app.use("/api/cashback", Cashback);
+app.use("/api/pos", posIntegrationsRouter);
 
 // 404 Catch-all Logger
 app.use((req, res) => {
