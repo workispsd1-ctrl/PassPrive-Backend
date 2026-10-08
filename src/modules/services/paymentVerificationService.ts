@@ -55,8 +55,16 @@ export async function verifyPaymentSessionWithIveri(params: {
       ? certIdRaw
       : `{${certIdRaw}}`
     : "";
+
+  const appIdRaw = params.applicationId?.trim();
+  const appId = appIdRaw
+    ? appIdRaw.startsWith("{") && appIdRaw.endsWith("}")
+      ? appIdRaw
+      : `{${appIdRaw}}`
+    : params.applicationId;
+
   const response = await postForm(params.authoriseInfoUrl, {
-    Lite_Merchant_ApplicationId: params.applicationId,
+    Lite_Merchant_ApplicationId: appId,
     Lite_Merchant_Trace: session.merchant_trace,
     ...(certId ? { Lite_Merchant_CertificateId: certId, CertificateID: certId } : {}),
   });
