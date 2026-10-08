@@ -49,7 +49,12 @@ export async function verifyPaymentSessionWithIveri(params: {
     throw new Error("Payment session not found");
   }
 
-  const certId = process.env.IVERI_CERTIFICATE_ID?.trim();
+  const certIdRaw = process.env.IVERI_CERTIFICATE_ID?.trim();
+  const certId = certIdRaw
+    ? certIdRaw.startsWith("{") && certIdRaw.endsWith("}")
+      ? certIdRaw
+      : `{${certIdRaw}}`
+    : "";
   const response = await postForm(params.authoriseInfoUrl, {
     Lite_Merchant_ApplicationId: params.applicationId,
     Lite_Merchant_Trace: session.merchant_trace,
