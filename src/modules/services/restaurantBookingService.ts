@@ -482,9 +482,10 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
     supabase
       .from("restaurant_offers")
       .select(
-        "id,title,description,badge_text,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata"
+        "id,title,description,badge_text,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata,restaurants!inner(deals_enabled)"
       )
-      .eq("restaurant_id", restaurantId),
+      .eq("restaurant_id", restaurantId)
+      .eq("restaurants.deals_enabled", true),
     supabase
       .from("restaurant_bookings")
       .select("id", { count: "exact", head: true })

@@ -320,9 +320,10 @@ export async function buildBillPaymentContext(input: BillContextInput) {
     const [roffersResult, rrResult, shareResult] = await Promise.all([
       supabase
         .from("restaurant_offers")
-        .select("id,title,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata")
+        .select("id,title,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata,restaurants!inner(deals_enabled)")
         .eq("restaurant_id", entityId)
-        .eq("is_active", true),
+        .eq("is_active", true)
+        .eq("restaurants.deals_enabled", true),
       input.user_id
         ? supabase.rpc("repeat_reward_quote", {
             in_restaurant_id: entityId,
