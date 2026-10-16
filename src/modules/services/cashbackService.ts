@@ -189,7 +189,9 @@ export async function earnTransactionCashback(params: {
 }
 
 /**
- * Validates whether a user can spend a specific cashback amount on a merchant's transaction.
+ * Validates a Privé Credits spend against the user's plan rules (min balance,
+ * max per use, uses per rolling window) and the global rules, using the same
+ * database check that reserves the points.
  */
 export async function validateCashbackSpend(
   userId: string,
@@ -200,102 +202,20 @@ export async function validateCashbackSpend(
 ): Promise<CashbackValidationResult> {
   const client = db ?? supabase;
   try {
-    const startOfMonth = new Date();
-    startOfMonth.setDate(1);
-    startOfMonth.setHours(0, 0, 0, 0);
-
-    // Fetch all validation data concurrently
-    const [rulesResult, merchantResult, txsResult, balanceResult] = await Promise.all([
-      client
-        .from("cashback_rules")
-        .select("*")
-        .eq("is_active", true)
-        .maybeSingle(),
-      client
-        .from("users")
-        .select("cashback_enabled")
-        .eq("id", merchantUserId)
-        .maybeSingle(),
-      client
-        .from("cashback_transactions")
-        .select("amount")
-        .eq("user_id", userId)
-        .eq("type", "spend")
-        .gte("created_at", startOfMonth.toISOString()),
-      client
-        .from("cashback_lots")
-        .select("remaining_amount")
-        .eq("user_id", userId)
-        .gt("remaining_amount", 0.00)
-        .gt("expires_at", new Date().toISOString()),
-    ]);
-
-    const { data: rules, error: rulesErr } = rulesResult;
-    const { data: merchant, error: merchantErr } = merchantResult;
-    const { data: txs, error: txsErr } = txsResult;
-    const { data: balanceRows, error: balanceErr } = balanceResult;
-
-    if (rulesErr || !rules) {
-      return { valid: false, error: "Active cashback rules configuration not found" };
+    const { data, error } = await client.rpc("cashback_burn_check", {
+      p_user_id: userId,
+      p_amount: amount,
+      p_merchant_user_id: merchantUserId,
+      p_bill_amount: billAmount,
+    });
+    if (error) {
+      console.error("Error executing cashback_burn_check RPC:", error);
+      return { valid: false, error: "Could not check Privé Credits right now" };
     }
-
-    if (merchantErr || !merchant || !merchant.cashback_enabled) {
-      return { valid: false, error: "Merchant is not whitelisted or eligible for cashback" };
+    const row = Array.isArray(data) ? data[0] : data;
+    if (!row?.ok) {
+      return { valid: false, error: row?.message || "Privé Credits cannot be applied to this bill" };
     }
-
-    if (billAmount < Number(rules.min_purchase_amount)) {
-      return {
-        valid: false,
-        error: `Purchase amount ${billAmount} is below the minimum required amount of ${rules.min_purchase_amount} to use cashback`,
-      };
-    }
-
-    if (amount > Number(rules.max_use_per_transaction)) {
-      return {
-        valid: false,
-        error: `Requested cashback amount ${amount} exceeds single transaction limit of ${rules.max_use_per_transaction}`,
-      };
-    }
-
-    if (txsErr) {
-      console.error("Error fetching monthly transactions:", txsErr);
-      return { valid: false, error: "Database error checking monthly usage limits" };
-    }
-
-    const monthlyCount = txs.length;
-    const monthlyAmount = txs.reduce((sum: number, tx: any) => sum + Math.abs(Number(tx.amount)), 0);
-
-    if (monthlyCount >= rules.max_transactions_per_month) {
-      return {
-        valid: false,
-        error: `Monthly cashback transaction limit of ${rules.max_transactions_per_month} uses has been reached`,
-      };
-    }
-
-    if (monthlyAmount + amount > Number(rules.max_use_per_month)) {
-      return {
-        valid: false,
-        error: `Monthly cashback spend limit of ${rules.max_use_per_month} has been exceeded (already used ${monthlyAmount} this month)`,
-      };
-    }
-
-    if (balanceErr) {
-      console.error("Error fetching active balance rows:", balanceErr);
-      return { valid: false, error: "Database error checking active balance" };
-    }
-
-    const availableBalance = (balanceRows ?? []).reduce(
-      (sum: number, row: any) => sum + Number(row.remaining_amount),
-      0
-    );
-
-    if (availableBalance < amount) {
-      return {
-        valid: false,
-        error: `Insufficient cashback balance (requested ${amount}, available ${availableBalance})`,
-      };
-    }
-
     return { valid: true };
   } catch (err: any) {
     console.error("Unexpected error in validateCashbackSpend:", err);
