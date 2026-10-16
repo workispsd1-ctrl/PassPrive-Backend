@@ -1,4 +1,5 @@
 import https from "https";
+import { createHash, timingSafeEqual } from "crypto";
 
 export interface MiPSAuthentify {
   id_merchant: string;
@@ -52,35 +53,46 @@ export interface MiPSLoadPaymentZoneParams {
   language?: string;
 }
 
+function requiredEnv(name: string): string {
+  const value = process.env[name];
+  if (!value || !value.trim()) {
+    throw new Error(`MiPS is not configured: missing ${name}`);
+  }
+  return value.trim();
+}
+
 export function getMiPSConfig() {
-  const baseUrl = (process.env.MIPS_BASE_URL || "https://my-warzone-assemble.mips.global/api").replace(/\/+$/, "");
-  const authUser = process.env.MIPS_BASIC_USER || "the_merchant";
-  const authPass = process.env.MIPS_BASIC_PASS || "jug8D5dRa4";
+  const baseUrl = requiredEnv("MIPS_BASE_URL").replace(/\/+$/, "");
+  const authUser = requiredEnv("MIPS_BASIC_USER");
+  const authPass = requiredEnv("MIPS_BASIC_PASS");
   const basicAuthHeader = `Basic ${Buffer.from(`${authUser}:${authPass}`).toString("base64")}`;
 
   const authentify: MiPSAuthentify = {
-    id_merchant: process.env.MIPS_ID_MERCHANT || "X1iEfM7l85ewoMEPhzQvspHtFGNxd1WY",
-    id_entity: process.env.MIPS_ID_ENTITY || "fWdcK0mLrWXQYBoC48p2Yq25Fte15gXT",
-    id_operator: process.env.MIPS_ID_OPERATOR || "f5pGZdzeabaipA8UYpKHx9YG40J3fcst",
-    operator_password:
-      process.env.MIPS_OPERATOR_PASSWORD ||
-      "4Kx0B0cZAMXSgAeo16bDfmNu4OvbDKosR5Y3tx3zNDXoqA5ORHVVrvd5PApEozKGJRgZkf2kSUZc0MKhw28ew1mGNk3jp9pkvaAEUWfqsrEAd0O9oATxtqMCFnfsaf9zkdGTUTI2XMHksJ8X4LofShAhI8kaxHXzdCG68PxL1dKU4NUJZwL4srQm5GiYo73lk6vn8ooHcefP1BFrKfnP83HV2fNswdUsihICk3vOgf1WZFqk2KhgszEO0jIKbUEb",
+    id_merchant: requiredEnv("MIPS_ID_MERCHANT"),
+    id_entity: requiredEnv("MIPS_ID_ENTITY"),
+    id_operator: requiredEnv("MIPS_ID_OPERATOR"),
+    operator_password: requiredEnv("MIPS_OPERATOR_PASSWORD"),
   };
-
-  const hashSalt = process.env.MIPS_HASH_SALT || "yzDJRwmBNCgPVEpwM3BJgTJwCT3o6rnEKQCBQJWmYTkh0xmjNP";
-  const cipherKey =
-    process.env.MIPS_CIPHER_KEY ||
-    "Fzmjo9TWHVk4hbOALdJUUtc8662q593XO8MIimaykKv0udmAPLD42GUAI9Ze0RmshbKw1cDFO9Ft8UyNnUn21UtOOhQ60iyXwutB";
 
   return {
     baseUrl,
-    authUser,
-    authPass,
     basicAuthHeader,
     authentify,
-    hashSalt,
-    cipherKey,
+    hashSalt: requiredEnv("MIPS_HASH_SALT"),
+    cipherKey: requiredEnv("MIPS_CIPHER_KEY"),
   };
+}
+
+export function verifyMiPSChecksum(data: any, salt: string): boolean {
+  const amount = data?.amount;
+  const currency = data?.currency;
+  const status = data?.status;
+  const checksum = data?.checksum;
+  if (amount == null || currency == null || status == null || typeof checksum !== "string") return false;
+  const expected = createHash("sha256").update(`${amount}${currency}${status}${salt}`).digest("hex");
+  const a = Buffer.from(expected.toLowerCase());
+  const b = Buffer.from(checksum.trim().toLowerCase());
+  return a.length === b.length && timingSafeEqual(a, b);
 }
 
 function callMiPSApi(endpoint: string, payload: any): Promise<{ statusCode: number; data: any; rawBody: string }> {
@@ -141,7 +153,7 @@ export async function loadMiPSPaymentZone(params: MiPSLoadPaymentZoneParams) {
       amount: customerAmount,
     },
     request_mode: "simple",
-    touchpoint: "web",
+    touchpoint: "native_app",
     iframe_behavior: {
       height: 600,
       width: 400,
