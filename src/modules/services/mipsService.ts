@@ -153,7 +153,7 @@ export async function loadMiPSPaymentZone(params: MiPSLoadPaymentZoneParams) {
       amount: customerAmount,
     },
     request_mode: "simple",
-    touchpoint: "native_app",
+    touchpoint: process.env.MIPS_TOUCHPOINT?.trim() || "web",
     iframe_behavior: {
       height: 600,
       width: 400,
