@@ -22,6 +22,17 @@ const MiPSInitiateSchema = z.object({
 
 const roundMoney = (value: number) => Math.round(value * 100) / 100;
 
+const clip = (value: unknown, max = 600) => {
+  const text = typeof value === "string" ? value : JSON.stringify(value ?? null);
+  return text && text.length > max ? `${text.slice(0, max)}…` : text;
+};
+
+const MiPSClientEventSchema = z.object({
+  session_id: z.string().uuid(),
+  event: z.string().trim().min(1).max(60),
+  detail: z.any().optional(),
+});
+
 router.post("/initiate", async (req, res) => {
   const auth = await requireAuth(req, res);
   if (!auth) return;
@@ -107,6 +118,15 @@ router.post("/initiate", async (req, res) => {
       },
     });
 
+    console.log("[mips:initiate] session", session.id, {
+      user: auth.user.id,
+      merchant: restaurant_id || store_id,
+      total: totalAmount,
+      coins: coinsAmount,
+      customer: customerAmount,
+      redirect: custom_redirect_url || null,
+    });
+
     const mipsResponse = await loadMiPSPaymentZone({
       orderId: session.id,
       currency,
@@ -118,6 +138,7 @@ router.post("/initiate", async (req, res) => {
     });
 
     if (!mipsResponse.ok || !mipsResponse.paymentZoneData) {
+      console.error("[mips:initiate] load_payment_zone failed", session.id, mipsResponse.statusCode, clip(mipsResponse.rawBody));
       await updatePaymentSession(session.id, {
         status: "VERIFIED_FAILED",
         gateway_result_description: "Failed to initialize MiPS payment zone",
@@ -129,6 +150,7 @@ router.post("/initiate", async (req, res) => {
       });
     }
 
+    console.log("[mips:initiate] zone ready", session.id, mipsResponse.statusCode);
     await updatePaymentSession(session.id, {
       status: "PENDING",
       gateway_payload: {
@@ -166,40 +188,82 @@ function amountMatches(reported: unknown, session: any): boolean {
   return Math.round(value) === minor || Math.abs(value - major) < 0.005;
 }
 
+router.post("/client-event", async (req, res) => {
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+  const parsed = MiPSClientEventSchema.safeParse(req.body);
+  if (!parsed.success) return res.status(400).json({ ok: false });
+  const { session_id, event, detail } = parsed.data;
+  try {
+    const session = await getPaymentSessionById(session_id);
+    if (!session || session.user_id !== auth.user.id || session.payment_provider !== "MIPS") {
+      return res.status(404).json({ ok: false });
+    }
+    console.log("[mips:client]", session_id, event, session.status, clip(detail));
+    const events = Array.isArray(session.gateway_payload?.client_events) ? session.gateway_payload.client_events : [];
+    await updatePaymentSession(session_id, {
+      gateway_payload: {
+        ...(session.gateway_payload ?? {}),
+        client_events: [...events, { event, detail: detail ?? null, at: new Date().toISOString() }].slice(-20),
+      },
+    });
+    return res.json({ ok: true });
+  } catch (err: any) {
+    console.error("[mips:client] error", session_id, event, err?.message || err);
+    return res.status(500).json({ ok: false });
+  }
+});
+
 router.all("/imn", async (req, res) => {
   try {
     const cryptedCallback = req.body?.crypted_callback || req.query?.crypted_callback;
     const idOrder = String(req.query?.id_order || req.body?.id_order || "");
 
+    console.log("[mips:imn] received", {
+      method: req.method,
+      ip: req.headers["x-forwarded-for"] || req.ip,
+      contentType: req.headers["content-type"] || null,
+      queryKeys: Object.keys(req.query || {}),
+      bodyKeys: Object.keys(req.body || {}),
+      idOrder: idOrder || null,
+      hasCallback: !!cryptedCallback,
+    });
+
     if (!cryptedCallback) {
+      console.error("[mips:imn] missing crypted_callback", clip(req.body));
       return res.status(400).send("Missing crypted_callback parameter");
     }
 
     const decrypted = await decryptMiPSIMN(String(cryptedCallback));
     const data = decrypted.data && typeof decrypted.data === "object" ? decrypted.data : null;
     if (!decrypted.ok || !data) {
-      console.error("[mipsPayments] IMN decryption failed:", decrypted.statusCode);
+      console.error("[mips:imn] decrypt failed", idOrder, decrypted.statusCode, clip(decrypted.rawBody));
       return res.status(400).send("Invalid Sender.");
     }
 
+    const { checksum: _checksum, ...visible } = data as any;
+    console.log("[mips:imn] decrypted", idOrder, clip(visible));
+
     const config = getMiPSConfig();
     if (!verifyMiPSChecksum(data, config.hashSalt)) {
-      console.error("[mipsPayments] IMN checksum mismatch for order", idOrder);
+      console.error("[mips:imn] checksum mismatch", idOrder, { amount: data.amount, currency: data.currency, status: data.status });
       return res.status(400).send("Invalid Sender.");
     }
 
     const orderId = idOrder || String(data?.id_order || data?.order?.id_order || "");
     if (!orderId) {
+      console.error("[mips:imn] no order reference", clip(visible));
       return res.status(400).send("Missing order reference");
     }
 
     const session = await getPaymentSessionById(orderId);
     if (!session || session.payment_provider !== "MIPS") {
-      console.error("[mipsPayments] Session not found for IMN:", orderId);
+      console.error("[mips:imn] session not found", orderId);
       return res.status(404).send("Payment session not found");
     }
 
     const status = String(data.status || "").toLowerCase();
+    console.log("[mips:imn] session", session.id, "current", session.status, "gateway", status);
 
     if (status !== "success") {
       await updatePaymentSessionIfStatusIn({
@@ -212,6 +276,7 @@ router.all("/imn", async (req, res) => {
           gateway_payload: { ...(session.gateway_payload ?? {}), imn_decrypted: data },
         },
       });
+      console.warn("[mips:imn] not successful", session.id, data.status);
       return res.status(200).send("fail");
     }
 
@@ -242,8 +307,10 @@ router.all("/imn", async (req, res) => {
     });
 
     if (!claimed) {
+      console.log("[mips:imn] already processed", session.id);
       return res.status(200).send("success");
     }
+    console.log("[mips:imn] verified", session.id, session.amount_major, session.currency_code);
 
     const paidAmount = Number(session.amount_major);
     if (session.user_id && (session.restaurant_id || session.store_id) && paidAmount > 0) {
@@ -265,7 +332,7 @@ router.all("/imn", async (req, res) => {
 
     return res.status(200).send("success");
   } catch (err: any) {
-    console.error("[mipsPayments] IMN webhook error:", err);
+    console.error("[mips:imn] error", err?.message || err, err?.stack);
     return res.status(500).send("Internal webhook error");
   }
 });
