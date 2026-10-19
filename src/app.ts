@@ -94,8 +94,27 @@ const corsOptions: cors.CorsOptions = {
 
 app.use(cors(corsOptions));
 app.options(/.*/, cors(corsOptions));
+app.use("/api/payments/mips/imn", (req, _res, next) => {
+  console.log(
+    "[mips:imn:hit]",
+    JSON.stringify({
+      method: req.method,
+      type: req.headers["content-type"] ?? null,
+      length: req.headers["content-length"] ?? null,
+      ip: req.ip,
+      at: new Date().toISOString(),
+    })
+  );
+  next();
+});
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
+app.use((err: any, req: express.Request, _res: express.Response, next: express.NextFunction) => {
+  if (req.originalUrl.startsWith("/api/payments/mips/imn")) {
+    console.error("[mips:imn:parse-error]", err?.type || err?.message || err);
+  }
+  next(err);
+});
 app.use(rateLimitMiddleware);
 app.use(requestTelemetryMiddleware);
 
