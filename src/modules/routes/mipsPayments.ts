@@ -255,7 +255,7 @@ router.all("/imn", async (req, res) => {
     console.log("[mips:imn] decrypted", idOrder, clip(visible));
 
     const config = getMiPSConfig();
-    if (typeof data.checksum === "string" && !verifyMiPSChecksum(data, config.hashSalt)) {
+    if (!verifyMiPSChecksum(data, config.hashSalt)) {
       console.error("[mips:imn] checksum mismatch", idOrder, { amount: data.amount, currency: data.currency, status: data.status });
       return res.status(400).send("Invalid Sender.");
     }

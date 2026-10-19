@@ -89,7 +89,18 @@ export function verifyMiPSChecksum(data: any, salt: string): boolean {
   const status = data?.status;
   const checksum = data?.checksum;
   if (amount == null || currency == null || status == null || typeof checksum !== "string") return false;
-  const expected = createHash("sha256").update(`${amount}${currency}${status}${salt}`).digest("hex");
+  const signed = [
+    amount,
+    currency,
+    status,
+    data?.id_order,
+    data?.transaction_id,
+    data?.type,
+    data?.payment_method,
+  ]
+    .map((value) => (value == null ? "" : String(value)))
+    .join("");
+  const expected = createHash("sha256").update(`${signed}${salt}`).digest("hex");
   const a = Buffer.from(expected.toLowerCase());
   const b = Buffer.from(checksum.trim().toLowerCase());
   return a.length === b.length && timingSafeEqual(a, b);
