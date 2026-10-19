@@ -188,6 +188,13 @@ function amountMatches(reported: unknown, session: any): boolean {
   return Math.round(value) === minor || Math.abs(value - major) < 0.005;
 }
 
+const RETURN_PAGE = `<!DOCTYPE html><html><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>PassPriv\u00e9</title><style>body{margin:0;display:flex;align-items:center;justify-content:center;min-height:100vh;font-family:-apple-system,Roboto,sans-serif;background:#fff;color:#1C1007;text-align:center}p{margin:0 24px;font-size:16px}</style></head><body><p>Payment received. Returning to the app\u2026</p><script>try{var m={type:"PP_RETURN",url:location.href};if(window.ReactNativeWebView)window.ReactNativeWebView.postMessage(JSON.stringify(m));if(window.parent&&window.parent!==window)window.parent.postMessage(m,"*");}catch(e){}</script></body></html>`;
+
+router.all("/return", (_req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.type("html").send(RETURN_PAGE);
+});
+
 router.post("/client-event", async (req, res) => {
   const auth = await requireAuth(req, res);
   if (!auth) return;
