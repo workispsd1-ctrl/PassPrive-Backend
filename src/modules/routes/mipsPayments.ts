@@ -242,7 +242,10 @@ router.all("/imn", async (req, res) => {
     }
 
     const decrypted = await decryptMiPSIMN(String(cryptedCallback));
-    const data = decrypted.data && typeof decrypted.data === "object" ? decrypted.data : null;
+    const data =
+      decrypted.data && typeof decrypted.data === "object" && decrypted.data.operation_status !== "error"
+        ? decrypted.data
+        : null;
     if (!decrypted.ok || !data) {
       console.error("[mips:imn] decrypt failed", idOrder, decrypted.statusCode, clip(decrypted.rawBody));
       return res.status(400).send("Invalid Sender.");
@@ -252,15 +255,19 @@ router.all("/imn", async (req, res) => {
     console.log("[mips:imn] decrypted", idOrder, clip(visible));
 
     const config = getMiPSConfig();
-    if (!verifyMiPSChecksum(data, config.hashSalt)) {
+    if (typeof data.checksum === "string" && !verifyMiPSChecksum(data, config.hashSalt)) {
       console.error("[mips:imn] checksum mismatch", idOrder, { amount: data.amount, currency: data.currency, status: data.status });
       return res.status(400).send("Invalid Sender.");
     }
 
-    const orderId = idOrder || String(data?.id_order || data?.order?.id_order || "");
+    const orderId = String(data?.id_order || data?.merchant_id_order || data?.order?.id_order || "");
     if (!orderId) {
       console.error("[mips:imn] no order reference", clip(visible));
       return res.status(400).send("Missing order reference");
+    }
+    if (idOrder && idOrder !== orderId) {
+      console.error("[mips:imn] order mismatch", { query: idOrder, decrypted: orderId });
+      return res.status(400).send("Invalid Sender.");
     }
 
     const session = await getPaymentSessionById(orderId);
