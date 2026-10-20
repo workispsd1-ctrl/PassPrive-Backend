@@ -1,6 +1,6 @@
 import express, { Request, Response } from "express";
 import crypto from "crypto";
-import supabase, { supabaseServiceRole as supabaseService, supabaseAuthed } from "../../database/supabase";
+import supabase, { supabaseServiceRole as supabaseService, supabaseAuthed, createIsolatedClient } from "../../database/supabase";
 import { EmtelProvider } from "../services/smsService";
 import { OtpService } from "../services/otpService";
 
@@ -120,7 +120,7 @@ async function mintSession(email: string) {
   let sessionToken: string | null = link?.properties?.hashed_token ?? null;
   let session: { access_token: string; refresh_token: string } | null = null;
   if (sessionToken) {
-    const { data: verified, error: exchangeError } = await supabase.auth.verifyOtp({
+    const { data: verified, error: exchangeError } = await createIsolatedClient().auth.verifyOtp({
       token_hash: sessionToken,
       type: "magiclink",
     });
@@ -313,6 +313,12 @@ router.post("/send-otp", async (req: Request, res: Response) => {
     }
   } catch (err: any) {
     console.error(`[OTP] Error in /send-otp for ${phone}:`, err);
+    if (/^(Database error|Failed to save OTP)/.test(err?.message || "")) {
+      return res.status(503).json({
+        success: false,
+        error: "Verification service is temporarily unavailable. Please try again in a few minutes.",
+      });
+    }
     return res.status(400).json({ success: false, error: err.message || "Failed to send OTP." });
   }
 });

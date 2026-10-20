@@ -19,6 +19,12 @@ const supabase = createClient(
 
 export const supabaseServiceRole = supabase;
 
+export function createIsolatedClient() {
+  return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
+}
+
 export function getSupabaseAuthed(token: string) {
   return createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
     auth: { persistSession: false, autoRefreshToken: false },
