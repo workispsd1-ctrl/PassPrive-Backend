@@ -18,6 +18,11 @@ const MiPSInitiateSchema = z.object({
   currency: z.string().trim().default("MUR"),
   custom_redirect_url: z.string().trim().optional(),
   bill_id: z.string().uuid().optional(),
+  order_items: z
+    .array(z.object({ id: z.string().min(1).max(100), qty: z.coerce.number().int().min(1).max(50) }))
+    .min(1)
+    .max(50)
+    .optional(),
 });
 
 const roundMoney = (value: number) => Math.round(value * 100) / 100;
@@ -26,6 +31,66 @@ const clip = (value: unknown, max = 600) => {
   const text = typeof value === "string" ? value : JSON.stringify(value ?? null);
   return text && text.length > max ? `${text.slice(0, max)}…` : text;
 };
+
+async function priceOrderItems(restaurantId: string, requested: { id: string; qty: number }[]) {
+  const { data, error } = await supabase
+    .from("restaurants")
+    .select("order_collect_enabled, menu_json")
+    .eq("id", restaurantId)
+    .maybeSingle();
+  if (error) throw error;
+  if (!data?.order_collect_enabled) return null;
+  const menu = new Map<string, { name: string; price: number }>();
+  for (const section of Array.isArray(data.menu_json?.sections) ? data.menu_json.sections : []) {
+    for (const item of Array.isArray(section?.items) ? section.items : []) {
+      const price = Number(item?.price);
+      if (item?.id != null && item.is_available !== false && price > 0) {
+        menu.set(String(item.id), { name: String(item.name || "").trim(), price });
+      }
+    }
+  }
+  const items = [];
+  for (const line of requested) {
+    const found = menu.get(line.id);
+    if (!found) return null;
+    items.push({ id: line.id, name: found.name, price: found.price, qty: line.qty });
+  }
+  const subtotal = roundMoney(items.reduce((sum, it) => sum + it.price * it.qty, 0));
+  return { items, subtotal };
+}
+
+async function createPaidOrder(session: any) {
+  const order = session.gateway_payload?.order_payload;
+  if (!order || !session.restaurant_id) return;
+  const { data: existing } = await supabase
+    .from("restaurant_orders")
+    .select("id")
+    .eq("metadata->>payment_session_id", session.id)
+    .maybeSingle();
+  if (existing) return;
+  const { data: customer } = await supabase
+    .from("users")
+    .select("full_name, phone")
+    .eq("id", session.user_id)
+    .maybeSingle();
+  const day = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const { error } = await supabase.from("restaurant_orders").insert({
+    restaurant_id: session.restaurant_id,
+    order_number: `PP-${day}-${randomUUID().slice(0, 6).toUpperCase()}`,
+    customer_name: customer?.full_name || "PassPrivé customer",
+    customer_phone: customer?.phone || null,
+    items: order.items,
+    subtotal: order.subtotal,
+    total_amount: Number(session.original_amount ?? order.subtotal),
+    discount_amount: Number(session.discount_amount ?? 0),
+    payment_method: "ONLINE",
+    payment_status: "PAID",
+    order_status: "NEW",
+    pickup_code: String(Math.floor(1000 + Math.random() * 9000)),
+    metadata: { payment_session_id: session.id, source: "order_collect", user_id: session.user_id },
+  });
+  if (error) throw error;
+}
 
 const MiPSClientEventSchema = z.object({
   session_id: z.string().uuid(),
@@ -42,7 +107,7 @@ router.post("/initiate", async (req, res) => {
     return res.status(400).json({ ok: false, error: "Invalid payload", details: parsed.error.flatten() });
   }
 
-  const { payment_context, restaurant_id, store_id, total_amount, currency, custom_redirect_url, bill_id } = parsed.data;
+  const { payment_context, restaurant_id, store_id, total_amount, currency, custom_redirect_url, bill_id, order_items } = parsed.data;
 
   if (!!restaurant_id === !!store_id) {
     return res.status(400).json({ ok: false, error: "Provide exactly one of restaurant_id or store_id" });
@@ -60,6 +125,19 @@ router.post("/initiate", async (req, res) => {
     }
 
     const totalAmount = roundMoney(total_amount);
+    let orderPayload: { items: any[]; subtotal: number } | null = null;
+    if (order_items) {
+      if (!restaurant_id) {
+        return res.status(400).json({ ok: false, error: "ORDER_NOT_SUPPORTED", message: "Orders are only available for restaurants" });
+      }
+      orderPayload = await priceOrderItems(restaurant_id, order_items);
+      if (!orderPayload) {
+        return res.status(400).json({ ok: false, error: "ORDER_ITEMS_INVALID", message: "Some items are no longer available. Please refresh the menu." });
+      }
+      if (orderPayload.subtotal !== totalAmount) {
+        return res.status(400).json({ ok: false, error: "ORDER_TOTAL_MISMATCH", message: "Menu prices have changed. Please review your order." });
+      }
+    }
     let coinsAmount = roundMoney(parsed.data.coins_amount);
     if (coinsAmount > 0) {
       const merchantUserId = merchant.owner_user_id as string | null;
@@ -104,6 +182,7 @@ router.post("/initiate", async (req, res) => {
         mips_redemption_id: redemptionId,
         coins_redeemed: coinsAmount,
         bill_id,
+        ...(orderPayload ? { order_payload: orderPayload } : {}),
         ...(coinsAmount > 0
           ? {
               context_payload: {
@@ -325,6 +404,12 @@ router.all("/imn", async (req, res) => {
       return res.status(200).send("success");
     }
     console.log("[mips:imn] verified", session.id, session.amount_major, session.currency_code);
+
+    try {
+      await createPaidOrder(claimed);
+    } catch (orderErr: any) {
+      console.error("[mipsPayments] Error creating order:", orderErr?.message || orderErr);
+    }
 
     const paidAmount = Number(session.amount_major);
     if (session.user_id && (session.restaurant_id || session.store_id) && paidAmount > 0) {
