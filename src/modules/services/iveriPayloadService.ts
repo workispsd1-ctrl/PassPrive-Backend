@@ -115,8 +115,9 @@ export function buildIveriIntegrityChecks(params: {
     mismatches.push("currency mismatch");
   }
 
-  const payloadApplicationId = String(params.payload.canonical.merchant_application_id ?? "").trim();
-  if (payloadApplicationId && payloadApplicationId !== String(params.session.merchant_application_id ?? "").trim()) {
+  const normalizeGuid = (value: unknown) => String(value ?? "").trim().replace(/^\{|\}$/g, "").toLowerCase();
+  const payloadApplicationId = normalizeGuid(params.payload.canonical.merchant_application_id);
+  if (payloadApplicationId && payloadApplicationId !== normalizeGuid(params.session.merchant_application_id)) {
     mismatches.push("merchant application id mismatch");
   }
 
