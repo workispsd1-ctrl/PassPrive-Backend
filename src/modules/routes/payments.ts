@@ -247,7 +247,7 @@ function buildPublicMenuFrontendRedirectUrl(params: {
   const baseUrl =
     process.env.PUBLIC_MENU_FRONTEND_RETURN_URL?.trim() ||
     process.env.PUBLIC_MENU_FRONTEND_URL?.trim() ||
-    "https://passprive-partner.vercel.app/public-menu";
+    "https://partner.passprive.com/public-menu";
   const url = new URL(baseUrl);
   if (params.restaurantId) url.searchParams.set("id", params.restaurantId);
   if (params.tableNo && Number.isFinite(params.tableNo)) url.searchParams.set("table", String(params.tableNo));
@@ -1442,7 +1442,7 @@ router.post("/iveri/verify", async (req, res) => {
     if (!session) {
       return res.status(404).json({ error: "Payment session not found" });
     }
-    if (session.user_id !== customer.userId && !req.headers["x-bypass-user-id"]) {
+    if (session.user_id !== customer.userId) {
       return res.status(403).json({ error: "Access denied" });
     }
 
@@ -1787,19 +1787,7 @@ router.post("/iveri/finalize-membership", async (req, res) => {
       userId: auth.user.id,
     });
 
-    const updated = await updatePaymentSessionIfStatusIn({
-      sessionId: session.id,
-      allowedCurrentStatuses: ["VERIFIED_SUCCESS"],
-      updates: {
-        status: "FINALIZED",
-        context_reference_id: auth.user.id,
-        gateway_payload: {
-          ...(session.gateway_payload ?? {}),
-          finalized_membership: result.membership,
-        },
-      },
-    });
-    const effectiveSession = updated ?? (await getPaymentSessionById(session.id));
+    const effectiveSession = await getPaymentSessionById(session.id);
 
     return res.json({
       session_id: session.id,
@@ -1881,19 +1869,7 @@ router.post("/iveri/membership/success", async (req, res) => {
       userId: auth.user.id,
     });
 
-    const updated = await updatePaymentSessionIfStatusIn({
-      sessionId: session.id,
-      allowedCurrentStatuses: ["VERIFIED_SUCCESS"],
-      updates: {
-        status: "FINALIZED",
-        context_reference_id: auth.user.id,
-        gateway_payload: {
-          ...(session.gateway_payload ?? {}),
-          finalized_membership: result.membership,
-        },
-      },
-    });
-    const effectiveSession = updated ?? (await getPaymentSessionById(session.id));
+    const effectiveSession = await getPaymentSessionById(session.id);
 
     return res.json({
       session_id: session.id,

@@ -124,6 +124,7 @@ async function finalizePublicMenuSessionIfVerified(session: any) {
       order_items: snapshot.items,
       order_details: {
         source: "public_menu",
+        qr_pending: true,
         payment_session_id: session.id,
         merchant_trace: session.merchant_trace,
         gateway: {
@@ -156,6 +157,25 @@ async function finalizePublicMenuSessionIfVerified(session: any) {
     });
     throw bookingError ?? new Error("Failed to create table booking");
   }
+  const { error: printError } = await supabaseServiceRole.from("print_jobs").insert({
+    restaurant_id: session.restaurant_id,
+    order_id: booking.id,
+    kind: "order",
+    source: "QR · Paid",
+    needs_ack: true,
+    payload: {
+      table_no: snapshot.table_no,
+      guests: null,
+      notes: snapshot.notes ?? null,
+      items: (snapshot.items as any[])
+        .map((it) => ({ name: String(it?.name ?? ""), qty: Number(it?.qty ?? it?.quantity ?? 0), mods: [] }))
+        .filter((it) => it.name && it.qty > 0),
+    },
+  });
+  if (printError) {
+    logWithCorrelation("error", "public menu print job failed", { table_booking_id: booking.id, error: printError.message });
+  }
+
   logWithCorrelation("info", "public menu finalize insert success", {
     payment_session_id: session.id,
     tracking_id: session.tracking_id,

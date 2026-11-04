@@ -379,6 +379,10 @@ function generateBookingCode() {
   return `PP-${dateSegment}-${randomSegment}`;
 }
 
+function isRequestBooking(restaurant: any) {
+  return String(restaurant?.booking_service_type ?? "").trim().toLowerCase() === "request";
+}
+
 function deriveClientStatus(booking: any) {
   return booking?.status;
 }
@@ -690,7 +694,10 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
             payment_required: true,
             cover_charge_required: true,
             cover_charge_amount: evaluation.verifiedCoverChargeAmount,
-            status: existingBooking.status === "pending" ? "confirmed" : existingBooking.status,
+            status:
+              existingBooking.status === "pending" && !isRequestBooking(evaluation.restaurant)
+                ? "confirmed"
+                : existingBooking.status,
             updated_at: new Date().toISOString(),
           })
           .eq("id", existingBooking.id)
@@ -763,7 +770,7 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
     booking_time: evaluation.bookingTime,
     duration_minutes: parseNumericSignal(evaluation.restaurant.avg_duration_minutes) || 90,
     party_size: evaluation.partySize,
-    status: "confirmed",
+    status: isRequestBooking(evaluation.restaurant) ? "pending" : "confirmed",
     source: "app",
     special_request: body.notes ?? null,
     booking_code: bookingCode,

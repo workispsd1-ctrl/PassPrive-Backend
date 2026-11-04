@@ -34,55 +34,6 @@ function normalizeText(value: any) {
   return String(value ?? "").trim().toLowerCase();
 }
 
-function parseMaybeDate(value: any) {
-  if (!value) return null;
-  const parsed = new Date(String(value));
-  if (Number.isNaN(parsed.getTime())) return null;
-  return parsed;
-}
-
-function parseMinutesFromTimeString(value: string) {
-  const match = /^(\d{1,2}):(\d{2})$/.exec(value.trim());
-  if (!match) return null;
-  const hours = Number(match[1]);
-  const minutes = Number(match[2]);
-  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
-  if (hours < 0 || hours > 23 || minutes < 0 || minutes > 59) return null;
-  return hours * 60 + minutes;
-}
-
-function isPromoTimeWindowValid(validTime: any, now: Date) {
-  if (!validTime) return true;
-
-  const raw = String(validTime).trim();
-  if (!raw) return true;
-
-  const currentMinutes = now.getHours() * 60 + now.getMinutes();
-  const rangeParts = raw.split("-").map((part) => part.trim());
-  if (rangeParts.length === 2) {
-    const start = parseMinutesFromTimeString(rangeParts[0]);
-    const end = parseMinutesFromTimeString(rangeParts[1]);
-    if (start === null || end === null) return true;
-
-    if (start <= end) {
-      return currentMinutes >= start && currentMinutes <= end;
-    }
-    // Overnight window e.g. 22:00-02:00
-    return currentMinutes >= start || currentMinutes <= end;
-  }
-
-  const latest = parseMinutesFromTimeString(raw);
-  if (latest === null) return true;
-  return currentMinutes <= latest;
-}
-
-function isPromoDateValid(validDate: any, now: Date) {
-  if (!validDate) return true;
-  const parsed = parseMaybeDate(validDate);
-  if (!parsed) return true;
-  return now.getTime() <= parsed.getTime();
-}
-
 export function resolveMembershipDurationDays(typeValue: any) {
   const normalized = normalizeText(typeValue).replace(/\s+/g, "");
   const mapping: Record<string, number> = {
@@ -113,39 +64,11 @@ export function resolveMembershipDurationDays(typeValue: any) {
   return 30;
 }
 
+const TIER_RANK: Record<string, number> = { free: 0, plus: 1, black: 2 };
+
 function resolveMembershipTier(planName: any) {
   const value = String(planName ?? "").trim();
   return value || "none";
-}
-
-function normalizeDiscountSource(value: any): "NONE" | "BANK" | "PLATFORM" | "PARTNER" {
-  const normalized = normalizeText(value);
-  if (normalized === "bank") return "BANK";
-  if (normalized === "partner" || normalized === "merchant") return "PARTNER";
-  if (normalized === "platform") return "PLATFORM";
-  return "NONE";
-}
-
-function toMoney(value: any, fallback = 0) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed)) return fallback;
-  return roundMoney(parsed);
-}
-
-function isPromoEligibleForPlan(plans: any, plan: { id: string; plan_name: string; price_id?: string | null; product_id?: string | null }) {
-  if (!Array.isArray(plans) || plans.length === 0) return false;
-  const normalizedCandidates = new Set(
-    plans.map((item) => normalizeText(item)).filter((item) => item.length > 0)
-  );
-
-  const checks = [
-    normalizeText(plan.id),
-    normalizeText(plan.plan_name),
-    normalizeText(plan.price_id ?? ""),
-    normalizeText(plan.product_id ?? ""),
-  ].filter((item) => item.length > 0);
-
-  return checks.some((item) => normalizedCandidates.has(item));
 }
 
 export interface MembershipPaymentContext {
@@ -187,31 +110,49 @@ export async function buildMembershipPaymentContext(params: {
   const db = params.db ?? supabase;
   const promoCode = String(params.payload.promo_code ?? "").trim();
 
-  // Load both subscription plan and promo code in parallel
-  const [planResult, promoResult] = await Promise.all([
-    db
-      .from("subscription")
-      .select("id, plan_name, amount, type, product_id, price_id, sort_order")
-      .eq("id", params.payload.plan_id)
-      .eq("is_active", true)
-      .maybeSingle(),
-    promoCode
-      ? db
-          .from("promos")
-          .select("*")
-          .eq("code", promoCode)
-          .maybeSingle()
-      : Promise.resolve({ data: null, error: null }),
-  ]);
+  if (promoCode) {
+    throw new MembershipPaymentValidationError(400, "Promo codes are not available for memberships yet");
+  }
 
-  const { data: planRow, error: planError } = planResult;
-  const { data: promoRow, error: promoError } = promoResult;
+  const { data: planRow, error: planError } = await db
+    .from("subscription")
+    .select("id, plan_name, amount, type, tier, product_id, price_id, sort_order")
+    .eq("id", params.payload.plan_id)
+    .eq("is_active", true)
+    .maybeSingle();
 
   if (planError) {
     throw new MembershipPaymentValidationError(500, planError.message);
   }
   if (!planRow) {
     throw new MembershipPaymentValidationError(404, "Invalid membership plan");
+  }
+
+  const { data: currentTier, error: tierError } = await db.rpc("user_tier_slug", { p_user_id: params.userId });
+  if (tierError) {
+    throw new MembershipPaymentValidationError(500, tierError.message);
+  }
+  const tierRank = (tier: any) => TIER_RANK[normalizeText(tier)] ?? 0;
+  const currentRank = tierRank(currentTier);
+  const targetRank = tierRank(planRow.tier);
+  if (targetRank === 0) {
+    throw new MembershipPaymentValidationError(400, "This plan cannot be purchased");
+  }
+  if (currentRank > targetRank) {
+    throw new MembershipPaymentValidationError(409, "You already have a higher membership. You can switch when it ends.");
+  }
+  if (currentRank > 0 && currentRank === targetRank) {
+    const { data: member, error: memberError } = await db
+      .from("users")
+      .select("membership_expiry")
+      .eq("id", params.userId)
+      .maybeSingle();
+    if (memberError) {
+      throw new MembershipPaymentValidationError(500, memberError.message);
+    }
+    if (!member?.membership_expiry) {
+      throw new MembershipPaymentValidationError(409, "Your membership has no end date, so it does not need renewing.");
+    }
   }
 
   const baseAmount = roundMoney(Number(planRow.amount ?? 0));
@@ -235,82 +176,13 @@ export async function buildMembershipPaymentContext(params: {
     throw new MembershipPaymentValidationError(400, "Provided product_id does not match selected plan");
   }
 
-  let promo: MembershipPaymentContext["promo"] = null;
-  let discountAmount = 0;
-  let discountSource: "NONE" | "BANK" | "PLATFORM" | "PARTNER" = "NONE";
-  let discountName: string | null = null;
-  let discountMeta: Record<string, any> = {};
-
-  if (promoCode) {
-    if (promoError) {
-      throw new MembershipPaymentValidationError(500, promoError.message);
-    }
-    if (!promoRow) {
-      throw new MembershipPaymentValidationError(400, "Invalid promo code");
-    }
-
-    if (!isPromoEligibleForPlan(promoRow.plans, {
-      id: String(planRow.id),
-      plan_name: String(planRow.plan_name ?? ""),
-      price_id: planRow.price_id ?? null,
-      product_id: planRow.product_id ?? null,
-    })) {
-      throw new MembershipPaymentValidationError(400, "Promo code is not applicable to selected plan");
-    }
-
-    const now = new Date();
-    if (!isPromoDateValid(promoRow.valid_date, now) || !isPromoTimeWindowValid(promoRow.valid_time, now)) {
-      throw new MembershipPaymentValidationError(400, "Promo code has expired");
-    }
-
-    const discountPercent = Number(promoRow.discount ?? 0);
-    if (!Number.isFinite(discountPercent) || discountPercent < 0 || discountPercent > 100) {
-      throw new MembershipPaymentValidationError(400, "Promo discount is invalid");
-    }
-
-    discountAmount = roundMoney((baseAmount * discountPercent) / 100);
-    promo = {
-      code: String(promoRow.code ?? promoCode),
-      discount_percent: discountPercent,
-      valid_date: promoRow.valid_date ? String(promoRow.valid_date) : null,
-      valid_time: promoRow.valid_time ? String(promoRow.valid_time) : null,
-      metadata:
-        typeof promoRow.metadata === "object" && promoRow.metadata !== null
-          ? (promoRow.metadata as Record<string, any>)
-          : {},
-    };
-    discountSource = normalizeDiscountSource(
-      promoRow.discount_source ??
-        promoRow.source_type ??
-        promoRow.sponsor_type ??
-        promoRow.metadata?.discount_source ??
-        promoRow.metadata?.source_type ??
-        "PLATFORM"
-    );
-    discountName = String(
-      promoRow.name ??
-        promoRow.title ??
-        promoRow.promo_name ??
-        promoRow.code ??
-        "Membership Promo"
-    );
-    discountMeta = {
-      promo_id: promoRow.id ?? null,
-      promo_code: promo?.code ?? promoCode,
-      promo_discount_percent: discountPercent,
-      source_hint:
-        promoRow.source_type ?? promoRow.sponsor_type ?? promoRow.metadata?.source_type ?? null,
-    };
-  }
-
-  const finalAmount = roundMoney(Math.max(baseAmount - discountAmount, 0));
+  const discountAmount = 0;
+  const finalAmount = baseAmount;
   if (finalAmount <= 0) {
     throw new MembershipPaymentValidationError(400, "Membership payable amount must be greater than zero");
   }
 
-  const durationDays =
-    params.payload.validity_days ??
-    resolveMembershipDurationDays(params.payload.subscription_type ?? planRow.type);
+  const durationDays = resolveMembershipDurationDays(planRow.type);
   const membershipTier = resolveMembershipTier(planRow.plan_name);
 
   return {
@@ -322,7 +194,7 @@ export async function buildMembershipPaymentContext(params: {
       product_id: planRow.product_id ? String(planRow.product_id) : null,
       price_id: planRow.price_id ? String(planRow.price_id) : null,
     },
-    promo,
+    promo: null,
     originalAmount: baseAmount,
     discountAmount,
     finalAmount,
@@ -340,9 +212,9 @@ export async function buildMembershipPaymentContext(params: {
         base_amount: baseAmount,
         final_amount: finalAmount,
         discount_amount: discountAmount,
-        promo_code: promo?.code ?? null,
-        promo_discount_percent: promo?.discount_percent ?? null,
-        validity_type: String(planRow.type ?? params.payload.subscription_type ?? ""),
+        promo_code: null,
+        promo_discount_percent: null,
+        validity_type: String(planRow.type ?? ""),
         validity_days: durationDays,
       },
       payload_echo: {
@@ -351,18 +223,12 @@ export async function buildMembershipPaymentContext(params: {
       },
     },
     discountDetails: {
-      source: discountSource,
-      code: promo?.code ?? null,
-      name: discountName,
-      meta: discountMeta,
+      source: "NONE",
+      code: null,
+      name: null,
+      meta: {},
     },
   } satisfies MembershipPaymentContext;
-}
-
-function addDays(from: Date, days: number) {
-  const date = new Date(from.getTime());
-  date.setUTCDate(date.getUTCDate() + days);
-  return date;
 }
 
 export async function finalizeMembershipPayment(params: {
@@ -371,101 +237,19 @@ export async function finalizeMembershipPayment(params: {
   db?: any;
 }) {
   const db = params.db ?? supabase;
-  const existingFinalize = params.session.gateway_payload?.finalized_membership;
-  if (existingFinalize?.applied === true) {
-    return {
-      duplicate: true,
-      membership: existingFinalize,
-    };
+  if (params.session?.user_id && params.session.user_id !== params.userId) {
+    throw new MembershipPaymentValidationError(403, "Access denied");
   }
 
-  const purchaseMeta =
-    params.session.gateway_payload?.membership_purchase ??
-    params.session.gateway_payload?.context_payload?.membership_payload ??
-    params.session.gateway_payload?.context_payload?.membership_purchase ??
-    null;
-
-  if (!purchaseMeta || typeof purchaseMeta !== "object") {
-    throw new MembershipPaymentValidationError(500, "Membership metadata is missing in payment session");
-  }
-
-  const planId = String(
-    purchaseMeta.plan_id ??
-      params.session.gateway_payload?.context_payload?.membership_payload?.plan_id ??
-      ""
-  ).trim();
-  if (!planId) {
-    throw new MembershipPaymentValidationError(500, "Membership plan_id is missing in payment metadata");
-  }
-
-  const { data: planRow, error: planError } = await db
-    .from("subscription")
-    .select("id, plan_name, type")
-    .eq("id", planId)
-    .maybeSingle();
-  if (planError) {
-    throw new MembershipPaymentValidationError(500, planError.message);
-  }
-  if (!planRow) {
-    throw new MembershipPaymentValidationError(404, "Membership plan not found for finalization");
-  }
-
-  const now = new Date();
-  const durationDays = resolveMembershipDurationDays(
-    purchaseMeta.validity_type ?? purchaseMeta.subscription_type ?? planRow.type
-  );
-  const membershipStarted = now.toISOString();
-  const membershipExpiry = addDays(now, durationDays).toISOString();
-  const promoCode = String(purchaseMeta.promo_code ?? "").trim() || null;
-  const membershipTier = resolveMembershipTier(purchaseMeta.plan_name ?? planRow.plan_name);
-  const baseAmount = toMoney(purchaseMeta.base_amount, 0);
-  const finalAmount = toMoney(purchaseMeta.final_amount, 0);
-  const discountAmount = toMoney(purchaseMeta.discount_amount, 0);
-  const promoDiscountPercent = toMoney(purchaseMeta.promo_discount_percent, 0);
-
-  const { data: updatedUser, error: userUpdateError } = await db
-    .from("users")
-    .update({
-      membership: "active",
-      membership_tier: membershipTier,
-      membership_started: membershipStarted,
-      membership_expiry: membershipExpiry,
-      promo_code_used: promoCode,
-      updated_at: new Date().toISOString(),
-    })
-    .eq("id", params.userId)
-    .select(
-      "id,membership,membership_tier,membership_started,membership_expiry,promo_code_used,updated_at"
-    )
-    .single();
-
-  if (userUpdateError) {
-    throw new MembershipPaymentValidationError(500, userUpdateError.message);
+  const { data, error } = await db.rpc("finalize_membership_session", { p_session_id: params.session.id });
+  if (error) {
+    const status = error.code === "P0002" ? 404 : error.code === "22023" ? 409 : 500;
+    throw new MembershipPaymentValidationError(status, error.message);
   }
 
   return {
-    duplicate: false,
-    membership: {
-      applied: true,
-      user_id: updatedUser.id,
-      plan_id: String(planRow.id),
-      plan_name: String(planRow.plan_name ?? purchaseMeta.plan_name ?? "Membership"),
-      membership_tier: membershipTier,
-      membership_started: membershipStarted,
-      membership_expiry: membershipExpiry,
-      duration_days: durationDays,
-      promo_code_used: promoCode,
-      payment_reference:
-        params.session.transaction_index ??
-        params.session.bank_reference ??
-        params.session.merchant_trace,
-      amount_breakdown: {
-        base_amount: baseAmount,
-        discount_amount: discountAmount,
-        final_amount: finalAmount,
-        promo_discount_percent: promoDiscountPercent,
-      },
-    },
-    user: updatedUser,
+    duplicate: data?.duplicate === true,
+    membership: data?.membership ?? null,
+    user: data?.user ?? null,
   };
 }

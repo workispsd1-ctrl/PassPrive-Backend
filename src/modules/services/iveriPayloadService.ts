@@ -57,26 +57,25 @@ export function deriveIveriOutcome(payload: NormalizedIveriPayload) {
   const code = normalizeText(payload.canonical.card_status);
   const description = normalizeText(payload.canonical.result_description);
   const hint = normalizeText(payload.canonical.outcome_hint);
-  const joined = `${code} ${description} ${hint}`;
+  const joined = `${description} ${hint}`;
 
   if (code === "0") return "success";
 
-  if (["3", "4", "5", "14", "255"].includes(code)) return "fail";
-  if (["9"].includes(code)) return "pending";
+  const pendingText = ["later", "pending", "timeout", "processing", "in progress", "no transaction found"].some((term) =>
+    joined.includes(term)
+  );
+  const failText = ["fail", "declined", "denied", "cancelled", "canceled", "invalid", "hot card", "hotcard", "not approved"].some(
+    (term) => joined.includes(term)
+  );
 
-  if (["success", "successful", "approved", "authorised", "authorized", "paid", "captured"].some((term) => joined.includes(term))) {
-    return "success";
+  if (code === "9" || code === "1" || code === "-1" || code === "-255") {
+    if (pendingText) return "pending";
+    return failText ? "fail" : "pending";
   }
 
-  if (["fail", "failed", "declined", "cancelled", "canceled", "error", "invalid", "denied", "unable", "hot card", "hotcard"].some((term) => joined.includes(term))) {
-    return "fail";
-  }
+  if (code) return "fail";
 
-  if (["later", "pending", "timeout", "processing", "in progress"].some((term) => joined.includes(term))) {
-    return "pending";
-  }
-
-  return "pending";
+  return failText && !pendingText ? "fail" : "pending";
 }
 
 export function inferStatusFromOutcome(outcome: string): "VERIFIED_SUCCESS" | "VERIFIED_FAILED" | "RETURNED" {

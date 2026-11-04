@@ -21,7 +21,6 @@ import StoresHomeBanners from "./modules/routes/storesHomeBanners";
 import corporatesRouter from "./modules/routes/corporates";
 import Payments from "./modules/routes/payments";
 import PublicMenuPayments from "./modules/routes/publicMenuPayments";
-import IveriMerchantPayments from "./modules/routes/iveriMerchantPayments";
 import MipsPayments from "./modules/routes/mipsPayments";
 import EditorialCollections from "./modules/routes/editorialCollections";
 import Editorials from "./modules/routes/editorials";
@@ -42,6 +41,9 @@ const allowAllCors = String(process.env.CORS_ALLOW_ALL ?? "true").trim().toLower
 
 const allowedOrigins = [
   "http://localhost:3000",
+  "https://www.passpriveadmin.com",
+  "https://passpriveadmin.com",
+  "https://partner.passprive.com",
   "https://pass-prive-admin.vercel.app",
   process.env.PUBLIC_BACKEND_BASE_URL,
   process.env.BACKEND_BASE_URL,
@@ -151,7 +153,6 @@ app.use("/api/store-catalogue", StoreCatalogue);
 app.use("/api/store-catalog", StoreCatalogue); // Alias for clients using US spelling
 app.use("/api/payments", Payments);
 app.use("/api/public-menu/payments", PublicMenuPayments);
-app.use("/api/payments/iveri-merchant", IveriMerchantPayments);
 app.use("/api/payments/mips", MipsPayments);
 app.use("/api/editorial-collections", EditorialCollections);
 app.use("/api/editorials", Editorials);

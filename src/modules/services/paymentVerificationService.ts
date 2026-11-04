@@ -1,5 +1,6 @@
 import { postForm } from "./iveriService";
-import { getPaymentSessionById, updatePaymentSession } from "./paymentSessionService";
+import { getPaymentSessionById, updatePaymentSessionIfStatusIn, type PaymentStatus } from "./paymentSessionService";
+import { finalizeMembershipPayment } from "./membershipPaymentService";
 import {
   buildIveriIntegrityChecks,
   deriveIveriOutcome,
@@ -70,6 +71,11 @@ export async function verifyPaymentSessionWithIveri(params: {
     payload: normalizedPayload,
   });
 
+  if (!Number.isFinite(Number(normalizedPayload.canonical.amount_minor ?? NaN))) {
+    integrity.ok = false;
+    integrity.mismatches.push("amount missing");
+  }
+
   if (!integrity.ok && verificationStatus === "VERIFIED_SUCCESS") {
     verificationStatus = "VERIFIED_FAILED";
   }
@@ -80,7 +86,12 @@ export async function verifyPaymentSessionWithIveri(params: {
   const authorizationCode = normalizedPayload.canonical.authorisation_code;
   const bankReference = normalizedPayload.canonical.bank_reference;
 
-  const updated = await updatePaymentSession(params.sessionId, {
+  const openStatuses: PaymentStatus[] = ["CREATED", "PENDING", "RETURNED", "VERIFIED_FAILED", "ERROR"];
+  const claimed = await updatePaymentSessionIfStatusIn({
+    sessionId: params.sessionId,
+    allowedCurrentStatuses:
+      verificationStatus === "VERIFIED_SUCCESS" ? [...openStatuses, "VERIFIED_SUCCESS"] : openStatuses,
+    updates: {
     status: verificationStatus,
     gateway_status: gatewayStatus ?? null,
     gateway_result_code: gatewayStatus ?? null,
@@ -103,13 +114,24 @@ export async function verifyPaymentSessionWithIveri(params: {
         fields,
       },
     },
+    },
   });
+  let updated = claimed ?? (await getPaymentSessionById(params.sessionId)) ?? session;
+
+  if (updated.status === "VERIFIED_SUCCESS" && updated.payment_context === "MEMBERSHIP") {
+    try {
+      await finalizeMembershipPayment({ session: updated, userId: updated.user_id });
+      updated = (await getPaymentSessionById(params.sessionId)) ?? updated;
+    } catch (err: any) {
+      console.error("[membership auto-finalize] failed", params.sessionId, err?.message);
+    }
+  }
 
   return {
     session: updated,
     verification: {
-      verified: verificationStatus === "VERIFIED_SUCCESS" && integrity.ok,
-      status: verificationStatus,
+      verified: (updated.status === "VERIFIED_SUCCESS" || updated.status === "FINALIZED") && integrity.ok,
+      status: updated.status,
       inferredOutcome,
       integrity,
       fields,
