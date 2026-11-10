@@ -15,8 +15,8 @@ export class OtpService {
    */
   static async generateAndSaveOtp(phone: string): Promise<string> {
     const cleanPhone = phone.trim();
-    if (!/^\+?[0-9]{7,15}$/.test(cleanPhone)) {
-      throw new Error("Invalid phone number format. Please provide a valid phone number.");
+    if (!/^\+?2305[0-9]{7}$/.test(cleanPhone)) {
+      throw new Error("Please enter a valid Mauritius mobile number.");
     }
 
     const now = new Date();

@@ -23,7 +23,7 @@ router.post("/confirm", async (req, res) => {
   if (!customer) return;
 
   try {
-    const result = await confirmRestaurantBooking(parsed.data, customer);
+    const result = await confirmRestaurantBooking({ ...parsed.data, payment: undefined }, customer);
     return res.status(result.status).json(result.body);
   } catch (err: any) {
     return res.status(500).json({
