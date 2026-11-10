@@ -3,74 +3,7 @@ import crypto from "crypto";
 import supabase, { supabaseServiceRole as supabaseService, supabaseAuthed, createIsolatedClient } from "../../database/supabase";
 import { EmtelProvider } from "../services/smsService";
 import { OtpService } from "../services/otpService";
-
-function getProjectRef(url: string | undefined) {
-  const match = String(url ?? "").match(/^https:\/\/([^.]+)\.supabase\.co$/i);
-  return match?.[1] ?? "unknown";
-}
-
-function normalizeAdminRole(value: any) {
-  const raw = String(value ?? "").trim().toLowerCase();
-  if (!raw) return "";
-  if (["superadmin", "super_admin", "super admin"].includes(raw)) return "superadmin";
-  if (["admin", "admin_user", "admin user"].includes(raw)) return "admin";
-  return raw.replace(/[_\s]+/g, "");
-}
-
-async function requireAdmin(req: any, res: any) {
-  const authHeader = req.headers.authorization || "";
-  const [authType, authToken] = authHeader.split(" ");
-  console.log("[auth/create-user] auth check start", {
-    path: req.originalUrl,
-    method: req.method,
-    hasAuthorizationHeader: Boolean(authHeader),
-    authorizationType: authType || null,
-    bearerTokenExtracted: Boolean(authType === "Bearer" && authToken),
-    backendSupabaseUrl: process.env.SUPABASE_URL,
-    backendSupabaseProjectRef: getProjectRef(process.env.SUPABASE_URL),
-  });
-
-  const sb = supabaseAuthed(req);
-  if (!sb) {
-    console.warn("[auth/create-user] missing or malformed authorization header", {
-      hasAuthorizationHeader: Boolean(authHeader),
-      authorizationPreview: authHeader ? `${String(authHeader).slice(0, 24)}...` : null,
-    });
-    res.status(401).json({ error: "Missing token" });
-    return null;
-  }
-
-  const { data: { user }, error: userErr } = await sb.auth.getUser();
-  console.log("[auth/create-user] auth.getUser result", {
-    hasUser: Boolean(user),
-    userId: user?.id ?? null,
-    authErrorMessage: userErr?.message ?? null,
-    authErrorStatus: (userErr as any)?.status ?? null,
-    authErrorCode: (userErr as any)?.code ?? null,
-  });
-  if (userErr || !user) {
-    res.status(401).json({ error: "Invalid session" });
-    return null;
-  }
-
-  const { data: row, error: roleErr } = await supabaseService
-    .from("users")
-    .select("role")
-    .eq("id", user.id)
-    .maybeSingle();
-
-  const role = normalizeAdminRole(row?.role ?? user.user_metadata?.role ?? user.user_metadata?.app_role);
-  if (!role && roleErr) {
-    res.status(403).json({ error: "Access denied" });
-    return null;
-  }
-  if (!["admin", "superadmin"].includes(role)) {
-    res.status(403).json({ error: "Access denied" });
-    return null;
-  }
-
-  return { sb, callerId: user.id };
-}
+import { requireAdmin } from "../services/authService";
 
 const router = express.Router();
 
@@ -107,7 +40,14 @@ function readSignupToken(token: unknown): string | null {
 
 async function findUsersByPhone(phone: string) {
   const localPart = String(phone).replace(/\D/g, "").slice(-8);
-  return supabase.from("users").select("id,email,phone").ilike("phone", `%${localPart}`).limit(5);
+  if (localPart.length !== 8) return { data: [], error: new Error("Invalid phone number") };
+  return supabase
+    .from("users")
+    .select("id,email,phone")
+    .in("role", ["user", "customer"])
+    .ilike("phone", `%${localPart}`)
+    .order("created_at", { ascending: true })
+    .limit(5);
 }
 
 async function mintSession(email: string) {

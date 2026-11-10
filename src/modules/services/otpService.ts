@@ -56,7 +56,7 @@ export class OtpService {
     }
 
     // 2. Generate a 6-digit OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const otp = crypto.randomInt(100000, 1000000).toString();
     const otpHash = this.hashOtp(otp);
     const expiresAt = new Date(now.getTime() + 5 * 60 * 1000).toISOString(); // 5-minute TTL
 

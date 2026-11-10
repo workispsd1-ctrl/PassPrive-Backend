@@ -2,7 +2,6 @@ import express from "express";
 import cors from "cors";
 import authRoutes from "./modules/routes/auth";
 import adminRoutes from "./modules/routes/admin";
-import userDetailsRoutes from "./modules/routes/userDetails.routes";
 import HomeHeroOffers from "./modules/routes/homeHeroOffers";
 import DineinHomeBanners from "./modules/routes/dineinHomeBanners";
 import InYourPassPrive from "./modules/routes/inYourPassPrive";
@@ -28,6 +27,7 @@ import NowTrending from "./modules/routes/nowTrending";
 import Analytics from "./modules/routes/analytics";
 import SupportChat from "./modules/routes/supportChat";
 import SupportAdmin from "./modules/routes/supportAdmin";
+import { adminWrites } from "./modules/services/authService";
 import ShareLinks from "./modules/routes/shareLinks";
 import Gifts from "./modules/routes/gifts";
 import GiftEvents from "./modules/routes/giftEvents";
@@ -124,23 +124,22 @@ app.get("/", (req, res) => {
   res.send("Backend running...");
 });
 
-app.use("/api/user", userDetailsRoutes);
 
 app.use("/api/auth", authRoutes);
 app.use("/api/auth", adminRoutes);
 
-app.use("/api/homeherooffers", HomeHeroOffers);
-app.use("/api/dineinhomebanners", DineinHomeBanners);
-app.use("/api/inyourpassprive", InYourPassPrive);
+app.use("/api/homeherooffers", adminWrites, HomeHeroOffers);
+app.use("/api/dineinhomebanners", adminWrites, DineinHomeBanners);
+app.use("/api/inyourpassprive", adminWrites, InYourPassPrive);
 app.use("/api/offers", Offers);
 app.use("/api/passprive-offers", Offers);
-app.use("/api/storesinyourpassprive", StoreInYourPassPrive);
-app.use("/api/storeinyourpassprive", StoreInYourPassPrive);
-app.use("/api/storeshomebanners", StoresHomeBanners);
-app.use("/api/moodcategories", MoodCategories);
-app.use("/api/storemoodcategories", StoreMoodCategories);
+app.use("/api/storesinyourpassprive", adminWrites, StoreInYourPassPrive);
+app.use("/api/storeinyourpassprive", adminWrites, StoreInYourPassPrive);
+app.use("/api/storeshomebanners", adminWrites, StoresHomeBanners);
+app.use("/api/moodcategories", adminWrites, MoodCategories);
+app.use("/api/storemoodcategories", adminWrites, StoreMoodCategories);
 
-app.use("/api/spotlight", SpotLight);
+app.use("/api/spotlight", adminWrites, SpotLight);
 
 app.use("/api/restaurant-bookings", RestaurantBookings);
 for (const alias of STORE_SERVICE_BOOKING_ROUTE_ALIASES) {
@@ -154,13 +153,13 @@ app.use("/api/store-catalog", StoreCatalogue); // Alias for clients using US spe
 app.use("/api/payments", Payments);
 app.use("/api/public-menu/payments", PublicMenuPayments);
 app.use("/api/payments/mips", MipsPayments);
-app.use("/api/editorial-collections", EditorialCollections);
+app.use("/api/editorial-collections", adminWrites, EditorialCollections);
 app.use("/api/editorials", Editorials);
 app.use("/api/now-trending", NowTrending);
 app.use("/api/analytics", Analytics);
 app.use("/api/support-chat", SupportChat);
 app.use("/api/support-admin", SupportAdmin);
-app.use("/api/stores-home", StoresHomeSections);
+app.use("/api/stores-home", adminWrites, StoresHomeSections);
 app.use("/api/stores", Stores);
 app.use("/api/store", Stores);       // Alias
 

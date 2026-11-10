@@ -43,16 +43,7 @@ async function getCallerInfo(req: any) {
       console.error("[getCallerInfo] DB Role Fetch Failed:", dbError.message);
     }
 
-    let role = normalizeRoleValue(profile?.role);
-
-    // Fallback: Check Auth Metadata if role not found in DB
-    if (!role && user.user_metadata?.role) {
-      role = normalizeRoleValue(String(user.user_metadata.role));
-    }
-
-    if (!role && user.user_metadata?.app_role) {
-      role = normalizeRoleValue(String(user.user_metadata.app_role));
-    }
+    const role = normalizeRoleValue(profile?.role);
 
     return { 
       id: user.id, 

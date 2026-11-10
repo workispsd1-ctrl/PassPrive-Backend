@@ -139,7 +139,8 @@ export async function getAuthenticatedCustomer(req: any, res: Response): Promise
 export async function requireAdmin(req: any, res: Response) {
   const sb = supabaseAuthed(req);
   if (!sb) {
-    return { sb: supabase, callerId: null };
+    res.status(401).json({ error: "Missing token" });
+    return null;
   }
 
   const { data: userData, error: userErr } = await sb.auth.getUser();
@@ -148,23 +149,21 @@ export async function requireAdmin(req: any, res: Response) {
     return null;
   }
 
-  const { data: roleRow, error: roleErr } = await supabase
+  const { data: roleRow } = await supabase
     .from("users")
     .select("role")
     .eq("id", userData.user.id)
     .maybeSingle();
 
-  const role = normalizeAdminRole(
-    roleRow?.role ?? userData.user.user_metadata?.role ?? userData.user.user_metadata?.app_role
-  );
-  if (!role && roleErr) {
-    res.status(403).json({ error: "Access denied" });
-    return null;
-  }
-  if (!["admin", "superadmin"].includes(role)) {
+  if (!["admin", "superadmin"].includes(normalizeAdminRole(roleRow?.role))) {
     res.status(403).json({ error: "Access denied" });
     return null;
   }
 
   return { sb, callerId: userData.user.id };
+}
+
+export async function adminWrites(req: any, res: Response, next: () => void) {
+  if (["GET", "HEAD", "OPTIONS"].includes(req.method)) return next();
+  if (await requireAdmin(req, res)) next();
 }
