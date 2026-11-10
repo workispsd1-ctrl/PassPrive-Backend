@@ -14,6 +14,7 @@ import {
   toMinor,
 } from "../services/publicMenuPaymentUtils";
 import { verifyIveriWebhookSignature } from "../services/iveriWebhookVerification";
+import { verifyPaymentSessionWithIveri } from "../services/paymentVerificationService";
 
 const router = Router();
 
@@ -267,8 +268,32 @@ router.post("/create-session", async (req, res) => {
     const payload = parsed.data;
 
     const currencyCode = payload.currency_code.trim().toUpperCase();
+
+    const { data: menuRow, error: menuError } = await supabaseServiceRole
+      .from("restaurants")
+      .select("menu_json")
+      .eq("id", payload.restaurant_id)
+      .maybeSingle();
+    if (menuError) throw menuError;
+    const menu = typeof menuRow?.menu_json === "string" ? JSON.parse(menuRow.menu_json) : menuRow?.menu_json;
+    const menuItems = new Map<string, any>();
+    for (const section of Array.isArray(menu?.sections) ? menu.sections : []) {
+      for (const item of Array.isArray(section?.items) ? section.items : []) {
+        if (item?.id != null && item.is_available !== false) menuItems.set(String(item.id), item);
+      }
+    }
+    for (const item of payload.items) {
+      const menuItem = menuItems.get(String(item.item_id));
+      const price = Number(menuItem?.price);
+      if (!menuItem || !(price > 0)) {
+        return res.status(400).json({ ok: false, code: "ITEM_UNAVAILABLE", message: `${item.name} is no longer available` });
+      }
+      item.unit_price = price;
+      item.name = String(menuItem.name ?? item.name);
+    }
+
     const serverSubtotal = computeItemsSubtotal(payload.items);
-    const serverTax = roundMoney(payload.tax_amount);
+    const serverTax = 0;
     const serverTotal = roundMoney(serverSubtotal + serverTax);
 
     if (hasMoneyMismatch(payload.subtotal_amount, serverSubtotal)) {
@@ -490,7 +515,16 @@ router.post("/webhook", async (req, res) => {
     }
 
     const outcomeStatus = String(normalized.canonical.card_status ?? "").trim();
-    const success = outcomeStatus === "0";
+    let success = outcomeStatus === "0";
+    if (success && !signature.ok) {
+      const config = getIveriConfig();
+      const confirmed = await verifyPaymentSessionWithIveri({
+        sessionId: session.id,
+        applicationId: config.applicationId,
+        authoriseInfoUrl: config.authoriseInfoUrl,
+      });
+      success = confirmed.verification.status === "VERIFIED_SUCCESS";
+    }
     const nextStatus = success ? "VERIFIED_SUCCESS" : "VERIFIED_FAILED";
     logWithCorrelation("info", "public menu webhook received", {
       payment_session_id: session.id,
