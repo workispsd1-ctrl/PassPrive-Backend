@@ -365,7 +365,25 @@ export async function buildBillPaymentContext(input: BillContextInput) {
     }
   }
 
-  const payableAmount = Number(Math.max(0, originalAmount - discountAmount).toFixed(2));
+  let coverCredit: { bookingId: string; amount: number } | null = null;
+  if (entityType === "RESTAURANT" && input.user_id) {
+    const { data: coverData, error: coverError } = await supabase.rpc("booking_cover_credit", {
+      p_user_id: input.user_id,
+      p_restaurant_id: entityId,
+      p_session_id: input.deal_session_id ?? null,
+    });
+    if (coverError) throw coverError;
+    const row = Array.isArray(coverData) ? coverData[0] : coverData;
+    const room = Math.max(0, originalAmount - discountAmount - 1);
+    const creditAmount = Number(Math.min(Number(row?.amount) || 0, room).toFixed(2));
+    if (row?.booking_id && creditAmount > 0) {
+      coverCredit = { bookingId: row.booking_id, amount: creditAmount };
+    }
+  }
+
+  const payableAmount = Number(
+    Math.max(0, originalAmount - discountAmount - (coverCredit?.amount ?? 0)).toFixed(2)
+  );
   const discountSource = deriveDiscountSourceFromOffers(selectedOffers);
   const primaryOffer = selectedOffers[0] ?? null;
   const derivedDiscountCode = [
@@ -392,6 +410,7 @@ export async function buildBillPaymentContext(input: BillContextInput) {
     selectedOffers,
     repeatReward,
     deal,
+    coverCredit,
     discountSource,
     discountCode: derivedDiscountCode,
     discountName: primaryOffer ? String(primaryOffer.title ?? primaryOffer.offer_type ?? "Offer") : null,
@@ -477,6 +496,14 @@ export async function finalizeBillPayment(params: {
       source: "deal_reveals",
     });
   }
+  if (recalculated.coverCredit) {
+    offerBreakdown.push({
+      id: `cover_charge:${recalculated.coverCredit.bookingId}`,
+      title: "Cover charge paid at booking",
+      offer_type: "COVER_CHARGE_CREDIT",
+      amount: recalculated.coverCredit.amount,
+    });
+  }
   if (recalculated.repeatReward) {
     offerBreakdown.push({
       id: `repeat_reward:${recalculated.repeatReward.tierId}`,
@@ -518,6 +545,16 @@ export async function finalizeBillPayment(params: {
     .single();
 
   if (billPaymentError) throw billPaymentError;
+
+  if (recalculated.coverCredit) {
+    const { error: coverLinkError } = await supabase.rpc("booking_cover_link", {
+      p_session_id: params.session.id,
+      p_bill_payment_id: billPayment.id,
+    });
+    if (coverLinkError) {
+      console.error("booking_cover_link failed", coverLinkError);
+    }
+  }
 
   if (recalculated.deal) {
     const { error: dealLinkError } = await supabase.rpc("deal_link_bill", {

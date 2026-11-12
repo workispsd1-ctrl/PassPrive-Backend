@@ -648,6 +648,7 @@ router.post("/iveri/initiate", async (req, res) => {
     let cashbackAmount = 0;
     let originalAmount = 0;
     let walletSpendAmount = 0;
+    let coverCreditAmount = 0;
     let contextPayload: Record<string, any> = {};
     let paymentDetails: Record<string, any> = {};
     let merchantReference = merchantTrace.slice(-20);
@@ -793,6 +794,22 @@ router.post("/iveri/initiate", async (req, res) => {
             code: "DEAL_IN_USE",
           });
         }
+      }
+
+      if (billContext.coverCredit) {
+        const { data: coverHeld, error: coverHoldError } = await supabase.rpc("booking_cover_hold", {
+          p_booking_id: billContext.coverCredit.bookingId,
+          p_user_id: customer.userId,
+          p_session_id: sessionId,
+        });
+        if (coverHoldError) throw coverHoldError;
+        if (coverHeld !== true) {
+          return res.status(409).json({
+            error: "Your cover charge is already being used for another payment. Please try again.",
+            code: "COVER_CREDIT_IN_USE",
+          });
+        }
+        coverCreditAmount = billContext.coverCredit.amount;
       }
 
       amountMajor = billContext.payableAmount;
@@ -1093,7 +1110,7 @@ router.post("/iveri/initiate", async (req, res) => {
       amountMajor,
       // iVeri validates line-item total = amount + discount, so the wallet
       // spend must ride in the gateway discount; the session keeps them split.
-      discountMajor: roundMoney(discountAmount + walletSpendAmount),
+      discountMajor: roundMoney(discountAmount + walletSpendAmount + coverCreditAmount),
       currencyCode: "MUR",
       merchantReference,
       customer: {
