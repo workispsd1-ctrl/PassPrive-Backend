@@ -15,7 +15,7 @@ interface BillContextInput {
   bin?: string | null;
   coupon_code?: string | null;
   user_id?: string | null;
-  
+  deal_session_id?: string | null;
 }
 
 export class BillPaymentValidationError extends Error {
@@ -310,80 +310,33 @@ export async function buildBillPaymentContext(input: BillContextInput) {
   discountAmount = Number(discountAmount.toFixed(2));
   cashbackAmount = Number(cashbackAmount.toFixed(2));
 
-  // ── Merchant offers and Repeat-visit reward fetches (concurrently) ───────────
-  let roffers: any[] = [];
-  let rrData: any = null;
-
-  let merchantSharePct = 100;
-
-  if (entityType === "RESTAURANT") {
-    const [roffersResult, rrResult, shareResult] = await Promise.all([
-      supabase
-        .from("restaurant_offers")
-        .select("id,title,offer_type,discount_value,min_spend,start_at,end_at,is_active,metadata,restaurants!inner(deals_enabled)")
-        .eq("restaurant_id", entityId)
-        .eq("is_active", true)
-        .eq("restaurants.deals_enabled", true),
-      input.user_id
-        ? supabase.rpc("repeat_reward_quote", {
-            in_restaurant_id: entityId,
-            in_user_id: input.user_id,
-            in_bill_amount: originalAmount,
-          })
-        : Promise.resolve({ data: null, error: null }),
-      supabase.rpc("merchant_discount_share", { in_user_id: input.user_id ?? null }),
-    ]);
-
-    if (roffersResult.error) throw roffersResult.error;
-    if (rrResult.error) throw rrResult.error;
-
-    roffers = roffersResult.data ?? [];
-    rrData = rrResult.data;
-
-    // Share of the merchant's discount this membership tier receives
-    // (membership_discount_caps, superadmin configured). A failed read must not
-    // grant the full discount, so fall back to the lowest configured tier.
-    if (shareResult.error) {
-      console.error("[bill] merchant_discount_share failed", {
-        entity_id: entityId,
-        error: shareResult.error.message,
-      });
-      merchantSharePct = 0;
-    } else {
-      const pct = Number(Array.isArray(shareResult.data) ? shareResult.data[0] : shareResult.data);
-      merchantSharePct = Number.isFinite(pct) ? Math.min(Math.max(pct, 0), 100) : 0;
+  let deal: { revealId: string; discount: number; label: string | null; title: string | null } | null = null;
+  if (input.user_id) {
+    const { data: dealData, error: dealError } = await supabase.rpc("deal_bill_discount", {
+      p_user_id: input.user_id,
+      p_restaurant_id: entityType === "RESTAURANT" ? entityId : null,
+      p_store_id: entityType === "STORE" ? entityId : null,
+      p_bill_amount: originalAmount,
+      p_session_id: input.deal_session_id ?? null,
+    });
+    if (dealError) throw dealError;
+    const row = Array.isArray(dealData) ? dealData[0] : dealData;
+    const dealDiscount = Number(row?.discount) || 0;
+    if (row?.deal_reveal_id && dealDiscount > 0) {
+      deal = { revealId: row.deal_reveal_id, discount: dealDiscount, label: row.label ?? null, title: row.title ?? null };
+      discountAmount = Number((discountAmount + dealDiscount).toFixed(2));
     }
   }
 
-  // ── Merchant offers from restaurant_offers ──────────────────────────────
-  // The unified `offers` table is unused; merchant deals live in
-  // restaurant_offers. Apply the single BEST-value eligible offer (mirrors the
-  // app's pick); the repeat reward then stacks on top.
-  let merchantOffer:
-    | { id: string; title: string; offerType: string; discount: number }
-    | null = null;
-  if (entityType === "RESTAURANT") {
-    const nowMs = Date.now();
-    for (const o of roffers) {
-      if (((o.metadata as any)?.offerKind ?? "") === "VISIT") continue; // reward handled separately
-      if (o.start_at && new Date(o.start_at).getTime() > nowMs) continue;
-      if (o.end_at && new Date(o.end_at).getTime() < nowMs) continue;
-      if (o.min_spend != null && originalAmount < Number(o.min_spend)) continue;
-      let d = 0;
-      if (o.offer_type === "percentage" && o.discount_value != null) {
-        d = Number(((originalAmount * Number(o.discount_value)) / 100).toFixed(2));
-      } else if (o.offer_type === "flat" && o.discount_value != null) {
-        d = Math.min(Number(o.discount_value), originalAmount);
-      }
-      // The member receives only their tier's share of the merchant's discount.
-      d = Number(((d * merchantSharePct) / 100).toFixed(2));
-      if (d > (merchantOffer?.discount ?? 0)) {
-        merchantOffer = { id: o.id, title: o.title, offerType: o.offer_type, discount: d };
-      }
-    }
-    if (merchantOffer) {
-      discountAmount = Number((discountAmount + merchantOffer.discount).toFixed(2));
-    }
+  let rrData: any = null;
+  if (entityType === "RESTAURANT" && input.user_id) {
+    const rrResult = await supabase.rpc("repeat_reward_quote", {
+      in_restaurant_id: entityId,
+      in_user_id: input.user_id,
+      in_bill_amount: originalAmount,
+    });
+    if (rrResult.error) throw rrResult.error;
+    rrData = rrResult.data;
   }
 
   // ── Repeat-visit reward (restaurants only) ──────────────────────────────
@@ -438,7 +391,7 @@ export async function buildBillPaymentContext(input: BillContextInput) {
     payableAmount,
     selectedOffers,
     repeatReward,
-    merchantOffer,
+    deal,
     discountSource,
     discountCode: derivedDiscountCode,
     discountName: primaryOffer ? String(primaryOffer.title ?? primaryOffer.offer_type ?? "Offer") : null,
@@ -479,6 +432,7 @@ export async function finalizeBillPayment(params: {
     store_id: contextPayload.store_id ?? billPayload.store_id ?? null,
     ...billPayload,
     user_id: params.userId,
+    deal_session_id: params.session.id,
   });
 
   // Privé Credits recorded at initiate reduce the gateway charge, so the
@@ -514,13 +468,13 @@ export async function finalizeBillPayment(params: {
     title: offer.title,
     offer_type: offer.offer_type,
   }));
-  if (recalculated.merchantOffer) {
+  if (recalculated.deal) {
     offerBreakdown.push({
-      id: recalculated.merchantOffer.id,
-      title: recalculated.merchantOffer.title,
-      offer_type: recalculated.merchantOffer.offerType,
-      discount_amount: recalculated.merchantOffer.discount,
-      source: "restaurant_offers",
+      id: `deal_reveal:${recalculated.deal.revealId}`,
+      title: [recalculated.deal.label, recalculated.deal.title].filter(Boolean).join(" · ") || "Deal",
+      offer_type: "DEAL",
+      discount_amount: recalculated.deal.discount,
+      source: "deal_reveals",
     });
   }
   if (recalculated.repeatReward) {
@@ -564,6 +518,16 @@ export async function finalizeBillPayment(params: {
     .single();
 
   if (billPaymentError) throw billPaymentError;
+
+  if (recalculated.deal) {
+    const { error: dealLinkError } = await supabase.rpc("deal_link_bill", {
+      p_session_id: params.session.id,
+      p_bill_payment_id: billPayment.id,
+    });
+    if (dealLinkError) {
+      console.error("deal_link_bill failed", dealLinkError);
+    }
+  }
 
   // Record the repeat-reward redemption (idempotent per tier). Never fail an
   // already-successful payment if this hiccups — log for reconciliation.

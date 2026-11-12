@@ -37,6 +37,7 @@ import { requestTelemetryMiddleware } from "./modules/middleware/requestTelemetr
 import { rateLimitMiddleware } from "./modules/middleware/rateLimit";
 
 const app = express();
+app.set("trust proxy", Number(process.env.TRUST_PROXY_HOPS ?? 1));
 const allowAllCors = String(process.env.CORS_ALLOW_ALL ?? "true").trim().toLowerCase() !== "false";
 
 const allowedOrigins = [

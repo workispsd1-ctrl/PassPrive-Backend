@@ -88,49 +88,20 @@ export class OtpService {
       return { success: false, message: "Phone number and OTP code are required." };
     }
 
-    // 1. Fetch record
-    const { data: record, error: fetchError } = await supabase
-      .from("user_otps")
-      .select("*")
-      .eq("phone", cleanPhone)
-      .maybeSingle();
-
-    if (fetchError || !record) {
-      return { success: false, message: "No active OTP request found for this phone number." };
+    const { data: attempt } = await supabase.rpc("otp_take_attempt", { p_phone: cleanPhone });
+    if (!attempt) {
+      return { success: false, message: "This code has expired or was tried too many times. Please request a new one." };
     }
 
-    // 2. Check if expired
-    const now = Date.now();
-    if (new Date(record.expires_at).getTime() < now) {
-      await supabase.from("user_otps").delete().eq("phone", cleanPhone);
-      return { success: false, message: "OTP has expired. Please request a new one." };
-    }
-
-    // 3. Check failed attempts (max 3 attempts)
-    if (record.attempts >= 3) {
-      await supabase.from("user_otps").delete().eq("phone", cleanPhone);
-      return { success: false, message: "Too many failed attempts. Please request a new OTP." };
-    }
-
-    // 4. Compare code hash
-    const inputHash = this.hashOtp(cleanCode);
-    if (inputHash === record.otp_hash) {
-      // Success: Delete the verification record to prevent replay attacks
+    if (this.hashOtp(cleanCode) === attempt.otp_hash) {
       await supabase.from("user_otps").delete().eq("phone", cleanPhone);
       return { success: true, message: "OTP verified successfully." };
-    } else {
-      // Failure: Increment attempts count
-      const nextAttempts = record.attempts + 1;
-      if (nextAttempts >= 3) {
-        await supabase.from("user_otps").delete().eq("phone", cleanPhone);
-        return { success: false, message: "Incorrect OTP. Verification attempts limit exceeded. Please request a new one." };
-      } else {
-        await supabase
-          .from("user_otps")
-          .update({ attempts: nextAttempts })
-          .eq("phone", cleanPhone);
-        return { success: false, message: `Incorrect OTP. ${3 - nextAttempts} attempts remaining.` };
-      }
     }
+
+    const remaining = 3 - Number(attempt.attempts);
+    if (remaining <= 0) {
+      return { success: false, message: "Incorrect OTP. Verification attempts limit exceeded. Please request a new one." };
+    }
+    return { success: false, message: `Incorrect OTP. ${remaining} attempts remaining.` };
   }
 }

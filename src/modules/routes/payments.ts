@@ -633,6 +633,7 @@ router.post("/iveri/initiate", async (req, res) => {
       mode: config.mode,
     });
     const merchantTrace = generateMerchantTrace(parsed.data.payment_context);
+    const sessionId = randomUUID();
     const { firstName, lastName } = splitName(customer.fullName);
 
     let paymentContext: "BOOKING" | "BILL_PAYMENT" | "MEMBERSHIP" | "GIFT_PURCHASE" = parsed.data.payment_context;
@@ -776,7 +777,23 @@ router.post("/iveri/initiate", async (req, res) => {
         store_id: parsed.data.store_id ?? null,
         ...parsed.data.bill_payload,
         user_id: customer.userId,
+        deal_session_id: null,
       });
+
+      if (billContext.deal) {
+        const { data: held, error: holdError } = await supabase.rpc("deal_hold", {
+          p_reveal_id: billContext.deal.revealId,
+          p_user_id: customer.userId,
+          p_session_id: sessionId,
+        });
+        if (holdError) throw holdError;
+        if (held !== true) {
+          return res.status(409).json({
+            error: "This deal is already being used for another payment. Please try again.",
+            code: "DEAL_IN_USE",
+          });
+        }
+      }
 
       amountMajor = billContext.payableAmount;
       originalAmount = billContext.originalAmount;
@@ -1068,8 +1085,6 @@ router.post("/iveri/initiate", async (req, res) => {
         },
       ];
     }
-
-    const sessionId = randomUUID();
 
     const gatewayRequest = buildIveriAuthoriseRequest({
       config,
