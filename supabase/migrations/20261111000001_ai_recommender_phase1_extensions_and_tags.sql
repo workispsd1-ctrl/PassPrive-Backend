@@ -112,7 +112,11 @@ values
   ('best_for', 'families', 'Families'),
   ('best_for', 'groups', 'Groups'),
   ('best_for', 'solo', 'Solo Dining'),
-  ('best_for', 'kids', 'Kids')
+  ('best_for', 'kids', 'Kids'),
+  ('price_band', 'budget', 'Budget Friendly'),
+  ('price_band', 'mid', 'Mid Range'),
+  ('price_band', 'premium', 'Premium'),
+  ('price_band', 'luxury', 'Luxury')
 on conflict (type, slug) do update set label = excluded.label;
 
 -- 6. LINK EXISTING restaurant_tags ROWS TO NEW tags.id

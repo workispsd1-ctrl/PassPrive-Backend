@@ -11,8 +11,11 @@ create table if not exists public.restaurant_search (
   name text not null,
   city text not null,
   area text,
+  full_address text,
+  latitude double precision,
+  longitude double precision,
   geog geography(point, 4326),
-  currency char(3) not null default 'INR',
+  currency char(3) not null default 'MUR',
   cost_for_two numeric(10,2),
   price_band text check (price_band in ('budget', 'mid', 'premium', 'luxury')),
   rating_avg real not null default 0,
@@ -56,6 +59,14 @@ create index if not exists idx_rs_geog
 create index if not exists idx_rs_name_trgm
   on public.restaurant_search using gin (name gin_trgm_ops);
 
+-- Trigram and equality indexes for area-wise searches (e.g. "Grand Baie", "Tamarin")
+create index if not exists idx_rs_area
+  on public.restaurant_search (city, area)
+  where is_active;
+
+create index if not exists idx_rs_area_trgm
+  on public.restaurant_search using gin (area gin_trgm_ops);
+
 -- HNSW vector cosine distance index for semantic similarity
 create index if not exists idx_rs_embedding
   on public.restaurant_search using hnsw (embedding vector_cosine_ops);
@@ -68,6 +79,8 @@ as $$
 declare
   r record;
   calc_geog geography(point, 4326) := null;
+  calc_latitude double precision := null;
+  calc_longitude double precision := null;
   calc_price_band text;
   calc_tags text[] := '{}';
   calc_weights jsonb := '{}'::jsonb;
@@ -76,6 +89,8 @@ declare
   calc_rating_count int := 0;
   calc_bookings_30d int := 0;
   calc_has_offer boolean := false;
+  calc_currency text := 'MUR';
+  calc_city text := 'All';
   tag_rec record;
 begin
   -- Fetch restaurant base details
@@ -88,18 +103,26 @@ begin
     return;
   end if;
 
-  -- Compute PostGIS Point if lat & lng exist
-  if r.latitude is not null and r.longitude is not null and r.latitude between -90 and 90 and r.longitude between -180 and 180 then
-    calc_geog := st_setsrid(st_makepoint(r.longitude::double precision, r.latitude::double precision), 4326)::geography;
+  -- Resolve currency and city dynamically from restaurant record if available
+  calc_currency := coalesce(nullif(trim(to_jsonb(r)->>'currency'), ''), 'MUR');
+  calc_city := coalesce(nullif(trim(to_jsonb(r)->>'city'), ''), 'All');
+
+  -- Extract coordinates from restaurants and compute PostGIS geography point
+  if r.latitude is not null and r.longitude is not null then
+    calc_latitude := r.latitude::double precision;
+    calc_longitude := r.longitude::double precision;
+    if calc_latitude between -90 and 90 and calc_longitude between -180 and 180 then
+      calc_geog := st_setsrid(st_makepoint(calc_longitude, calc_latitude), 4326)::geography;
+    end if;
   end if;
 
-  -- Determine price band based on cost_for_two
+  -- Determine price band based on cost_for_two (aligned with PassPrive MUR brackets)
   if r.cost_for_two is not null then
-    if r.cost_for_two <= 1000 then
+    if r.cost_for_two <= 400 then
       calc_price_band := 'budget';
-    elsif r.cost_for_two <= 2200 then
+    elsif r.cost_for_two <= 900 then
       calc_price_band := 'mid';
-    elsif r.cost_for_two <= 4000 then
+    elsif r.cost_for_two <= 1600 then
       calc_price_band := 'premium';
     else
       calc_price_band := 'luxury';
@@ -180,6 +203,9 @@ begin
     name,
     city,
     area,
+    full_address,
+    latitude,
+    longitude,
     geog,
     currency,
     cost_for_two,
@@ -196,10 +222,13 @@ begin
   ) values (
     target_restaurant_id,
     r.name,
-    coalesce(nullif(trim(r.city), ''), 'Mumbai'),
+    calc_city,
     nullif(trim(r.area), ''),
+    nullif(trim(r.full_address), ''),
+    calc_latitude,
+    calc_longitude,
     calc_geog,
-    'INR',
+    calc_currency,
     r.cost_for_two,
     calc_price_band,
     calc_rating_avg,
@@ -216,6 +245,9 @@ begin
     name = excluded.name,
     city = excluded.city,
     area = excluded.area,
+    full_address = excluded.full_address,
+    latitude = excluded.latitude,
+    longitude = excluded.longitude,
     geog = excluded.geog,
     currency = excluded.currency,
     cost_for_two = excluded.cost_for_two,
