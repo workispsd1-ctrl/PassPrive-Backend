@@ -299,3 +299,31 @@ test("alias route coverage includes all requested booking confirm paths", () => 
     "/api/store-bookings",
   ]);
 });
+
+test("booking fee requires a server-verified payment", async () => {
+  const db: any = createDbMock({ store: { id: storeId, is_active: true } });
+  db.rpc = async () => ({ data: 20, error: null });
+  const base = {
+    store: { id: storeId },
+    serviceBooking: true,
+    selectedDate: "2099-01-01",
+    selectedTime: "10:30",
+    services: [{ title: "Hair Spa", quantity: 1, price: 250, duration_minutes: 45 }],
+    payment: { amount: 20, status: "verified", verified: true, method: "card" },
+  } as any;
+
+  const unpaid = await confirmStoreServiceBooking(base, customer, db);
+  assert.equal(unpaid.ok, false);
+  if (!unpaid.ok) assert.equal(unpaid.status, 402);
+
+  const paid = await confirmStoreServiceBooking(base, customer, db, {
+    amount: 20,
+    method: "IVERI_HOSTED",
+    reference: "ref",
+    paymentSessionId: "00000000-0000-0000-0000-000000000001",
+  });
+  assert.equal(paid.ok, true);
+  assert.equal(db.writes.insertedBooking?.payment_status, "PAID");
+  assert.equal(db.writes.insertedBooking?.booking_fee_status, "paid");
+  assert.equal(db.writes.insertedBooking?.cover_charge_amount, 20);
+});

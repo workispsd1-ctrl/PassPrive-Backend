@@ -366,7 +366,7 @@ export async function buildBillPaymentContext(input: BillContextInput) {
   }
 
   let coverCredit: { bookingId: string; amount: number } | null = null;
-  if (entityType === "RESTAURANT" && input.user_id) {
+  if ((entityType === "RESTAURANT" || entityType === "STORE") && input.user_id) {
     const { data: coverData, error: coverError } = await supabase.rpc("booking_cover_credit", {
       p_user_id: input.user_id,
       p_restaurant_id: entityId,

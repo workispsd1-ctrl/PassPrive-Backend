@@ -182,10 +182,26 @@ async function findRecentDuplicateBooking(params: {
   return data;
 }
 
+export type VerifiedBookingPayment = {
+  amount: number;
+  method: string;
+  reference: string | null;
+  paymentSessionId: string;
+};
+
+export async function loadStoreBookingFee(db: any = supabase) {
+  if (typeof db?.rpc !== "function") return 0;
+  const { data, error } = await db.rpc("booking_fee_amount");
+  if (error) throw error;
+  const fee = Number(data);
+  return Number.isFinite(fee) && fee > 0 ? fee : 0;
+}
+
 export async function confirmStoreServiceBooking(
   body: StoreServiceBookingPayload,
   customer: AuthenticatedCustomer,
-  db: any = supabase
+  db: any = supabase,
+  verifiedPayment: VerifiedBookingPayment | null = null
 ) {
   const storeId = normalizeStoreId(body.store) ?? normalizeStoreId(body.restaurant);
   if (!storeId) {
@@ -241,7 +257,7 @@ export async function confirmStoreServiceBooking(
 
   const { data: store, error: storeError } = await db
     .from("stores")
-    .select("id, is_active")
+    .select("id, is_active, service_level")
     .eq("id", storeId)
     .maybeSingle();
 
@@ -278,12 +294,31 @@ export async function confirmStoreServiceBooking(
     };
   }
 
-  const payment = body.payment ?? null;
-  const paymentAmount = parseNumericSignal(payment?.amount);
-  const paymentRequired = paymentAmount > 0;
-  const paymentVerified = !paymentRequired || isPaymentVerified(payment);
+  const bookingFee = await loadStoreBookingFee(db);
+  if (bookingFee > 0 && !verifiedPayment) {
+    return {
+      ok: false as const,
+      status: 402,
+      body: { error: "Payment is required before confirming this booking", code: "PAYMENT_REQUIRED" },
+    };
+  }
+  if (verifiedPayment && Number(verifiedPayment.amount) + 0.001 < bookingFee) {
+    return {
+      ok: false as const,
+      status: 402,
+      body: { error: "The amount paid does not cover the booking fee", code: "PAYMENT_AMOUNT_MISMATCH" },
+    };
+  }
+  const payment = verifiedPayment
+    ? { amount: verifiedPayment.amount, method: verifiedPayment.method, reference: verifiedPayment.reference, status: "verified", verified: true }
+    : body.payment ?? null;
+  const paymentAmount = verifiedPayment ? Number(verifiedPayment.amount) : parseNumericSignal(payment?.amount);
+  const paymentRequired = bookingFee > 0 || paymentAmount > 0;
+  const paymentVerified = bookingFee > 0 ? !!verifiedPayment : !paymentRequired || isPaymentVerified(payment);
   const normalizedPaymentStatus = paymentRequired ? (paymentVerified ? "PAID" : "PENDING") : "PAID";
-  const normalizedOrderStatus = paymentVerified ? "PLACED" : "NEW";
+  const isRequestStore = String(store.service_level ?? "").trim().toLowerCase() === "discoverable";
+  const normalizedOrderStatus = paymentVerified && !isRequestStore ? "PLACED" : "NEW";
+  const prepaid = verifiedPayment ? Number(verifiedPayment.amount) : 0;
 
   const totalDuration = normalizedServices.reduce((total, line) => total + line.duration_minutes * line.quantity, 0);
   const slotStartAt = buildUtcSlotIso(bookingDate, bookingTime);
@@ -370,7 +405,7 @@ export async function confirmStoreServiceBooking(
   const subtotal = Number(
     normalizedServices.reduce((total, line) => total + parseNumericSignal(line.price) * parseNumericSignal(line.quantity), 0)
   );
-  const totalAmount = paymentAmount > 0 ? paymentAmount : subtotal;
+  const totalAmount = subtotal > 0 ? subtotal : paymentAmount;
 
   const insertPayload = {
     order_no: bookingCode,
@@ -386,6 +421,9 @@ export async function confirmStoreServiceBooking(
     payment_method: payment?.method ?? "COD",
     payment_status: normalizedPaymentStatus,
     status: normalizedOrderStatus,
+    cover_charge_amount: prepaid,
+    booking_fee: verifiedPayment ? Math.min(bookingFee, prepaid) : 0,
+    booking_fee_status: verifiedPayment && bookingFee > 0 ? "paid" : "none",
     order_flow: "BASIC",
     service_type: "APPOINTMENT",
     selected_item_in_store: true,

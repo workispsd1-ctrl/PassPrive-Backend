@@ -380,7 +380,14 @@ function generateBookingCode() {
 }
 
 function isRequestBooking(restaurant: any) {
+  if (String(restaurant?.service_level ?? "").trim().toLowerCase() === "discoverable") return true;
   return String(restaurant?.booking_service_type ?? "").trim().toLowerCase() === "request";
+}
+
+async function loadBookingFeeAmount() {
+  const { data } = await supabase.rpc("booking_fee_amount");
+  const fee = Number(data);
+  return Number.isFinite(fee) && fee > 0 ? fee : 0;
 }
 
 function deriveClientStatus(booking: any) {
@@ -472,6 +479,7 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
     activeBookingCount,
     activeOfferRowsResult,
     customerBookingCountResult,
+    bookingFeeAmount,
   ] = await Promise.all([
     supabase.from("restaurants").select("*").eq("id", restaurantId).maybeSingle(),
     loadRestaurantOpeningHours(restaurantId).then((value) => value ?? {}),
@@ -494,6 +502,7 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
       .from("restaurant_bookings")
       .select("id", { count: "exact", head: true })
       .eq("customer_user_id", customer.userId),
+    loadBookingFeeAmount(),
   ]);
 
   const { data: restaurant, error: restaurantError } = restaurantResult;
@@ -620,7 +629,7 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
 
   const restaurantCoverCharge =
     restaurant.cover_charge_enabled === true ? parseNumericSignal(restaurant.cover_charge_amount) : 0;
-  const verifiedCoverChargeAmount = restaurantCoverCharge > 0 ? restaurantCoverCharge : 0;
+  const verifiedCoverChargeAmount = Math.max(bookingFeeAmount, restaurantCoverCharge > 0 ? restaurantCoverCharge : 0);
 
   return {
     ok: true as const,
@@ -632,6 +641,7 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
     selectedOption,
     verifiedOffer,
     verifiedCoverChargeAmount,
+    bookingFeeAmount: Math.min(bookingFeeAmount, verifiedCoverChargeAmount),
     paymentRequired: verifiedCoverChargeAmount > 0,
     duplicateBooking: existingBooking ?? null,
     customerBookingCount: customerBookingCount ?? 0,
@@ -683,6 +693,8 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
             payment_method: nextPaymentMethod,
             payment_reference: nextPaymentReference,
             payment_amount: evaluation.verifiedCoverChargeAmount,
+            booking_fee: evaluation.bookingFeeAmount,
+            booking_fee_status: evaluation.bookingFeeAmount > 0 ? "paid" : "none",
             payment_required: true,
             cover_charge_required: true,
             cover_charge_amount: evaluation.verifiedCoverChargeAmount,
@@ -773,6 +785,8 @@ export async function confirmRestaurantBooking(body: BookingPayload, customer: A
     cover_charge_required: paymentRequired,
     cover_charge_amount: paymentRequired ? evaluation.verifiedCoverChargeAmount : 0,
     payment_amount: paymentRequired ? evaluation.verifiedCoverChargeAmount : 0,
+    booking_fee: paymentRequired && paymentVerified ? evaluation.bookingFeeAmount : 0,
+    booking_fee_status: paymentRequired && paymentVerified && evaluation.bookingFeeAmount > 0 ? "paid" : "none",
     payment_status: normalizedPaymentStatus,
     payment_method: payment?.method ?? null,
     payment_reference: payment?.reference ?? null,

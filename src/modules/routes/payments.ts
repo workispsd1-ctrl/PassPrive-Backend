@@ -3,6 +3,11 @@ import { z } from "zod";
 import { randomUUID } from "crypto";
 import supabase from "../../database/supabase";
 import {
+  confirmStoreServiceBooking,
+  loadStoreBookingFee,
+  StoreServiceBookingPayloadSchema,
+} from "../services/storeServiceBookingService";
+import {
   getAuthenticatedCustomer,
   requireAuth,
 } from "../services/authService";
@@ -60,6 +65,8 @@ export const InitiateSchema = z.object({
     })
     .optional(),
   booking_payload: BookingPayloadSchema.optional(),
+  cover_request_booking_id: z.string().uuid().optional(),
+  service_booking_payload: StoreServiceBookingPayloadSchema.optional(),
   bill_payload: z
     .object({
       bill_amount: z.coerce.number().positive(),
@@ -84,14 +91,21 @@ export const InitiateSchema = z.object({
   const hasRestaurantId = !!value.restaurant_id;
   const hasStoreId = !!value.store_id;
 
-  if (value.payment_context === "BOOKING") {
+  if (value.payment_context === "BOOKING" && hasStoreId) {
+    if (hasRestaurantId) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["restaurant_id"], message: "Send either restaurant_id or store_id" });
+    }
+    if (!value.service_booking_payload && !value.cover_request_booking_id) {
+      ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["service_booking_payload"], message: "service_booking_payload is required for a store BOOKING" });
+    }
+  } else if (value.payment_context === "BOOKING") {
     if (!hasRestaurantId) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["restaurant_id"], message: "restaurant_id is required for BOOKING" });
     }
     if (hasStoreId) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["store_id"], message: "store_id is not allowed for BOOKING" });
     }
-    if (!value.booking_payload) {
+    if (!value.booking_payload && !value.cover_request_booking_id) {
       ctx.addIssue({ code: z.ZodIssueCode.custom, path: ["booking_payload"], message: "booking_payload is required for BOOKING" });
     }
     if (value.bill_payload) {
@@ -654,7 +668,74 @@ router.post("/iveri/initiate", async (req, res) => {
     let merchantReference = merchantTrace.slice(-20);
     let lineItems: Array<{ description: string; quantity: number; unitAmountMajor: number }> = [];
 
-    if (paymentContext === "BOOKING") {
+    if (paymentContext === "BOOKING" && parsed.data.cover_request_booking_id) {
+      const isStoreCover = !!parsed.data.store_id;
+      const { data: coverRow, error: coverError } = isStoreCover
+        ? await supabase
+            .from("store_orders")
+            .select("id, store_id, customer_user_id, cover_request_status, cover_request_amount, cover_request_due_at")
+            .eq("id", parsed.data.cover_request_booking_id)
+            .maybeSingle()
+        : await supabase
+            .from("restaurant_bookings")
+            .select("id, restaurant_id, customer_user_id, cover_request_status, cover_request_amount, cover_request_due_at")
+            .eq("id", parsed.data.cover_request_booking_id)
+            .maybeSingle();
+      if (coverError) return res.status(500).json({ error: coverError.message });
+      const coverBooking: any = coverRow;
+      if (!coverBooking || coverBooking.customer_user_id !== customer.userId) {
+        return res.status(404).json({ error: "Booking not found" });
+      }
+      const ownerId = isStoreCover ? coverBooking.store_id : coverBooking.restaurant_id;
+      if (ownerId !== (isStoreCover ? parsed.data.store_id : parsed.data.restaurant_id)) {
+        return res.status(400).json({ error: "The merchant does not match the booking" });
+      }
+      if (coverBooking.cover_request_status !== "requested" || !(Number(coverBooking.cover_request_amount) > 0)) {
+        return res.status(409).json({ error: "There is no cover charge to pay for this booking", code: "NO_COVER_REQUEST" });
+      }
+      if (coverBooking.cover_request_due_at && new Date(coverBooking.cover_request_due_at).getTime() <= Date.now()) {
+        return res.status(409).json({ error: "The time to pay this cover charge has passed", code: "COVER_REQUEST_EXPIRED" });
+      }
+      amountMajor = Number(coverBooking.cover_request_amount);
+      originalAmount = amountMajor;
+      discountAmount = 0;
+      discountSource = "NONE";
+      if (isStoreCover) storeId = coverBooking.store_id;
+      else restaurantId = coverBooking.restaurant_id;
+      contextPayload = {
+        restaurant_id: isStoreCover ? null : coverBooking.restaurant_id,
+        store_id: isStoreCover ? coverBooking.store_id : null,
+        cover_request_booking_id: coverBooking.id,
+        cover_request_kind: isStoreCover ? "store" : "restaurant",
+      };
+      paymentDetails = { flow: "BOOKING_COVER_REQUEST", instrument_type: null };
+      lineItems = [{ description: "Booking cover charge", quantity: 1, unitAmountMajor: amountMajor }];
+    } else if (paymentContext === "BOOKING" && parsed.data.store_id) {
+      const fee = await loadStoreBookingFee();
+      if (!(fee > 0)) {
+        return res.status(400).json({ error: "Selected booking does not require payment" });
+      }
+      const { data: storeRow, error: storeError } = await supabase
+        .from("stores")
+        .select("id, is_active")
+        .eq("id", parsed.data.store_id)
+        .maybeSingle();
+      if (storeError) return res.status(500).json({ error: storeError.message });
+      if (!storeRow || storeRow.is_active !== true) {
+        return res.status(404).json({ error: "Store not found", code: "STORE_NOT_FOUND" });
+      }
+      amountMajor = fee;
+      originalAmount = fee;
+      discountAmount = 0;
+      discountSource = "NONE";
+      storeId = storeRow.id;
+      contextPayload = {
+        store_id: storeRow.id,
+        service_booking_payload: parsed.data.service_booking_payload,
+      };
+      paymentDetails = { flow: "SERVICE_BOOKING", instrument_type: null };
+      lineItems = [{ description: "Appointment booking cover charge", quantity: 1, unitAmountMajor: fee }];
+    } else if (paymentContext === "BOOKING") {
       if (!parsed.data.booking_payload) {
         return res.status(400).json({ error: "booking_payload is required for BOOKING payment context" });
       }
@@ -1564,6 +1645,90 @@ router.post("/iveri/finalize-booking", async (req, res) => {
     }
     if (session.status !== "VERIFIED_SUCCESS") {
       return res.status(409).json({ error: "Payment session has not been verified as successful" });
+    }
+
+    const coverRequestBookingId = session.gateway_payload?.context_payload?.cover_request_booking_id;
+    const coverIsStore = session.gateway_payload?.context_payload?.cover_request_kind === "store";
+    if (coverRequestBookingId) {
+      const paymentReference = String(session.transaction_index ?? session.bank_reference ?? session.merchant_trace ?? "");
+      const { data: paidResult, error: paidError } = coverIsStore
+        ? await supabase.rpc("store_cover_request_paid", {
+            p_order_id: coverRequestBookingId,
+            p_amount: Number(session.amount_major),
+            p_reference: paymentReference,
+          })
+        : await supabase.rpc("booking_cover_request_paid", {
+            p_booking_id: coverRequestBookingId,
+            p_amount: Number(session.amount_major),
+            p_reference: paymentReference,
+          });
+      if (paidError) return res.status(500).json({ error: paidError.message });
+      if (!paidResult?.ok) {
+        console.error("[finalize booking][cover request] needs refund", {
+          session_id: session.id,
+          booking_id: coverRequestBookingId,
+          result: paidResult,
+        });
+        return res.status(409).json({
+          error: "This cover charge could no longer be applied. Your payment will be refunded.",
+          code: "COVER_REQUEST_REFUND",
+        });
+      }
+      const { data: coverBookingRow } = await supabase
+        .from(coverIsStore ? "store_orders" : "restaurant_bookings")
+        .select("*")
+        .eq("id", coverRequestBookingId)
+        .maybeSingle();
+      await updatePaymentSessionIfStatusIn({
+        sessionId: session.id,
+        allowedCurrentStatuses: ["VERIFIED_SUCCESS"],
+        updates: {
+          status: "FINALIZED",
+          context_reference_id: coverRequestBookingId,
+          gateway_payload: { ...(session.gateway_payload ?? {}), finalized_booking: coverBookingRow },
+        },
+      });
+      return res.json({
+        session_id: session.id,
+        tracking_id: session.tracking_id ?? null,
+        finalized: true,
+        booking: coverBookingRow,
+        booking_reference_id: coverRequestBookingId,
+      });
+    }
+
+    const servicePayload = session.gateway_payload?.context_payload?.service_booking_payload;
+    if (servicePayload) {
+      const parsedService = StoreServiceBookingPayloadSchema.safeParse(servicePayload);
+      if (!parsedService.success) {
+        return res.status(500).json({ error: "Stored booking payload is invalid" });
+      }
+      const serviceResult = await confirmStoreServiceBooking(parsedService.data, customer, supabase, {
+        amount: Number(session.amount_major),
+        method: "IVERI_HOSTED",
+        reference: session.transaction_index ?? session.bank_reference ?? session.merchant_trace ?? null,
+        paymentSessionId: session.id,
+      });
+      if (!serviceResult.ok) {
+        return res.status(serviceResult.status).json(serviceResult.body);
+      }
+      const serviceBooking: any = (serviceResult.body as any).booking;
+      await updatePaymentSessionIfStatusIn({
+        sessionId: session.id,
+        allowedCurrentStatuses: ["VERIFIED_SUCCESS"],
+        updates: {
+          status: "FINALIZED",
+          context_reference_id: serviceBooking?.id ?? null,
+          gateway_payload: { ...(session.gateway_payload ?? {}), finalized_booking: serviceBooking },
+        },
+      });
+      return res.json({
+        session_id: session.id,
+        tracking_id: session.tracking_id ?? null,
+        finalized: true,
+        booking: serviceBooking,
+        booking_reference_id: serviceBooking?.id ?? null,
+      });
     }
 
     const bookingPayload = session.gateway_payload?.context_payload?.booking_payload;
