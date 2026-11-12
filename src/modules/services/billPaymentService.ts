@@ -530,7 +530,7 @@ export async function finalizeBillPayment(params: {
       discount_amount: recalculated.discountAmount,
       cashback_amount: recalculated.cashbackAmount,
       final_paid_amount: recalculated.payableAmount,
-      payment_provider: "IVERI",
+      payment_provider: params.session.payment_provider ?? "IVERI",
       gateway_transaction_index: params.session.transaction_index ?? null,
       gateway_authorization_code: params.session.authorization_code ?? null,
       gateway_bank_reference: params.session.bank_reference ?? null,

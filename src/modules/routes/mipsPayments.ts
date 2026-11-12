@@ -6,6 +6,7 @@ import { requireAuth } from "../services/authService";
 import { validateCashbackSpend, earnTransactionCashback } from "../services/cashbackService";
 import { createPaymentSession, getPaymentSessionById, updatePaymentSession, updatePaymentSessionIfStatusIn } from "../services/paymentSessionService";
 import { decryptMiPSIMN, getMiPSConfig, loadMiPSPaymentZone, verifyMiPSChecksum } from "../services/mipsService";
+import { buildBillPaymentContext, finalizeBillPayment, BillPaymentValidationError } from "../services/billPaymentService";
 
 const router = Router();
 
@@ -14,6 +15,8 @@ const MiPSInitiateSchema = z.object({
   restaurant_id: z.string().uuid().optional(),
   store_id: z.string().uuid().optional(),
   total_amount: z.coerce.number().positive(),
+  bill_amount: z.coerce.number().positive().optional(),
+  booking_id: z.string().uuid().optional(),
   coins_amount: z.coerce.number().nonnegative().default(0),
   currency: z.string().trim().default("MUR"),
   custom_redirect_url: z.string().trim().optional(),
@@ -124,7 +127,42 @@ router.post("/initiate", async (req, res) => {
       return res.status(404).json({ ok: false, error: "Merchant not found" });
     }
 
-    const totalAmount = roundMoney(total_amount);
+    const sessionId = randomUUID();
+    let billContext: Awaited<ReturnType<typeof buildBillPaymentContext>> | null = null;
+    if (!order_items && parsed.data.bill_amount) {
+      billContext = await buildBillPaymentContext({
+        restaurant_id: restaurant_id ?? null,
+        store_id: store_id ?? null,
+        bill_amount: parsed.data.bill_amount,
+        booking_id: parsed.data.booking_id ?? null,
+        user_id: auth.user.id,
+        deal_session_id: null,
+      } as any);
+      if (billContext.deal) {
+        const { data: held, error: holdError } = await supabase.rpc("deal_hold", {
+          p_reveal_id: billContext.deal.revealId,
+          p_user_id: auth.user.id,
+          p_session_id: sessionId,
+        });
+        if (holdError) throw holdError;
+        if (held !== true) {
+          return res.status(409).json({ ok: false, error: "DEAL_IN_USE", message: "This deal is already being used for another payment. Please try again." });
+        }
+      }
+      if (billContext.coverCredit) {
+        const { data: held, error: holdError } = await supabase.rpc("booking_cover_hold", {
+          p_booking_id: billContext.coverCredit.bookingId,
+          p_user_id: auth.user.id,
+          p_session_id: sessionId,
+        });
+        if (holdError) throw holdError;
+        if (held !== true) {
+          return res.status(409).json({ ok: false, error: "COVER_CREDIT_IN_USE", message: "Your cover charge is already being used for another payment. Please try again." });
+        }
+      }
+    }
+
+    const totalAmount = billContext ? roundMoney(billContext.payableAmount) : roundMoney(total_amount);
     let orderPayload: { items: any[]; subtotal: number } | null = null;
     if (order_items) {
       if (!restaurant_id) {
@@ -163,6 +201,7 @@ router.post("/initiate", async (req, res) => {
     const config = getMiPSConfig();
 
     const session = await createPaymentSession({
+      id: sessionId,
       user_id: auth.user.id,
       payment_provider: "MIPS",
       payment_context,
@@ -173,8 +212,8 @@ router.post("/initiate", async (req, res) => {
       amount_major: customerAmount,
       amount_minor: Math.round(customerAmount * 100),
       currency_code: currency,
-      original_amount: totalAmount,
-      discount_amount: coinsAmount,
+      original_amount: billContext ? billContext.originalAmount : totalAmount,
+      discount_amount: roundMoney(coinsAmount + (billContext?.discountAmount ?? 0)),
       cashback_amount: coinsAmount,
       status: "CREATED",
       gateway_payload: {
@@ -183,14 +222,28 @@ router.post("/initiate", async (req, res) => {
         coins_redeemed: coinsAmount,
         bill_id,
         ...(orderPayload ? { order_payload: orderPayload } : {}),
-        ...(coinsAmount > 0
+        ...(coinsAmount > 0 || billContext
           ? {
               context_payload: {
-                wallet_spend: {
-                  amount: coinsAmount,
-                  merchant_user_id: merchant.owner_user_id,
-                  bill_amount: totalAmount,
-                },
+                ...(billContext
+                  ? {
+                      restaurant_id: restaurant_id ?? null,
+                      store_id: store_id ?? null,
+                      bill_payload: {
+                        bill_amount: billContext.originalAmount,
+                        ...(parsed.data.booking_id ? { booking_id: parsed.data.booking_id } : {}),
+                      },
+                    }
+                  : {}),
+                ...(coinsAmount > 0
+                  ? {
+                      wallet_spend: {
+                        amount: coinsAmount,
+                        merchant_user_id: merchant.owner_user_id,
+                        bill_amount: billContext ? billContext.originalAmount : totalAmount,
+                      },
+                    }
+                  : {}),
               },
             }
           : {}),
@@ -240,6 +293,9 @@ router.post("/initiate", async (req, res) => {
 
     return res.status(200).json({
       ok: true,
+      original_amount: billContext ? billContext.originalAmount : totalAmount,
+      discount_amount: billContext?.discountAmount ?? 0,
+      cover_credit_amount: billContext?.coverCredit?.amount ?? 0,
       session_id: session.id,
       merchant_trace: merchantTrace,
       total_amount: totalAmount,
@@ -249,6 +305,9 @@ router.post("/initiate", async (req, res) => {
       payment_zone_html: mipsResponse.paymentZoneData,
     });
   } catch (err: any) {
+    if (err instanceof BillPaymentValidationError) {
+      return res.status(err.status).json({ ok: false, error: "BILL_INVALID", message: err.message });
+    }
     console.error("[mipsPayments] Initiate error:", err);
     const walletError = err?.hint === "WALLET_SPEND_INVALID" || err?.code === "P0001";
     return res.status(walletError ? 400 : 500).json({
@@ -409,6 +468,24 @@ router.all("/imn", async (req, res) => {
       await createPaidOrder(claimed);
     } catch (orderErr: any) {
       console.error("[mipsPayments] Error creating order:", orderErr?.message || orderErr);
+    }
+
+    if (claimed.gateway_payload?.context_payload?.bill_payload && claimed.user_id) {
+      try {
+        const finalized = await finalizeBillPayment({ session: claimed, userId: claimed.user_id });
+        await updatePaymentSessionIfStatusIn({
+          sessionId: session.id,
+          allowedCurrentStatuses: ["VERIFIED_SUCCESS"],
+          updates: {
+            status: "FINALIZED",
+            context_reference_id: finalized.billPayment.id,
+            gateway_payload: { ...(claimed.gateway_payload ?? {}), finalized_bill_payment: finalized.billPayment },
+          },
+        });
+      } catch (finalizeErr: any) {
+        console.error("[mipsPayments] Bill finalize failed after payment", session.id, finalizeErr?.message || finalizeErr);
+      }
+      return res.status(200).send("success");
     }
 
     const paidAmount = Number(session.amount_major);

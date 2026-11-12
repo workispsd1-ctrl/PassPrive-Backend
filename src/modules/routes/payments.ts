@@ -1657,6 +1657,9 @@ router.post("/iveri/finalize-bill", async (req, res) => {
     if (session.payment_context !== "BILL_PAYMENT") {
       return res.status(400).json({ error: "Payment session is not a bill payment" });
     }
+    if (session.payment_provider === "MIPS") {
+      return res.status(400).json({ error: "This payment is confirmed automatically" });
+    }
     if (session.status === "FINALIZED") {
       return res.json({
         session_id: session.id,
