@@ -618,17 +618,9 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
     }
   }
 
-  const requestedCoverChargeRequired =
-    selectedOption?.coverChargeRequired === true ||
-    parseNumericSignal(selectedOption?.coverChargeAmount) > 0;
-
-  const verifiedCoverChargeAmount = requestedCoverChargeRequired
-    ? parseNumericSignal(
-        selectedOption?.coverChargeAmount ??
-          verifiedOffer?.cover_charge_amount ??
-          restaurant.cover_charge_amount
-      )
-    : 0;
+  const restaurantCoverCharge =
+    restaurant.cover_charge_enabled === true ? parseNumericSignal(restaurant.cover_charge_amount) : 0;
+  const verifiedCoverChargeAmount = restaurantCoverCharge > 0 ? restaurantCoverCharge : 0;
 
   return {
     ok: true as const,
