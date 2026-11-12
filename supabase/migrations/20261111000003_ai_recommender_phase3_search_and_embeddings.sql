@@ -279,3 +279,56 @@ begin
   end loop;
 end $$;
 
+-- 6. AUTOMATIC DATABASE TRIGGERS FOR CONTINUOUS DATA UPDATES
+-- Trigger function: runs automatically whenever relevant venue data changes
+create or replace function public.trigger_restaurant_data_changed()
+returns trigger
+language plpgsql
+as $$
+declare
+  target_id uuid;
+begin
+  if (TG_OP = 'DELETE') then
+    target_id := coalesce(OLD.restaurant_id, OLD.id);
+  else
+    target_id := coalesce(NEW.restaurant_id, NEW.id);
+  end if;
+
+  if target_id is not null then
+    -- 1. Refresh search facts (name, area, top dishes, rating, price band)
+    perform public.rebuild_restaurant_search_record(target_id);
+
+    -- 2. Enqueue for vector embedding update
+    insert into public.embedding_jobs (restaurant_id, queued_at, attempts)
+    values (target_id, now(), 0)
+    on conflict (restaurant_id) do update set queued_at = now();
+  end if;
+
+  return coalesce(NEW, OLD);
+end;
+$$;
+
+-- Trigger A: on restaurants table (when profile, location, cost, or menu_json changes)
+drop trigger if exists trg_restaurant_search_update on public.restaurants;
+create trigger trg_restaurant_search_update
+  after insert or update of name, area, city, full_address, latitude, longitude, cost_for_two, is_active, menu_json
+  on public.restaurants
+  for each row
+  execute function public.trigger_restaurant_data_changed();
+
+-- Trigger B: on restaurant_tags table (when mood, cuisine, or facility tags change)
+drop trigger if exists trg_restaurant_tags_search_update on public.restaurant_tags;
+create trigger trg_restaurant_tags_search_update
+  after insert or update or delete
+  on public.restaurant_tags
+  for each row
+  execute function public.trigger_restaurant_data_changed();
+
+-- Trigger C: on menu_items table (when dishes are added, edited, or deleted)
+drop trigger if exists trg_menu_items_search_update on public.menu_items;
+create trigger trg_menu_items_search_update
+  after insert or update or delete
+  on public.menu_items
+  for each row
+  execute function public.trigger_restaurant_data_changed();
+
