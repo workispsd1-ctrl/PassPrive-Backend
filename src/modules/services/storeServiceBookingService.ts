@@ -294,7 +294,8 @@ export async function confirmStoreServiceBooking(
     };
   }
 
-  const bookingFee = await loadStoreBookingFee(db);
+  const isRequestStore = String(store.service_level ?? "").trim().toLowerCase() === "discoverable";
+  const bookingFee = isRequestStore ? 0 : await loadStoreBookingFee(db);
   if (bookingFee > 0 && !verifiedPayment) {
     return {
       ok: false as const,
@@ -316,7 +317,6 @@ export async function confirmStoreServiceBooking(
   const paymentRequired = bookingFee > 0 || paymentAmount > 0;
   const paymentVerified = bookingFee > 0 ? !!verifiedPayment : !paymentRequired || isPaymentVerified(payment);
   const normalizedPaymentStatus = paymentRequired ? (paymentVerified ? "PAID" : "PENDING") : "PAID";
-  const isRequestStore = String(store.service_level ?? "").trim().toLowerCase() === "discoverable";
   const normalizedOrderStatus = paymentVerified && !isRequestStore ? "PLACED" : "NEW";
   const prepaid = verifiedPayment ? Number(verifiedPayment.amount) : 0;
 

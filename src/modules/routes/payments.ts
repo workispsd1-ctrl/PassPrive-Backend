@@ -1635,6 +1635,9 @@ router.post("/iveri/finalize-booking", async (req, res) => {
     if (session.payment_context !== "BOOKING") {
       return res.status(400).json({ error: "Payment session is not a booking payment" });
     }
+    if (String(session.payment_provider ?? "").toUpperCase() === "MIPS") {
+      return res.status(400).json({ error: "This payment is completed automatically", code: "MIPS_SESSION" });
+    }
     if (session.status === "FINALIZED") {
       return res.json({
         session_id: session.id,

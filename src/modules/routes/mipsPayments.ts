@@ -7,11 +7,25 @@ import { validateCashbackSpend, earnTransactionCashback } from "../services/cash
 import { createPaymentSession, getPaymentSessionById, updatePaymentSession, updatePaymentSessionIfStatusIn } from "../services/paymentSessionService";
 import { decryptMiPSIMN, getMiPSConfig, loadMiPSPaymentZone, verifyMiPSChecksum } from "../services/mipsService";
 import { buildBillPaymentContext, finalizeBillPayment, BillPaymentValidationError } from "../services/billPaymentService";
+import { getAuthenticatedCustomer, type AuthenticatedCustomer } from "../services/authService";
+import {
+  BookingPayloadSchema,
+  confirmRestaurantBooking,
+  evaluateBookingPaymentRequirement,
+} from "../services/restaurantBookingService";
+import {
+  StoreServiceBookingPayloadSchema,
+  confirmStoreServiceBooking,
+  loadStoreBookingFee,
+} from "../services/storeServiceBookingService";
 
 const router = Router();
 
 const MiPSInitiateSchema = z.object({
-  payment_context: z.literal("BILL_PAYMENT"),
+  payment_context: z.enum(["BILL_PAYMENT", "BOOKING"]),
+  booking_payload: BookingPayloadSchema.optional(),
+  service_booking_payload: StoreServiceBookingPayloadSchema.optional(),
+  cover_request_booking_id: z.string().uuid().optional(),
   restaurant_id: z.string().uuid().optional(),
   store_id: z.string().uuid().optional(),
   total_amount: z.coerce.number().positive(),
@@ -29,6 +43,127 @@ const MiPSInitiateSchema = z.object({
 });
 
 const roundMoney = (value: number) => Math.round(value * 100) / 100;
+
+type BookingKind = "restaurant_booking" | "store_booking" | "restaurant_cover" | "store_cover";
+
+async function resolveBookingContext(
+  data: z.infer<typeof MiPSInitiateSchema>,
+  customer: AuthenticatedCustomer
+): Promise<{ ok: true; amount: number; payload: Record<string, any> } | { ok: false; status: number; error: string; message: string }> {
+  const customerSnapshot = {
+    userId: customer.userId,
+    fullName: customer.fullName,
+    phone: customer.phone,
+    email: customer.email,
+  };
+  if (data.cover_request_booking_id) {
+    const isStore = !!data.store_id;
+    const { data: row, error } = isStore
+      ? await supabase
+          .from("store_orders")
+          .select("id, store_id, customer_user_id, cover_request_status, cover_request_amount, cover_request_due_at")
+          .eq("id", data.cover_request_booking_id)
+          .maybeSingle()
+      : await supabase
+          .from("restaurant_bookings")
+          .select("id, restaurant_id, customer_user_id, cover_request_status, cover_request_amount, cover_request_due_at")
+          .eq("id", data.cover_request_booking_id)
+          .maybeSingle();
+    if (error) throw error;
+    const booking: any = row;
+    if (!booking || booking.customer_user_id !== customer.userId) {
+      return { ok: false, status: 404, error: "BOOKING_NOT_FOUND", message: "Booking not found" };
+    }
+    const owner = isStore ? booking.store_id : booking.restaurant_id;
+    if (owner !== (isStore ? data.store_id : data.restaurant_id)) {
+      return { ok: false, status: 400, error: "MERCHANT_MISMATCH", message: "The merchant does not match the booking" };
+    }
+    if (booking.cover_request_status !== "requested" || !(Number(booking.cover_request_amount) > 0)) {
+      return { ok: false, status: 409, error: "NO_COVER_REQUEST", message: "There is no cover charge to pay for this booking" };
+    }
+    if (booking.cover_request_due_at && new Date(booking.cover_request_due_at).getTime() <= Date.now()) {
+      return { ok: false, status: 409, error: "COVER_REQUEST_EXPIRED", message: "The time to pay this cover charge has passed" };
+    }
+    const kind: BookingKind = isStore ? "store_cover" : "restaurant_cover";
+    return {
+      ok: true,
+      amount: roundMoney(Number(booking.cover_request_amount)),
+      payload: { booking_kind: kind, cover_request_booking_id: booking.id, customer: customerSnapshot },
+    };
+  }
+  if (data.store_id) {
+    if (!data.service_booking_payload) {
+      return { ok: false, status: 400, error: "BOOKING_INVALID", message: "Appointment details are missing" };
+    }
+    const { data: storeRow, error: storeError } = await supabase
+      .from("stores")
+      .select("service_level")
+      .eq("id", data.store_id)
+      .maybeSingle();
+    if (storeError) throw storeError;
+    const fee = String(storeRow?.service_level ?? "").toLowerCase() === "discoverable" ? 0 : await loadStoreBookingFee();
+    if (!(fee > 0)) {
+      return { ok: false, status: 400, error: "NO_PAYMENT_REQUIRED", message: "This booking does not require payment" };
+    }
+    return {
+      ok: true,
+      amount: roundMoney(fee),
+      payload: { booking_kind: "store_booking", service_booking_payload: data.service_booking_payload, customer: customerSnapshot },
+    };
+  }
+  if (!data.booking_payload) {
+    return { ok: false, status: 400, error: "BOOKING_INVALID", message: "Booking details are missing" };
+  }
+  const evaluation = await evaluateBookingPaymentRequirement(data.booking_payload, customer);
+  if (!evaluation.ok) {
+    const body: any = evaluation.body;
+    return { ok: false, status: evaluation.status, error: body?.code || "BOOKING_INVALID", message: body?.error || "This slot can't be booked" };
+  }
+  if (!evaluation.paymentRequired) {
+    return { ok: false, status: 400, error: "NO_PAYMENT_REQUIRED", message: "This booking does not require payment" };
+  }
+  return {
+    ok: true,
+    amount: roundMoney(evaluation.verifiedCoverChargeAmount),
+    payload: { booking_kind: "restaurant_booking", booking_payload: data.booking_payload, customer: customerSnapshot },
+  };
+}
+
+async function finalizeMipsBooking(session: any) {
+  const ctx = session.gateway_payload?.context_payload ?? {};
+  const kind: BookingKind = ctx.booking_kind;
+  const reference = String(session.gateway_payload?.imn_decrypted?.transaction_id ?? session.merchant_trace ?? session.id);
+  const amount = Number(session.amount_major);
+  if (kind === "restaurant_cover" || kind === "store_cover") {
+    const { data, error } =
+      kind === "store_cover"
+        ? await supabase.rpc("store_cover_request_paid", { p_order_id: ctx.cover_request_booking_id, p_amount: amount, p_reference: reference })
+        : await supabase.rpc("booking_cover_request_paid", { p_booking_id: ctx.cover_request_booking_id, p_amount: amount, p_reference: reference });
+    if (error) throw error;
+    if (!data?.ok) throw new Error(`cover request could not be applied: ${data?.error}`);
+    return ctx.cover_request_booking_id as string;
+  }
+  const customer: AuthenticatedCustomer = ctx.customer;
+  if (kind === "store_booking") {
+    const result = await confirmStoreServiceBooking(StoreServiceBookingPayloadSchema.parse(ctx.service_booking_payload), customer, supabase, {
+      amount,
+      method: "MIPS",
+      reference,
+      paymentSessionId: session.id,
+    });
+    if (!result.ok) throw new Error(`store booking failed: ${JSON.stringify(result.body)}`);
+    return (result.body as any).booking?.id as string;
+  }
+  const result = await confirmRestaurantBooking(
+    {
+      ...BookingPayloadSchema.parse(ctx.booking_payload),
+      payment: { amount, status: "verified", method: "MIPS", reference, verified: true, paymentSessionId: session.id } as any,
+    },
+    customer
+  );
+  if (!result.ok) throw new Error(`restaurant booking failed: ${JSON.stringify(result.body)}`);
+  return (result.body as any).booking?.id as string;
+}
 
 const clip = (value: unknown, max = 600) => {
   const text = typeof value === "string" ? value : JSON.stringify(value ?? null);
@@ -128,8 +263,18 @@ router.post("/initiate", async (req, res) => {
     }
 
     const sessionId = randomUUID();
+    let bookingContext: { amount: number; payload: Record<string, any> } | null = null;
+    if (payment_context === "BOOKING") {
+      const customer = await getAuthenticatedCustomer(req, res);
+      if (!customer) return;
+      const resolved = await resolveBookingContext(parsed.data, customer);
+      if (!resolved.ok) {
+        return res.status(resolved.status).json({ ok: false, error: resolved.error, message: resolved.message });
+      }
+      bookingContext = { amount: resolved.amount, payload: resolved.payload };
+    }
     let billContext: Awaited<ReturnType<typeof buildBillPaymentContext>> | null = null;
-    if (!order_items && parsed.data.bill_amount) {
+    if (!bookingContext && !order_items && parsed.data.bill_amount) {
       billContext = await buildBillPaymentContext({
         restaurant_id: restaurant_id ?? null,
         store_id: store_id ?? null,
@@ -162,7 +307,11 @@ router.post("/initiate", async (req, res) => {
       }
     }
 
-    const totalAmount = billContext ? roundMoney(billContext.payableAmount) : roundMoney(total_amount);
+    const totalAmount = bookingContext
+      ? bookingContext.amount
+      : billContext
+        ? roundMoney(billContext.payableAmount)
+        : roundMoney(total_amount);
     let orderPayload: { items: any[]; subtotal: number } | null = null;
     if (order_items) {
       if (!restaurant_id) {
@@ -176,7 +325,7 @@ router.post("/initiate", async (req, res) => {
         return res.status(400).json({ ok: false, error: "ORDER_TOTAL_MISMATCH", message: "Menu prices have changed. Please review your order." });
       }
     }
-    let coinsAmount = roundMoney(parsed.data.coins_amount);
+    let coinsAmount = bookingContext ? 0 : roundMoney(parsed.data.coins_amount);
     if (coinsAmount > 0) {
       const merchantUserId = merchant.owner_user_id as string | null;
       if (!merchantUserId) {
@@ -222,7 +371,8 @@ router.post("/initiate", async (req, res) => {
         coins_redeemed: coinsAmount,
         bill_id,
         ...(orderPayload ? { order_payload: orderPayload } : {}),
-        ...(coinsAmount > 0 || billContext
+        ...(bookingContext ? { context_payload: { restaurant_id: restaurant_id ?? null, store_id: store_id ?? null, ...bookingContext.payload } } : {}),
+        ...(!bookingContext && (coinsAmount > 0 || billContext)
           ? {
               context_payload: {
                 ...(billContext
@@ -468,6 +618,20 @@ router.all("/imn", async (req, res) => {
       await createPaidOrder(claimed);
     } catch (orderErr: any) {
       console.error("[mipsPayments] Error creating order:", orderErr?.message || orderErr);
+    }
+
+    if (claimed.gateway_payload?.context_payload?.booking_kind) {
+      try {
+        const referenceId = await finalizeMipsBooking(claimed);
+        await updatePaymentSessionIfStatusIn({
+          sessionId: session.id,
+          allowedCurrentStatuses: ["VERIFIED_SUCCESS"],
+          updates: { status: "FINALIZED", context_reference_id: referenceId ?? null },
+        });
+      } catch (bookingErr: any) {
+        console.error("[mipsPayments] Booking finalize failed after payment, refund needed", session.id, bookingErr?.message || bookingErr);
+      }
+      return res.status(200).send("success");
     }
 
     if (claimed.gateway_payload?.context_payload?.bill_payload && claimed.user_id) {

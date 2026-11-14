@@ -629,7 +629,9 @@ export async function evaluateBookingPaymentRequirement(body: BookingPayload, cu
 
   const restaurantCoverCharge =
     restaurant.cover_charge_enabled === true ? parseNumericSignal(restaurant.cover_charge_amount) : 0;
-  const verifiedCoverChargeAmount = Math.max(bookingFeeAmount, restaurantCoverCharge > 0 ? restaurantCoverCharge : 0);
+  const verifiedCoverChargeAmount = isRequestBooking(restaurant)
+    ? 0
+    : Math.max(bookingFeeAmount, restaurantCoverCharge > 0 ? restaurantCoverCharge : 0);
 
   return {
     ok: true as const,
