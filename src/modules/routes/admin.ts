@@ -122,6 +122,54 @@ router.put("/users/:userId", async (req, res) => {
   return res.status(200).json({ success: true, message: "User updated successfully" });
 });
 
+const MERCHANT_LOGIN_ROLES = new Set(["restaurantpartner", "restaurantadmin", "storepartner", "storeowner", "storemanager"]);
+
+router.put("/users/:userId/credentials", async (req, res) => {
+  const caller = await getCallerInfo(req);
+  if (!caller) return res.status(401).json({ error: "Unauthorized" });
+  if (caller.role !== "admin" && caller.role !== "superadmin") {
+    return res.status(403).json({ error: "Access denied" });
+  }
+
+  const targetId = String(req.params.userId ?? "").trim();
+  const email = typeof req.body?.email === "string" ? req.body.email.trim().toLowerCase() : "";
+  const password = typeof req.body?.password === "string" ? req.body.password : "";
+  if (!targetId) return res.status(400).json({ error: "Invalid user id" });
+  if (!email && !password) return res.status(400).json({ error: "Enter a new email or password" });
+  if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({ error: "Enter a valid email" });
+  if (password && password.length < 8) return res.status(400).json({ error: "Password must be at least 8 characters" });
+
+  const { data: target, error: targetError } = await supabaseService
+    .from("users")
+    .select("id, role")
+    .eq("id", targetId)
+    .maybeSingle();
+  if (targetError) return res.status(500).json({ error: targetError.message });
+  if (!target) return res.status(404).json({ error: "User not found" });
+  if (!MERCHANT_LOGIN_ROLES.has(normalizeRoleValue(target.role))) {
+    return res.status(403).json({ error: "Only merchant logins can be changed here" });
+  }
+
+  const authUpdate: any = {};
+  if (email) {
+    authUpdate.email = email;
+    authUpdate.email_confirm = true;
+  }
+  if (password) authUpdate.password = password;
+  const { error: authError } = await supabaseService.auth.admin.updateUserById(targetId, authUpdate);
+  if (authError) return res.status(400).json({ error: authError.message });
+
+  if (email) {
+    const { error: profileError } = await supabaseService
+      .from("users")
+      .update({ email, updated_at: new Date().toISOString() })
+      .eq("id", targetId);
+    if (profileError) return res.status(500).json({ error: profileError.message });
+  }
+
+  return res.status(200).json({ success: true });
+});
+
 /* ---------------------------------------------
    DELETE USER (DELETE /api/auth/users/:userId)
 --------------------------------------------- */

@@ -1,5 +1,6 @@
 import https from "https";
 import { createHash, timingSafeEqual } from "crypto";
+import supabase from "../../database/supabase";
 
 export interface MiPSAuthentify {
   id_merchant: string;
@@ -61,6 +62,53 @@ function requiredEnv(name: string): string {
   return value.trim();
 }
 
+export type MerchantKind = "restaurant" | "store";
+
+export type MerchantMiPSIds = { id_merchant: string; id_entity: string };
+
+type RpcClient = { rpc: (fn: string, args: any) => PromiseLike<{ data: any; error: any }> };
+
+export async function getMerchantMiPSIds(
+  kind: MerchantKind,
+  merchantId: string,
+  db: RpcClient = supabase
+): Promise<MerchantMiPSIds | null> {
+  const { data, error } = await db.rpc("get_merchant_mips_credentials", { p_kind: kind, p_merchant_id: merchantId });
+  if (error) throw new Error(`Failed to read MiPS credentials: ${error.message}`);
+  const idMerchant = typeof data?.id_merchant === "string" ? data.id_merchant.trim() : "";
+  const idEntity = typeof data?.id_entity === "string" ? data.id_entity.trim() : "";
+  return idMerchant && idEntity ? { id_merchant: idMerchant, id_entity: idEntity } : null;
+}
+
+export async function setMerchantMiPSIds(kind: MerchantKind, merchantId: string, ids: MerchantMiPSIds): Promise<void> {
+  const { error } = await supabase.rpc("set_merchant_mips_credentials", {
+    p_kind: kind,
+    p_merchant_id: merchantId,
+    p_id_merchant: ids.id_merchant,
+    p_app_id: ids.id_entity,
+  });
+  if (error) throw new Error(`Failed to store MiPS credentials: ${error.message}`);
+}
+
+export async function deleteMerchantMiPSIds(kind: MerchantKind, merchantId: string): Promise<void> {
+  const { error } = await supabase.rpc("delete_merchant_mips_credentials", { p_kind: kind, p_merchant_id: merchantId });
+  if (error) throw new Error(`Failed to remove MiPS credentials: ${error.message}`);
+}
+
+export async function getMiPSConfigForMerchant(
+  restaurantId?: string | null,
+  storeId?: string | null,
+  db: RpcClient = supabase
+) {
+  const config = getMiPSConfig();
+  const ids = restaurantId
+    ? await getMerchantMiPSIds("restaurant", restaurantId, db)
+    : storeId
+      ? await getMerchantMiPSIds("store", storeId, db)
+      : null;
+  return ids ? { ...config, authentify: { ...config.authentify, ...ids } } : config;
+}
+
 export function getMiPSConfig() {
   const baseUrl = requiredEnv("MIPS_BASE_URL").replace(/\/+$/, "");
   const authUser = requiredEnv("MIPS_BASIC_USER");
@@ -106,8 +154,11 @@ export function verifyMiPSChecksum(data: any, salt: string): boolean {
   return a.length === b.length && timingSafeEqual(a, b);
 }
 
-function callMiPSApi(endpoint: string, payload: any): Promise<{ statusCode: number; data: any; rawBody: string }> {
-  const config = getMiPSConfig();
+function callMiPSApi(
+  endpoint: string,
+  payload: any,
+  config: ReturnType<typeof getMiPSConfig> = getMiPSConfig()
+): Promise<{ statusCode: number; data: any; rawBody: string }> {
   const dataString = JSON.stringify(payload);
   const url = new URL(`${config.baseUrl}${endpoint}`);
 
@@ -147,8 +198,10 @@ function callMiPSApi(endpoint: string, payload: any): Promise<{ statusCode: numb
 /**
  * Initiates a MiPS payment zone with support for split payments (coins/cashback adjustment).
  */
-export async function loadMiPSPaymentZone(params: MiPSLoadPaymentZoneParams) {
-  const config = getMiPSConfig();
+export async function loadMiPSPaymentZone(
+  params: MiPSLoadPaymentZoneParams,
+  config: ReturnType<typeof getMiPSConfig> = getMiPSConfig()
+) {
   const coinsAmount = Math.max(0, params.coinsAmount || 0);
   const totalAmount = Math.max(0, params.totalAmount);
   const customerAmount = Math.max(0, totalAmount - coinsAmount);
@@ -200,7 +253,7 @@ export async function loadMiPSPaymentZone(params: MiPSLoadPaymentZoneParams) {
   }
   payload.additional_params = additional_params;
 
-  const res = await callMiPSApi("/load_payment_zone", payload);
+  const res = await callMiPSApi("/load_payment_zone", payload, config);
   return {
     statusCode: res.statusCode,
     ok: res.statusCode === 200 && res.data?.answer?.operation_status === "success",
@@ -213,8 +266,10 @@ export async function loadMiPSPaymentZone(params: MiPSLoadPaymentZoneParams) {
 /**
  * Decrypts MiPS Instant Merchant Notification (IMN) webhook data.
  */
-export async function decryptMiPSIMN(cryptedCallback: string) {
-  const config = getMiPSConfig();
+export async function decryptMiPSIMN(
+  cryptedCallback: string,
+  config: ReturnType<typeof getMiPSConfig> = getMiPSConfig()
+) {
   const payload = {
     authentify: config.authentify,
     salt: config.hashSalt,
@@ -222,7 +277,7 @@ export async function decryptMiPSIMN(cryptedCallback: string) {
     received_crypted_data: cryptedCallback,
   };
 
-  const res = await callMiPSApi("/decrypt_imn_data", payload);
+  const res = await callMiPSApi("/decrypt_imn_data", payload, config);
   return {
     statusCode: res.statusCode,
     ok: res.statusCode === 200,
