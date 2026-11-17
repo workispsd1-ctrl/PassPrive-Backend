@@ -33,6 +33,7 @@ import Gifts from "./modules/routes/gifts";
 import GiftEvents from "./modules/routes/giftEvents";
 import Cashback from "./modules/routes/cashback";
 import posIntegrationsRouter from "./modules/routes/posIntegrations";
+import aiChatRouter from "./modules/routes/aiChat";
 import { requestTelemetryMiddleware } from "./modules/middleware/requestTelemetry";
 import { rateLimitMiddleware } from "./modules/middleware/rateLimit";
 
@@ -173,6 +174,7 @@ app.use("/api/gifts", Gifts);
 app.use("/api/gift-events", GiftEvents);
 app.use("/api/cashback", Cashback);
 app.use("/api/pos", posIntegrationsRouter);
+app.use("/api/ai-chat", aiChatRouter);
 
 // 404 Catch-all Logger
 app.use((req, res) => {
