@@ -87,6 +87,28 @@ router.put("/users/:userId", async (req, res) => {
     return res.status(403).json({ error: "Access denied. Insufficient permissions." });
   }
 
+  if (newRole !== undefined && newRole !== null && newRole !== "") {
+    if (!isSuperAdmin) {
+      return res.status(403).json({ error: "Only a superadmin can change roles." });
+    }
+    if (isSelf) {
+      return res.status(403).json({ error: "You cannot change your own role." });
+    }
+  }
+
+  if (isAdminComp && !isSelf) {
+    const { data: target, error: targetError } = await supabaseService
+      .from("users")
+      .select("role")
+      .eq("id", targetId)
+      .maybeSingle();
+    if (targetError) return res.status(500).json({ error: "Failed to verify target role" });
+    if (!target) return res.status(404).json({ error: "User not found" });
+    if (["admin", "superadmin"].includes(normalizeRoleValue(target.role))) {
+      return res.status(403).json({ error: "Admins cannot edit other admin accounts." });
+    }
+  }
+
   // 1. Prepare Public Profile Update
   const updateData: any = { 
     full_name, 
@@ -95,7 +117,7 @@ router.put("/users/:userId", async (req, res) => {
   };
 
   // Only Admin/SuperAdmin can change roles
-  if ((isSuperAdmin || isAdminComp) && newRole) {
+  if (isSuperAdmin && newRole) {
     updateData.role = newRole;
   }
 
