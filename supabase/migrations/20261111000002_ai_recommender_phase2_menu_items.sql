@@ -56,6 +56,7 @@ create index if not exists idx_menu_items_name_trgm
 
 -- 3. ENHANCED HELPER FUNCTION TO DERIVE COURSE FROM SECTION & SUBCATEGORY NAME
 -- Tailored to real production section/subcategory names (including Mauritian/Creole/French dining terms)
+drop function if exists public.derive_menu_course(text);
 create or replace function public.derive_menu_course(section_name text, subcategory_name text default null)
 returns text
 language plpgsql
