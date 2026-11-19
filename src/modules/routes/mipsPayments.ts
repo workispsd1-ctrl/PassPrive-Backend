@@ -509,7 +509,7 @@ router.post("/initiate", async (req, res) => {
       status: "PENDING",
       gateway_payload: {
         ...(session.gateway_payload ?? {}),
-        mips_init_response: mipsResponse.data,
+        mips_init_response: { operation_status: mipsResponse.data?.answer?.operation_status ?? null },
       },
     });
 
