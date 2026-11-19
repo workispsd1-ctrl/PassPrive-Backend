@@ -288,6 +288,11 @@ as $$
 declare
   target_id uuid;
 begin
+  -- Avoid redundant nested rebuilds when sync_restaurant_menu_json_to_menu_items modifies menu_items
+  if pg_trigger_depth() > 1 then
+    return coalesce(NEW, OLD);
+  end if;
+
   if (TG_OP = 'DELETE') then
     target_id := coalesce(OLD.restaurant_id, OLD.id);
   else
@@ -295,6 +300,13 @@ begin
   end if;
 
   if target_id is not null then
+    -- 0. If restaurants.menu_json changed, re-sync normalized menu_items first
+    if TG_TABLE_NAME = 'restaurants' and TG_OP in ('INSERT', 'UPDATE') then
+      if TG_OP = 'INSERT' or (NEW.menu_json is distinct from OLD.menu_json) then
+        perform public.sync_restaurant_menu_json_to_menu_items(NEW.id);
+      end if;
+    end if;
+
     -- 1. Refresh search facts (name, area, top dishes, rating, price band)
     perform public.rebuild_restaurant_search_record(target_id);
 
