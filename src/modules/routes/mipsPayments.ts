@@ -2,10 +2,10 @@ import { Router } from "express";
 import { z } from "zod";
 import { randomUUID } from "crypto";
 import supabase from "../../database/supabase";
-import { requireAuth } from "../services/authService";
+import { getBearerToken, requireAdmin, requireAuth } from "../services/authService";
 import { validateCashbackSpend, earnTransactionCashback } from "../services/cashbackService";
 import { createPaymentSession, getPaymentSessionById, updatePaymentSession, updatePaymentSessionIfStatusIn } from "../services/paymentSessionService";
-import { decryptMiPSIMN, getMiPSConfig, loadMiPSPaymentZone, verifyMiPSChecksum } from "../services/mipsService";
+import { decryptMiPSIMN, getMiPSConfig, getMiPSConfigForMerchant, getMerchantMiPSIds, setMerchantMiPSIds, deleteMerchantMiPSIds, type MerchantKind, loadMiPSPaymentZone, verifyMiPSChecksum } from "../services/mipsService";
 import { buildBillPaymentContext, finalizeBillPayment, BillPaymentValidationError } from "../services/billPaymentService";
 import { getAuthenticatedCustomer, type AuthenticatedCustomer } from "../services/authService";
 import {
@@ -236,6 +236,78 @@ const MiPSClientEventSchema = z.object({
   detail: z.any().optional(),
 });
 
+const maskId = (value: string) => (value.length <= 4 ? "••••" : `••••${value.slice(-4)}`);
+
+const MerchantCredsSchema = z.object({
+  id_merchant: z.string().trim().min(1).max(200),
+  app_id: z.string().trim().min(1).max(200),
+});
+
+async function adminMerchant(req: any, res: any): Promise<{ kind: MerchantKind; id: string } | null> {
+  if (!getBearerToken(req)) {
+    res.status(401).json({ ok: false, error: "Unauthorized" });
+    return null;
+  }
+  if (!(await requireAdmin(req, res))) return null;
+  const kind = req.params.kind;
+  const id = String(req.params.merchantId || "");
+  if ((kind !== "restaurant" && kind !== "store") || !z.string().uuid().safeParse(id).success) {
+    res.status(400).json({ ok: false, error: "Invalid merchant" });
+    return null;
+  }
+  return { kind, id };
+}
+
+router.get("/admin/:kind/:merchantId/credentials", async (req, res) => {
+  const merchant = await adminMerchant(req, res);
+  if (!merchant) return;
+  try {
+    const ids = await getMerchantMiPSIds(merchant.kind, merchant.id);
+    return res.json({
+      ok: true,
+      configured: !!ids,
+      id_merchant_hint: ids ? maskId(ids.id_merchant) : null,
+      app_id_hint: ids ? maskId(ids.id_entity) : null,
+    });
+  } catch (err: any) {
+    console.error("[mips:admin] read failed", merchant.id, err?.message);
+    return res.status(500).json({ ok: false, error: "Could not read MiPS credentials" });
+  }
+});
+
+router.put("/admin/:kind/:merchantId/credentials", async (req, res) => {
+  const merchant = await adminMerchant(req, res);
+  if (!merchant) return;
+  const parsed = MerchantCredsSchema.safeParse(req.body);
+  if (!parsed.success) {
+    return res.status(400).json({ ok: false, error: "Merchant ID and App ID are required" });
+  }
+  try {
+    await setMerchantMiPSIds(merchant.kind, merchant.id, { id_merchant: parsed.data.id_merchant, id_entity: parsed.data.app_id });
+    return res.json({
+      ok: true,
+      configured: true,
+      id_merchant_hint: maskId(parsed.data.id_merchant),
+      app_id_hint: maskId(parsed.data.app_id),
+    });
+  } catch (err: any) {
+    console.error("[mips:admin] save failed", merchant.id, err?.message);
+    return res.status(500).json({ ok: false, error: "Could not save MiPS credentials" });
+  }
+});
+
+router.delete("/admin/:kind/:merchantId/credentials", async (req, res) => {
+  const merchant = await adminMerchant(req, res);
+  if (!merchant) return;
+  try {
+    await deleteMerchantMiPSIds(merchant.kind, merchant.id);
+    return res.json({ ok: true, configured: false, id_merchant_hint: null, app_id_hint: null });
+  } catch (err: any) {
+    console.error("[mips:admin] delete failed", merchant.id, err?.message);
+    return res.status(500).json({ ok: false, error: "Could not remove MiPS credentials" });
+  }
+});
+
 router.post("/initiate", async (req, res) => {
   const auth = await requireAuth(req, res);
   if (!auth) return;
@@ -261,6 +333,7 @@ router.post("/initiate", async (req, res) => {
     if (!merchant) {
       return res.status(404).json({ ok: false, error: "Merchant not found" });
     }
+    const config = await getMiPSConfigForMerchant(restaurant_id, store_id);
 
     const sessionId = randomUUID();
     let bookingContext: { amount: number; payload: Record<string, any> } | null = null;
@@ -347,7 +420,6 @@ router.post("/initiate", async (req, res) => {
     const customerAmount = roundMoney(Math.max(0, totalAmount - coinsAmount));
     const merchantTrace = `PP_MIPS_${Date.now()}_${randomUUID().slice(0, 8)}`;
     const redemptionId = coinsAmount > 0 ? `RED_${Date.now()}_${randomUUID().slice(0, 6)}` : undefined;
-    const config = getMiPSConfig();
 
     const session = await createPaymentSession({
       id: sessionId,
@@ -417,7 +489,7 @@ router.post("/initiate", async (req, res) => {
       redemptionId,
       userRef: auth.user.id,
       customRedirectUrl: custom_redirect_url,
-    });
+    }, config);
 
     if (!mipsResponse.ok || !mipsResponse.paymentZoneData) {
       console.error("[mips:initiate] load_payment_zone failed", session.id, mipsResponse.statusCode, clip(mipsResponse.rawBody));
@@ -529,7 +601,12 @@ router.all("/imn", async (req, res) => {
       return res.status(400).send("Missing crypted_callback parameter");
     }
 
-    const decrypted = await decryptMiPSIMN(String(cryptedCallback));
+    const hinted = idOrder ? await getPaymentSessionById(idOrder).catch(() => null) : null;
+    const decryptConfig =
+      hinted?.payment_provider === "MIPS"
+        ? await getMiPSConfigForMerchant(hinted.restaurant_id, hinted.store_id)
+        : getMiPSConfig();
+    const decrypted = await decryptMiPSIMN(String(cryptedCallback), decryptConfig);
     const data =
       decrypted.data && typeof decrypted.data === "object" && decrypted.data.operation_status !== "error"
         ? decrypted.data
